@@ -1081,6 +1081,11 @@ class FeishuChannel(BaseChannel):
         self.logger.info("bot started with WebSocket long connection")
         self.logger.info("No public IP required - using WebSocket to receive events")
 
+        # Expose the live channel so agent tools can call the Feishu API.
+        from nanobot.channels.runtime_registry import register_channel
+
+        register_channel(self)
+
         # Keep running until stopped
         while self._running:
             await asyncio.sleep(1)
@@ -1094,6 +1099,9 @@ class FeishuChannel(BaseChannel):
         Reference: https://github.com/larksuite/oapi-sdk-python/blob/v2_main/lark_oapi/ws/client.py#L86
         """
         self._running = False
+        from nanobot.channels.runtime_registry import unregister_channel
+
+        unregister_channel(self.name)
         await self._ws_runner.stop_client(self.name)
         self.logger.info("bot stopped")
 
@@ -1864,6 +1872,251 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             self.logger.debug("error fetching parent message {}: {}", message_id, e)
             return None
+
+    def get_chat_history_sync(
+        self,
+        chat_id: str,
+        limit: int = 20,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch messages in a chat visible to the bot (synchronous).
+
+        Returns a list of ``{sender_id, msg_type, text, create_time_ms, image_keys, file_key,
+        file_name}`` dicts ordered oldest → newest. Only works for chats the bot is a member
+        of, and only covers messages the bot is authorised to read.
+
+        ``start_time_ms`` / ``end_time_ms`` filter by create_time (Feishu expects
+        seconds-precision strings start_time/end_time).  When a window is given we page
+        backwards from the newest message until we leave the window, collecting matches.
+        """
+        from lark_oapi.api.im.v1 import ListMessageRequest
+
+        limit = max(1, min(int(limit), 100))
+        try:
+            out: list[dict[str, Any]] = []
+            page_token: str | None = None
+            # Without an explicit window, one page of newest messages is enough.
+            # With a window, keep paging (up to 5 pages) until items fall before start.
+            max_pages = 5 if (start_time_ms or end_time_ms) else 1
+
+            for _ in range(max_pages):
+                builder = (
+                    ListMessageRequest.builder()
+                    .container_id_type("chat")
+                    .container_id(chat_id)
+                    .page_size(50)
+                    .sort_type("ByCreateTimeDesc")
+                )
+                if start_time_ms:
+                    # Feishu expects integer-second strings, not floats.
+                    builder.start_time(str(int(start_time_ms // 1000)))
+                if end_time_ms:
+                    builder.end_time(str(int(end_time_ms // 1000)))
+                if page_token:
+                    builder.page_token(page_token)
+                response = self._client.im.v1.message.list(builder.build())
+                if not response.success():
+                    self.logger.warning(
+                        "list chat history failed: code={}, msg={}", response.code, response.msg
+                    )
+                    break
+                items = getattr(response.data, "items", None) or []
+                if not items:
+                    break
+
+                for msg_obj in items:
+                    ct_ms = getattr(msg_obj, "create_time", None)
+                    try:
+                        ct_ms = int(ct_ms) if ct_ms is not None else None
+                    except (TypeError, ValueError):
+                        ct_ms = None
+                    sender = getattr(msg_obj, "sender", None)
+                    sender_id = getattr(getattr(sender, "id", None), "open_id", None) or "unknown"
+                    body = getattr(msg_obj, "body", None)
+                    raw_content = getattr(body, "content", None) if body else None
+                    content_json: dict = {}
+                    if raw_content:
+                        try:
+                            content_json = json.loads(raw_content)
+                        except (json.JSONDecodeError, TypeError):
+                            content_json = {}
+                    msg_type = getattr(msg_obj, "msg_type", "") or ""
+                    text = ""
+                    image_keys: list[str] = []
+                    file_key = None
+                    file_name = None
+                    if msg_type == "text":
+                        text = content_json.get("text", "").strip()
+                    elif msg_type == "post":
+                        text, image_keys = _extract_post_content(content_json)
+                        text = text.strip()
+                    elif msg_type == "image":
+                        image_keys = [content_json.get("image_key", "")] if content_json.get(
+                            "image_key"
+                        ) else []
+                    elif msg_type == "file":
+                        file_key = content_json.get("file_key")
+                        file_name = content_json.get("file_name")
+                        text = "[file: {}]".format(file_name or file_key or "?")
+                    elif msg_type in ("share_chat", "share_user", "interactive",
+                                       "share_calendar_event", "system", "merge_forward"):
+                        text = _extract_share_card_content(content_json, msg_type)
+                    else:
+                        text = MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
+                    out.append(
+                        {
+                            "message_id": getattr(msg_obj, "message_id", None),
+                            "sender_id": sender_id,
+                            "msg_type": msg_type,
+                            "text": text,
+                            "create_time_ms": ct_ms,
+                            "image_keys": image_keys,
+                            "file_key": file_key,
+                            "file_name": file_name,
+                        }
+                    )
+
+                has_more = getattr(response.data, "has_more", False)
+                page_token = getattr(response.data, "page_token", None) or None
+                # Stop paging once the oldest returned item already precedes the window,
+                # or once we have enough results.
+                oldest_in_page = min(
+                    (m["create_time_ms"] or 0 for m in out), default=0
+                )
+                if (
+                    not has_more
+                    or not page_token
+                    or (start_time_ms and oldest_in_page and oldest_in_page < start_time_ms)
+                    or (not (start_time_ms or end_time_ms) and len(out) >= limit)
+                ):
+                    break
+
+            out.sort(key=lambda m: m["create_time_ms"] or 0)  # oldest first
+            return out[-limit:] if not (start_time_ms or end_time_ms) else out
+        except Exception as e:
+            self.logger.exception("error fetching chat history for {}: {}", chat_id, e)
+            return []
+
+    _USER_NAME_CACHE_TTL_S = 600
+
+    def _get_user_name_sync(self, open_id: str) -> str:
+        """Resolve an open_id to a display name via contacts API (cached 10 min)."""
+        if not open_id or open_id == "unknown":
+            return ""
+        cache = getattr(self, "_user_name_cache", None)
+        if cache is None:
+            cache = {}
+            self._user_name_cache = cache
+        import time as _time
+
+        hit = cache.get(open_id)
+        if hit is not None and (_time.time() - hit[1]) < self._USER_NAME_CACHE_TTL_S:
+            return hit[0]
+        name = ""
+        try:
+            from lark_oapi.api.contact.v3 import GetUserRequest
+
+            request = GetUserRequest.builder().user_id_type("open_id").user_id(open_id).build()
+            response = self._client.contact.v3.user.get(request)
+            if response.success() and response.data and response.data.user:
+                user = response.data.user
+                name = (getattr(user, "name", None) or "").strip()
+        except Exception as e:
+            self.logger.debug("resolve user name failed for {}: {}", open_id, e)
+        cache[open_id] = (name, _time.time())
+        return name
+
+    # ---- Feishu Docs (docx) & Sheets fetchers ----------------------------
+
+    def get_docx_raw_content_sync(self, doc_token: str) -> tuple[str, str]:
+        """Fetch a Feishu cloud docx's plain-text content.
+
+        Returns ``(title, text)``; on failure ``title`` is empty and ``text`` carries
+        an error description.
+        """
+        try:
+            import lark_oapi as lark
+
+            # raw_content endpoint: GET /open-apis/docx/v1/documents/{document_id}/raw_content
+            request = (
+                lark.BaseRequest.builder()
+                .http_method(lark.HttpMethod.GET)
+                .uri(f"/open-apis/docx/v1/documents/{doc_token}/raw_content")
+                .token_types({lark.AccessTokenType.TENANT})
+                .build()
+            )
+            response = self._client.request(request)
+            if response.success():
+                payload = json.loads(response.raw.content)
+                data = payload.get("data") or {}
+                return str(data.get("title") or ""), str(data.get("content") or "")
+            return "", f"error code={response.code} msg={response.msg}"
+        except Exception as e:
+            self.logger.exception("error fetching docx {}: {}", doc_token, e)
+            return "", f"exception: {e}"
+
+    def get_sheet_values_sync(self, sheet_token: str, range_: str = "") -> tuple[str, str]:
+        """Fetch Feishu spreadsheet cell values as CSV-ish text.
+
+        ``range_`` is optional range like ``"<sheetId>!A1:D200"``. When omitted we
+        fetch metadata for the first sheet, then read its first ~200 rows × 26 cols.
+        Returns ``(title_or_sheet, text)``.
+        """
+        try:
+            import lark_oapi as lark
+
+            if not range_:
+                # Query metadata for the first sheet id
+                meta_req = (
+                    lark.BaseRequest.builder()
+                    .http_method(lark.HttpMethod.GET)
+                    .uri(f"/open-apis/sheets/v3/spreadsheets/{sheet_token}/sheets/query")
+                    .token_types({lark.AccessTokenType.TENANT})
+                    .build()
+                )
+                meta_resp = self._client.request(meta_req)
+                if not meta_resp.success():
+                    return "", f"meta error code={meta_resp.code} msg={meta_resp.msg}"
+                meta = json.loads(meta_resp.raw.content)
+                sheets = (meta.get("data") or {}).get("sheets") or []
+                if not sheets:
+                    return "", "(no sheets in spreadsheet)"
+                first = sheets[0]
+                sheet_id = first.get("sheet_id")
+                title = first.get("title") or ""
+                range_ = f"{sheet_id}!A1:Z200"
+            else:
+                title = range_
+
+            values_req = (
+                lark.BaseRequest.builder()
+                .http_method(lark.HttpMethod.GET)
+                .uri(f"/open-apis/sheets/v2/spreadsheets/{sheet_token}/values/{range_}")
+                .token_types({lark.AccessTokenType.TENANT})
+                .build()
+            )
+            resp = self._client.request(values_req)
+            if not resp.success():
+                return "", f"values error code={resp.code} msg={resp.msg}"
+            payload = json.loads(resp.raw.content)
+            value_range = (payload.get("data") or {}).get("valueRange") or {}
+            values = value_range.get("values") or []
+            lines: list[str] = []
+            for row in values:
+                cells: list[str] = []
+                for cell in row:
+                    if isinstance(cell, dict):
+                        cells.append(str(cell.get("text") or cell.get("link") or ""))
+                    elif isinstance(cell, list):
+                        cells.append(" ".join(str(x) for x in cell if x))
+                    else:
+                        cells.append("" if cell is None else str(cell))
+                lines.append("\t".join(cells).rstrip())
+            return str(title), "\n".join(lines)
+        except Exception as e:
+            self.logger.exception("error fetching sheet {}: {}", sheet_token, e)
+            return "", f"exception: {e}"
 
     def _reply_message_sync(self, parent_message_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> bool:
         """Reply to an existing Feishu message using the Reply API (synchronous).

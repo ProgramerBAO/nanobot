@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "apps": {
+    "jumpserver": {
+      "version": "0.1.0",
+      "entry_point": "cli-anything-jumpserver",
+      "source": "harness",
+      "strategy": "pip",
+      "installed_at": 1786625098,
+      "display_name": "JumpServer",
+      "category": "devops",
+      "description": "Bastion host management — manage assets, users, permissions, sessions, accounts, and audit logs via JumpServer REST API",
+      "requires": "JumpServer v3.0+ instance",
+      "entry_point_path": "/root/nanobot/.venv/bin/cli-anything-jumpserver",
+      "pip_distribution": "cli-anything-jumpserver"
+    }
+  }
+}
