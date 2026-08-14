@@ -498,6 +498,9 @@ If QR login is unavailable for your account, use manual setup below.
 - Create a new app → Enable **Bot** capability
 - **Permissions**:
   - `im:message` (send messages) and `im:message.p2p_msg:readonly` (receive messages)
+  - **Display names in logs and chat history**: add `contact:contact.base:readonly`
+    and `contact:user.base:readonly`, then publish a new app version. The bot keeps using
+    `open_id` for authorization even when a display name is available.
   - **Streaming replies** (default in nanobot): add **`cardkit:card:write`** (often labeled **Create and update cards** in the Feishu developer console). Required for CardKit entities and streamed assistant text. Older apps may not have it yet — open **Permission management**, enable the scope, then **publish** a new app version if the console requires it.
   - If you **cannot** add `cardkit:card:write`, set `"streaming": false` under `channels.feishu` (see below). The bot still works; replies use normal interactive cards without token-by-token streaming.
 - **Events**: Add `im.message.receive_v1` (receive messages)
@@ -518,6 +521,11 @@ If QR login is unavailable for your account, use manual setup below.
       "verificationToken": "",
       "allowFrom": ["ou_YOUR_OPEN_ID"],
       "groupPolicy": "mention",
+      "replyToMessage": false,
+      "quoteGroupReplies": false,
+      "followBotThreads": false,
+      "mentionThreadSender": false,
+      "topicIsolation": true,
       "reactEmoji": "OnIt",
       "doneEmoji": "DONE",
       "toolHintPrefix": "🔧",
@@ -532,6 +540,12 @@ If QR login is unavailable for your account, use manual setup below.
 > `encryptKey` and `verificationToken` are optional for Long Connection mode.
 > `allowFrom`: Add your open_id (find it in nanobot logs when you message the bot). Use `["*"]` to allow all users.
 > `groupPolicy`: `"mention"` (default — respond only when @mentioned), `"open"` (respond to all group messages). Private chats always respond.
+> `replyToMessage`: Reply to an ordinary group message as a newly created topic. Defaults to `false`.
+> `quoteGroupReplies`: Quote the triggering message in ordinary group chats without creating a topic. Defaults to `false`.
+> `followBotThreads`: With `groupPolicy: "mention"`, allow messages without @ only in real topics whose root message was sent by this bot. Other topics remain mention-only. Defaults to `false`.
+> `mentionThreadSender`: Mention the current human sender in topic responses. Defaults to `false`.
+> `topicIsolation`: Keep each group topic/message in a separate agent session. Defaults to `true`.
+> `feishu_chat_history` fully paginates the selected range. A whole-group read first gets all visible root/ordinary messages, then expands every visible `thread_id`, so replies inside topics are included. Large histories are delivered to the agent in continuation batches until complete. Group-history summary requests receive an immediate progress reply before this background work starts. With `groupPolicy: "mention"`, non-bot topics still require @ before the bot can use that context.
 > `reactEmoji`: Emoji for "processing" status (default: `OnIt`). See [available emojis](https://open.larkoffice.com/document/server-docs/im-v1/message-reaction/emojis-introduce).
 > `doneEmoji`: Optional emoji for "completed" status (e.g., `DONE`, `OK`, `HEART`). When set, bot adds this reaction after removing `reactEmoji`.
 > `toolHintPrefix`: Prefix for inline tool hints in streaming cards (default: `🔧`).

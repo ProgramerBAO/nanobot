@@ -17,6 +17,7 @@ from nanobot.agent.context_governance import (
     ContextGovernor,
 )
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
+from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.history_visibility import is_hidden_history_message
@@ -54,6 +55,14 @@ _MAX_EMPTY_RETRIES = 2
 _MAX_LENGTH_RECOVERIES = 3
 _MAX_INJECTIONS_PER_TURN = 3
 _MAX_INJECTION_CYCLES = 5
+
+
+class _ToolCallBudgetExceededError(RuntimeError):
+    def __init__(self, tool_name: str, limit: int) -> None:
+        self.tool_name = tool_name
+        self.limit = limit
+        super().__init__(f"{tool_name} exceeded its per-turn call limit ({limit})")
+
 
 @dataclass(slots=True)
 class AgentRunSpec:
@@ -331,6 +340,7 @@ class AgentRunner:
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
         external_lookup_counts: dict[str, int] = {}
+        tool_call_counts: dict[str, int] = {}
         # Per-turn throttle for repeated attempts against the same outside target.
         workspace_violation_counts: dict[str, int] = {}
         empty_content_retries = 0
@@ -419,6 +429,7 @@ class AgentRunner:
                     workspace_violation_counts,
                     hook,
                     context,
+                    tool_call_counts=tool_call_counts,
                 )
                 tool_events.extend(new_events)
                 tools_used.extend(
@@ -444,6 +455,25 @@ class AgentRunner:
                     messages.append(tool_message)
                     completed_tool_results.append(tool_message)
                 if fatal_error is not None:
+                    if isinstance(fatal_error, _ToolCallBudgetExceededError):
+                        stop_reason = "tool_call_budget"
+                        final_content = await self._try_finalize_after_max_iterations(
+                            spec,
+                            hook,
+                            messages,
+                            usage,
+                        )
+                        if final_content is None:
+                            final_content = (
+                                f"Stopped after {fatal_error.limit} "
+                                f"{fatal_error.tool_name} calls in one turn. "
+                                "Please narrow the date range or question."
+                            )
+                        self._append_final_message(messages, final_content)
+                        context.final_content = final_content
+                        context.stop_reason = stop_reason
+                        await hook.after_iteration(context)
+                        break
                     error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
                     final_content = error
                     stop_reason = "tool_error"
@@ -1100,9 +1130,11 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int],
         hook: AgentHook | None = None,
         context: AgentHookContext | None = None,
+        tool_call_counts: dict[str, int] | None = None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
+        tool_call_counts = tool_call_counts if tool_call_counts is not None else {}
         batches = self._partition_tool_batches(spec, tool_calls)
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
         for batch in batches:
@@ -1115,6 +1147,7 @@ class AgentRunner:
                         workspace_violation_counts,
                         hook,
                         context,
+                        tool_call_counts=tool_call_counts,
                     )
                     for tool_call in batch
                 ))
@@ -1129,6 +1162,7 @@ class AgentRunner:
                         workspace_violation_counts,
                         hook,
                         context,
+                        tool_call_counts=tool_call_counts,
                     )
                     tool_results.append(result)
                     batch_results.append(result)
@@ -1151,10 +1185,31 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int],
         hook: AgentHook | None = None,
         context: AgentHookContext | None = None,
+        tool_call_counts: dict[str, int] | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
+        tool_call_counts = tool_call_counts if tool_call_counts is not None else {}
         hint = "\n\n[Analyze the error above and try a different approach.]"
+        limit_getter = getattr(spec.tools, "get_max_calls_per_turn", None)
+        limit = limit_getter(tool_call.name) if callable(limit_getter) else None
+        if isinstance(limit, int) and limit > 0:
+            count = tool_call_counts.get(tool_call.name, 0) + 1
+            tool_call_counts[tool_call.name] = count
+            if count > limit:
+                message = (
+                    f"Error: per-turn call limit reached for {tool_call.name} ({limit}). "
+                    "Do not call this tool again in this turn; answer from the results already returned."
+                )
+                return (
+                    ToolResult.error(message),
+                    {
+                        "name": tool_call.name,
+                        "status": "error",
+                        "detail": f"tool_call_budget_exceeded:{limit}",
+                    },
+                    _ToolCallBudgetExceededError(tool_call.name, limit),
+                )
         lookup_error = repeated_external_lookup_error(
             tool_call.name,
             tool_call.arguments,

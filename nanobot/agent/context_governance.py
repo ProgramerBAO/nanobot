@@ -80,6 +80,7 @@ class ContextGovernor:
     ) -> list[dict[str, Any]]:
         updated = self.strip_placeholder_assistant_messages(messages)
         updated = self.strip_malformed_tool_calls(updated)
+        updated = self.deduplicate_tool_call_ids(updated)
         updated = self.drop_orphan_tool_results(updated)
         updated = self.backfill_missing_tool_results(updated)
         updated = self.apply_tool_result_budget(config, updated)
@@ -87,6 +88,78 @@ class ContextGovernor:
         updated = self.snip_history(config, updated)
         updated = self.drop_orphan_tool_results(updated)
         return self.backfill_missing_tool_results(updated)
+
+    @staticmethod
+    def deduplicate_tool_call_ids(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Give reused historical tool-call IDs unique, paired IDs.
+
+        Some providers generate short IDs such as ``exec:11`` and may reuse
+        them in a later turn.  The model API requires every assistant tool
+        call to be followed by a result for that exact ID.  Rename repeated
+        declarations and their corresponding result together in the
+        model-facing copy so orphan cleanup cannot mistake the later result
+        for a duplicate of the earlier one.
+        """
+        counts: dict[str, int] = {}
+        assigned: set[str] = set()
+        pending: dict[str, list[str]] = {}
+        updated: list[dict[str, Any]] | None = None
+
+        for idx, message in enumerate(messages):
+            role = message.get("role")
+            if role == "assistant":
+                calls = message.get("tool_calls") or []
+                rewritten_calls: list[Any] = []
+                changed = False
+                for call in calls:
+                    if not isinstance(call, dict) or not call.get("id"):
+                        rewritten_calls.append(call)
+                        continue
+                    original = str(call["id"])
+                    occurrence = counts.get(original, 0) + 1
+                    counts[original] = occurrence
+                    unique = original
+                    if occurrence > 1 or unique in assigned:
+                        suffix = occurrence
+                        unique = f"{original}__history_{suffix}"
+                        while unique in assigned:
+                            suffix += 1
+                            unique = f"{original}__history_{suffix}"
+                    assigned.add(unique)
+                    pending.setdefault(original, []).append(unique)
+                    if unique != original:
+                        rewritten = dict(call)
+                        rewritten["id"] = unique
+                        rewritten_calls.append(rewritten)
+                        changed = True
+                    else:
+                        rewritten_calls.append(call)
+                if changed:
+                    if updated is None:
+                        updated = [dict(item) for item in messages[:idx]]
+                    rewritten_message = dict(message)
+                    rewritten_message["tool_calls"] = rewritten_calls
+                    updated.append(rewritten_message)
+                    continue
+
+            if role == "tool" and message.get("tool_call_id"):
+                original = str(message["tool_call_id"])
+                waiting = pending.get(original) or []
+                unique = waiting.pop(0) if waiting else original
+                if unique != original:
+                    if updated is None:
+                        updated = [dict(item) for item in messages[:idx]]
+                    rewritten_message = dict(message)
+                    rewritten_message["tool_call_id"] = unique
+                    updated.append(rewritten_message)
+                    continue
+
+            if updated is not None:
+                updated.append(dict(message))
+
+        return messages if updated is None else updated
 
     @staticmethod
     def input_budget(config: ContextGovernanceConfig) -> int:

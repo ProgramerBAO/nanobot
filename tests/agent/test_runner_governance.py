@@ -752,6 +752,78 @@ def test_governance_fallback_still_repairs_orphans():
     assert not any(m.get("tool_call_id") == "orphan_tc" for m in repaired)
 
 
+def test_governance_pairs_reused_tool_call_ids_across_turns():
+    messages = [
+        {"role": "user", "content": "first"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "exec:11",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "exec:11", "name": "exec", "content": "one"},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "second"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "exec:11",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "exec:11", "name": "exec", "content": "two"},
+    ]
+
+    repaired = ContextGovernor.deduplicate_tool_call_ids(messages)
+
+    assert repaired is not messages
+    assert repaired[1]["tool_calls"][0]["id"] == "exec:11"
+    assert repaired[2]["tool_call_id"] == "exec:11"
+    assert repaired[5]["tool_calls"][0]["id"] == "exec:11__history_2"
+    assert repaired[6]["tool_call_id"] == "exec:11__history_2"
+    assert messages[5]["tool_calls"][0]["id"] == "exec:11"
+    assert messages[6]["tool_call_id"] == "exec:11"
+
+
+def test_governance_reused_ids_survive_orphan_cleanup_as_complete_pairs():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "same", "type": "function", "function": {"name": "a", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "same", "name": "a", "content": "first"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "same", "type": "function", "function": {"name": "b", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "same", "name": "b", "content": "second"},
+    ]
+
+    repaired = ContextGovernor.deduplicate_tool_call_ids(messages)
+    repaired = ContextGovernor.drop_orphan_tool_results(repaired)
+    repaired = ContextGovernor.backfill_missing_tool_results(repaired)
+
+    assert [message.get("tool_call_id") for message in repaired if message["role"] == "tool"] == [
+        "same",
+        "same__history_2",
+    ]
+
+
 def test_snip_history_preserves_user_message_after_truncation(monkeypatch):
     """When _snip_history truncates messages and the only user message ends up
     outside the kept window, the method must recover the nearest user message

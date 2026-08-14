@@ -40,6 +40,11 @@ from nanobot.channels.feishu.websocket import get_feishu_ws_runner
 from nanobot.command.router import normalize_command_text
 from nanobot.config.paths import get_media_dir
 from nanobot.pairing import clear_channel
+from nanobot.runtime_context import (
+    RUNTIME_CONTEXT_INPUT_META,
+    RuntimeContextBlock,
+    wrap_runtime_context_lines,
+)
 from nanobot.utils.helpers import safe_filename
 from nanobot.utils.logging_bridge import redirect_lib_logging
 
@@ -49,6 +54,16 @@ if TYPE_CHECKING:
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
 _LOGIN_CONSOLE = Console()
 _LARK_RUNTIME_LOCK = threading.Lock()
+
+
+def _is_group_history_summary_request(text: str) -> bool:
+    """Recognize group-history requests that need an immediate visible acknowledgement."""
+    compact = re.sub(r"\s+", "", text or "")
+    scope_terms = ("群里", "群聊", "群消息", "聊天记录", "历史消息", "全群")
+    action_terms = ("总结", "汇总", "梳理", "回顾", "统计", "有哪些", "查看", "看看", "分析")
+    return any(term in compact for term in scope_terms) and any(
+        term in compact for term in action_terms
+    )
 
 
 def _identity_timestamp() -> str:
@@ -922,6 +937,7 @@ class FeishuChannel(BaseChannel):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_bufs: dict[str, _FeishuStreamBuf] = {}
         self._bot_open_id: str | None = None
+        self._bot_message_ids: OrderedDict[str, bool] = OrderedDict()
         self._background_tasks: set[asyncio.Task] = set()
         self._reaction_ids: dict[str, str] = {}  # message_id → reaction_id
 
@@ -1223,6 +1239,73 @@ class FeishuChannel(BaseChannel):
         if self.config.group_policy == "open":
             return True
         return self._is_bot_mentioned(message)
+
+    def _remember_bot_message(self, message_id: str | None) -> None:
+        if not isinstance(message_id, str) or not message_id:
+            return
+        self._bot_message_ids[message_id] = True
+        self._bot_message_ids.move_to_end(message_id)
+        while len(self._bot_message_ids) > 1000:
+            self._bot_message_ids.popitem(last=False)
+
+    def _message_is_from_this_bot_sync(self, message_id: str) -> bool:
+        """Verify message ownership through Feishu after an in-memory cache miss."""
+        from lark_oapi.api.im.v1 import GetMessageRequest
+
+        try:
+            request = GetMessageRequest.builder().message_id(message_id).build()
+            response = self._client.im.v1.message.get(request)
+            if not response.success():
+                return False
+            items = getattr(response.data, "items", None) or []
+            if not items:
+                return False
+            sender = getattr(items[0], "sender", None)
+            sender_id = getattr(sender, "id", None) or ""
+            sender_id_type = getattr(sender, "id_type", None) or ""
+            open_bot_id = getattr(sender, "open_bot_id", None) or ""
+            sender_type = getattr(sender, "sender_type", None) or ""
+            if sender_type not in {"app", "bot"}:
+                return False
+            return bool(
+                (self._bot_open_id and open_bot_id == self._bot_open_id)
+                or (self._bot_open_id and sender_id == self._bot_open_id)
+                or (
+                    self.config.app_id
+                    and sender_id_type == "app_id"
+                    and sender_id == self.config.app_id
+                )
+            )
+        except Exception as exc:
+            self.logger.debug("could not verify bot message {}: {}", message_id, exc)
+            return False
+
+    async def _is_bot_thread_message(self, message: Any) -> bool:
+        if not self.config.follow_bot_threads:
+            return False
+        # ``root_id`` is also present on ordinary quoted replies.  Only a
+        # real Feishu topic has ``thread_id`` (``omt_...``), so never relax
+        # mention gating without it.
+        if not getattr(message, "thread_id", None):
+            return False
+        candidates = []
+        for value in (
+            getattr(message, "root_id", None),
+        ):
+            if isinstance(value, str) and value and value not in candidates:
+                candidates.append(value)
+        if not candidates:
+            return False
+        for message_id in candidates:
+            cached = self._bot_message_ids.get(message_id)
+            if cached is True:
+                return True
+            if self._client and await asyncio.get_running_loop().run_in_executor(
+                None, self._message_is_from_this_bot_sync, message_id
+            ):
+                self._remember_bot_message(message_id)
+                return True
+        return False
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> str | None:
         """Sync helper for adding reaction (runs in thread pool)."""
@@ -1561,7 +1644,9 @@ class FeishuChannel(BaseChannel):
         return "post"
 
     @classmethod
-    def _markdown_to_post(cls, content: str) -> str:
+    def _markdown_to_post(
+        cls, content: str, *, mention_open_id: str | None = None
+    ) -> str:
         """Convert markdown content to Feishu post message JSON.
 
         Handles links ``[text](url)`` as ``a`` tags; everything else as ``text`` tags.
@@ -1569,6 +1654,14 @@ class FeishuChannel(BaseChannel):
         """
         lines = content.strip().split("\n")
         paragraphs: list[list[dict]] = []
+
+        if mention_open_id:
+            paragraphs.append(
+                [
+                    {"tag": "at", "user_id": mention_open_id},
+                    {"tag": "text", "text": " "},
+                ]
+            )
 
         for line in lines:
             elements: list[dict] = []
@@ -1876,43 +1969,44 @@ class FeishuChannel(BaseChannel):
     def get_chat_history_sync(
         self,
         chat_id: str,
-        limit: int = 20,
+        limit: int | None = None,
         start_time_ms: int | None = None,
         end_time_ms: int | None = None,
+        *,
+        thread_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch messages in a chat visible to the bot (synchronous).
+        """Fetch messages in a chat or topic visible to the bot (synchronous).
 
         Returns a list of ``{sender_id, msg_type, text, create_time_ms, image_keys, file_key,
         file_name}`` dicts ordered oldest → newest. Only works for chats the bot is a member
         of, and only covers messages the bot is authorised to read.
 
-        ``start_time_ms`` / ``end_time_ms`` filter by create_time (Feishu expects
-        seconds-precision strings start_time/end_time).  When a window is given we page
-        backwards from the newest message until we leave the window, collecting matches.
+        When ``thread_id`` is provided, Feishu's ``thread`` container is used;
+        normal chat history only exposes topic root messages in message-mode groups.
+
+        All visible pages are fetched. For a chat container, every discovered topic is
+        expanded through its ``thread_id`` and merged with ordinary chat messages.
+        ``start_time_ms`` / ``end_time_ms`` are applied locally because Feishu does not
+        support time filters for thread containers. ``limit`` remains only for backwards
+        call compatibility and is intentionally ignored.
         """
         from lark_oapi.api.im.v1 import ListMessageRequest
 
-        limit = max(1, min(int(limit), 100))
         try:
+            container_type = "thread" if thread_id else "chat"
+            container_id = thread_id or chat_id
             out: list[dict[str, Any]] = []
             page_token: str | None = None
-            # Without an explicit window, one page of newest messages is enough.
-            # With a window, keep paging (up to 5 pages) until items fall before start.
-            max_pages = 5 if (start_time_ms or end_time_ms) else 1
 
-            for _ in range(max_pages):
+            while True:
                 builder = (
                     ListMessageRequest.builder()
-                    .container_id_type("chat")
-                    .container_id(chat_id)
+                    .container_id_type(container_type)
+                    .container_id(container_id)
                     .page_size(50)
                     .sort_type("ByCreateTimeDesc")
+                    .with_sender_name(True)
                 )
-                if start_time_ms:
-                    # Feishu expects integer-second strings, not floats.
-                    builder.start_time(str(int(start_time_ms // 1000)))
-                if end_time_ms:
-                    builder.end_time(str(int(end_time_ms // 1000)))
                 if page_token:
                     builder.page_token(page_token)
                 response = self._client.im.v1.message.list(builder.build())
@@ -1932,7 +2026,14 @@ class FeishuChannel(BaseChannel):
                     except (TypeError, ValueError):
                         ct_ms = None
                     sender = getattr(msg_obj, "sender", None)
-                    sender_id = getattr(getattr(sender, "id", None), "open_id", None) or "unknown"
+                    raw_sender_id = getattr(sender, "id", None)
+                    sender_id = (
+                        raw_sender_id
+                        if isinstance(raw_sender_id, str)
+                        else getattr(raw_sender_id, "open_id", None)
+                    ) or "unknown"
+                    raw_sender_name = getattr(sender, "sender_name", None)
+                    sender_name = raw_sender_name.strip() if isinstance(raw_sender_name, str) else ""
                     body = getattr(msg_obj, "body", None)
                     raw_content = getattr(body, "content", None) if body else None
                     content_json: dict = {}
@@ -1967,7 +2068,11 @@ class FeishuChannel(BaseChannel):
                     out.append(
                         {
                             "message_id": getattr(msg_obj, "message_id", None),
+                            "root_id": getattr(msg_obj, "root_id", None),
+                            "parent_id": getattr(msg_obj, "parent_id", None),
+                            "thread_id": getattr(msg_obj, "thread_id", None),
                             "sender_id": sender_id,
+                            "sender_name": sender_name,
                             "msg_type": msg_type,
                             "text": text,
                             "create_time_ms": ct_ms,
@@ -1979,23 +2084,44 @@ class FeishuChannel(BaseChannel):
 
                 has_more = getattr(response.data, "has_more", False)
                 page_token = getattr(response.data, "page_token", None) or None
-                # Stop paging once the oldest returned item already precedes the window,
-                # or once we have enough results.
-                oldest_in_page = min(
-                    (m["create_time_ms"] or 0 for m in out), default=0
-                )
-                if (
-                    not has_more
-                    or not page_token
-                    or (start_time_ms and oldest_in_page and oldest_in_page < start_time_ms)
-                    or (not (start_time_ms or end_time_ms) and len(out) >= limit)
-                ):
+                if not has_more or not page_token:
                     break
 
+            if not thread_id:
+                topic_ids = sorted({m["thread_id"] for m in out if m.get("thread_id")})
+                for topic_id in topic_ids:
+                    out.extend(
+                        self.get_chat_history_sync(
+                            chat_id,
+                            None,
+                            None,
+                            None,
+                            thread_id=topic_id,
+                        )
+                    )
+
+            deduped: dict[str, dict[str, Any]] = {}
+            anonymous: list[dict[str, Any]] = []
+            for item in out:
+                message_id = item.get("message_id")
+                if message_id:
+                    deduped[message_id] = item
+                else:
+                    anonymous.append(item)
+            out = list(deduped.values()) + anonymous
+            if start_time_ms is not None:
+                out = [m for m in out if (m.get("create_time_ms") or 0) >= start_time_ms]
+            if end_time_ms is not None:
+                out = [m for m in out if (m.get("create_time_ms") or 0) <= end_time_ms]
             out.sort(key=lambda m: m["create_time_ms"] or 0)  # oldest first
-            return out[-limit:] if not (start_time_ms or end_time_ms) else out
+            return out
         except Exception as e:
-            self.logger.exception("error fetching chat history for {}: {}", chat_id, e)
+            self.logger.exception(
+                "error fetching {} history for {}: {}",
+                container_type,
+                container_id,
+                e,
+            )
             return []
 
     _USER_NAME_CACHE_TTL_S = 600
@@ -2021,7 +2147,8 @@ class FeishuChannel(BaseChannel):
             response = self._client.contact.v3.user.get(request)
             if response.success() and response.data and response.data.user:
                 user = response.data.user
-                name = (getattr(user, "name", None) or "").strip()
+                raw_name = getattr(user, "name", None)
+                name = raw_name.strip() if isinstance(raw_name, str) else ""
         except Exception as e:
             self.logger.debug("resolve user name failed for {}: {}", open_id, e)
         cache[open_id] = (name, _time.time())
@@ -2153,6 +2280,8 @@ class FeishuChannel(BaseChannel):
                         reply_in_thread=reply_in_thread,
                     )
                 return False
+            sent_message_id = getattr(getattr(response, "data", None), "message_id", None)
+            self._remember_bot_message(sent_message_id)
             self.logger.debug("reply sent to message {}", parent_message_id)
             return True
         except Exception:
@@ -2237,18 +2366,36 @@ class FeishuChannel(BaseChannel):
 
     def _should_use_reply_in_thread(self, metadata: dict[str, Any]) -> bool:
         """Return whether a group reply should create a Feishu thread/topic."""
-        return metadata.get("chat_type", "group") == "group" and self.config.reply_to_message
+        return (
+            metadata.get("chat_type", "group") == "group"
+            and self.config.reply_to_message
+        )
 
     def _thread_reply_target(self, metadata: dict[str, Any]) -> str | None:
         """Return the message_id that should receive a Reply API response."""
-        if metadata.get("chat_type", "group") != "group":
-            return None
         message_id = metadata.get("message_id")
         if not message_id:
             return None
-        if metadata.get("thread_id") or self.config.reply_to_message:
+        if metadata.get("chat_type", "group") != "group":
+            return message_id if self.config.reply_to_message else None
+        if (
+            metadata.get("thread_id")
+            or metadata.get("root_id")
+            or self.config.reply_to_message
+            or self.config.quote_group_replies
+        ):
             return message_id
         return None
+
+    def _thread_mention_open_id(self, metadata: dict[str, Any]) -> str | None:
+        if not self.config.mention_thread_sender:
+            return None
+        if metadata.get("chat_type", "group") != "group":
+            return None
+        if not metadata.get("thread_id"):
+            return None
+        sender_id = metadata.get("sender_open_id")
+        return sender_id if isinstance(sender_id, str) and sender_id.startswith("ou_") else None
 
     def _send_message_sync(
         self, receive_id_type: str, receive_id: str, msg_type: str, content: str
@@ -2286,6 +2433,7 @@ class FeishuChannel(BaseChannel):
                     )
                 return None
             msg_id = getattr(response.data, "message_id", None)
+            self._remember_bot_message(msg_id)
             self.logger.debug("{} message sent to {}: {}", msg_type, receive_id, msg_id)
             return msg_id
         except Exception:
@@ -2555,7 +2703,9 @@ class FeishuChannel(BaseChannel):
         # --- accumulate delta ---
         buf = self._stream_bufs.get(stream_key)
         if buf is None:
-            buf = _FeishuStreamBuf()
+            mention_open_id = self._thread_mention_open_id(meta)
+            prefix = f"<at id={mention_open_id}></at>\n\n" if mention_open_id else ""
+            buf = _FeishuStreamBuf(text=prefix)
             self._stream_bufs[stream_key] = buf
         buf.text += delta
         if not buf.text.strip():
@@ -2673,14 +2823,13 @@ class FeishuChannel(BaseChannel):
             # chunks/media fall back to plain create to avoid redundant quote bubbles.
             # Always target message_id — the Feishu Reply API keeps replies in the
             # same topic automatically when the target message is inside a topic.
-            reply_message_id: str | None = None
-            _msg_id = msg.metadata.get("message_id")
-            has_thread_id = msg.metadata.get("thread_id")
-            if self.config.reply_to_message and progress_event is None:
-                reply_message_id = _msg_id
-            # For topic group messages, always reply to keep context in thread
-            elif has_thread_id:
-                reply_message_id = _msg_id
+            reply_message_id = (
+                self._thread_reply_target(msg.metadata)
+                if progress_event is None
+                else None
+            )
+            in_topic = bool(msg.metadata.get("thread_id"))
+            mention_open_id = self._thread_mention_open_id(msg.metadata)
 
             first_send = True  # tracks whether the reply has already been used
 
@@ -2694,7 +2843,7 @@ class FeishuChannel(BaseChannel):
                 nonlocal first_send
                 if reply_message_id:
                     # If we're in a topic, always use reply to stay in the topic
-                    if has_thread_id:
+                    if in_topic:
                         ok = self._reply_message_sync(
                             reply_message_id, m_type, content,
                             reply_in_thread=self._should_use_reply_in_thread(msg.metadata),
@@ -2758,17 +2907,30 @@ class FeishuChannel(BaseChannel):
 
                 if fmt == "text":
                     # Short plain text – send as simple text message
-                    text_body = json.dumps({"text": msg.content.strip()}, ensure_ascii=False)
+                    text = msg.content.strip()
+                    if mention_open_id:
+                        text = f'<at user_id="{mention_open_id}">用户</at> {text}'
+                    text_body = json.dumps({"text": text}, ensure_ascii=False)
                     await loop.run_in_executor(None, _do_send, "text", text_body)
 
                 elif fmt == "post":
                     # Medium content with links – send as rich-text post
-                    post_body = self._markdown_to_post(msg.content)
+                    post_body = self._markdown_to_post(
+                        msg.content, mention_open_id=mention_open_id
+                    )
                     await loop.run_in_executor(None, _do_send, "post", post_body)
 
                 else:
                     # Complex / long content – send as interactive card
                     elements = self._build_card_elements(msg.content)
+                    if mention_open_id:
+                        elements.insert(
+                            0,
+                            {
+                                "tag": "markdown",
+                                "content": f"<at id={mention_open_id}></at>",
+                            },
+                        )
                     for chunk in self._split_elements_by_table_limit(elements):
                         card = {"config": {"wide_screen_mode": True}, "elements": chunk}
                         await loop.run_in_executor(
@@ -2815,9 +2977,23 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type
             msg_type = message.message_type
 
-            if chat_type == "group" and not self._is_group_message_for_bot(message):
-                self.logger.debug("skipping group message (not mentioned)")
+            # Early permission check — avoid API lookups and other side effects
+            # for unauthorized users. Group chats are silently ignored; DMs
+            # get a pairing code.
+            if not self.is_allowed(sender_id):
+                if chat_type == "p2p":
+                    await self._handle_message(
+                        sender_id=sender_id,
+                        chat_id=sender_id,
+                        content="",
+                        is_dm=True,
+                    )
                 return
+
+            if chat_type == "group" and not self._is_group_message_for_bot(message):
+                if not await self._is_bot_thread_message(message):
+                    self.logger.debug("skipping group message (not mentioned or bot thread)")
+                    return
 
             # Deduplication check
             if message_id in self._processed_message_ids:
@@ -2828,20 +3004,6 @@ class FeishuChannel(BaseChannel):
             while len(self._processed_message_ids) > 1000:
                 self._processed_message_ids.popitem(last=False)
 
-            # Early permission check — avoid side effects for unauthorized users.
-            # Group chats are silently ignored; DMs get a pairing code.
-            if not self.is_allowed(sender_id):
-                if chat_type == "p2p":
-                    # content="" because the pairing reply is generated by
-                    # BaseChannel._handle_message, not from the original message.
-                    await self._handle_message(
-                        sender_id=sender_id,
-                        chat_id=sender_id,
-                        content="",
-                        is_dm=True,
-                    )
-                return
-
             # Add reaction (non-blocking — tracked background task)
             task = asyncio.create_task(
                 self._add_reaction(message_id, self.config.react_emoji)
@@ -2849,6 +3011,32 @@ class FeishuChannel(BaseChannel):
             self._background_tasks.add(task)
             task.add_done_callback(self._on_background_task_done)
             task.add_done_callback(lambda t: self._on_reaction_added(message_id, t))
+
+            sender_name = ""
+            if self._client:
+                sender_name = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    self._get_user_name_sync,
+                    sender_id,
+                )
+
+            sender_context: list[RuntimeContextBlock] = []
+            if sender_name:
+                identity_json = json.dumps(
+                    {"name": sender_name, "open_id": sender_id},
+                    ensure_ascii=False,
+                )
+                sender_context.append(
+                    RuntimeContextBlock(
+                        source="feishu_sender_identity",
+                        content=wrap_runtime_context_lines(
+                            [
+                                "Current Feishu sender identity (JSON):",
+                                identity_json,
+                            ]
+                        ),
+                    )
+                )
 
             # Parse content
             content_parts = []
@@ -2914,6 +3102,7 @@ class FeishuChannel(BaseChannel):
             parent_id = getattr(message, "parent_id", None) or None
             root_id = getattr(message, "root_id", None) or None
             thread_id = getattr(message, "thread_id", None) or None
+            direct_request_text = "\n".join(content_parts) if content_parts else ""
 
             # Prepend quoted message text when the user replied to another message
             if parent_id and self._client:
@@ -2954,19 +3143,34 @@ class FeishuChannel(BaseChannel):
 
             # Forward to message bus
             reply_to = chat_id if chat_type == "group" else sender_id
+            inbound_metadata = {
+                "message_id": message_id,
+                "chat_type": chat_type,
+                "msg_type": msg_type,
+                "parent_id": parent_id,
+                "root_id": root_id,
+                "thread_id": thread_id,
+                "sender_open_id": sender_id,
+                "sender_name": sender_name,
+                "direct_request_text": direct_request_text,
+                **({RUNTIME_CONTEXT_INPUT_META: sender_context} if sender_context else {}),
+            }
+            if chat_type == "group" and _is_group_history_summary_request(direct_request_text):
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=self.name,
+                        chat_id=reply_to,
+                        content="收到，正在读取群聊及相关话题的完整历史并整理，请稍候。",
+                        metadata=inbound_metadata,
+                        event=ProgressEvent(tool_hint=True),
+                    )
+                )
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=reply_to,
                 content=content,
                 media=media_paths,
-                metadata={
-                    "message_id": message_id,
-                    "chat_type": chat_type,
-                    "msg_type": msg_type,
-                    "parent_id": parent_id,
-                    "root_id": root_id,
-                    "thread_id": thread_id,
-                },
+                metadata=inbound_metadata,
                 session_key=session_key,
                 is_dm=chat_type == "p2p",
             )

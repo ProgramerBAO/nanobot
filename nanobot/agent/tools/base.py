@@ -189,6 +189,11 @@ class Tool(ABC):
         """Whether this tool should run alone even if concurrency is enabled."""
         return False
 
+    @property
+    def max_calls_per_turn(self) -> int | None:
+        """Optional hard limit for executions during one agent turn."""
+        return None
+
     # --- Plugin metadata ---
 
     config_key: str = ""
@@ -209,6 +214,14 @@ class Tool(ABC):
 
     def runtime_context_provider(self) -> RuntimeContextProvider | None:
         """Return optional per-turn prompt context owned by this tool."""
+        return None
+
+    def match_direct_request(self, text: str) -> dict[str, Any] | None:
+        """Return parameters when a user request should bypass model tool selection.
+
+        Tools with an unambiguous natural-language intent may opt in.  The
+        default keeps normal model-directed tool selection unchanged.
+        """
         return None
 
     @abstractmethod

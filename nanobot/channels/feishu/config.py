@@ -24,6 +24,9 @@ class FeishuConfig(Base):
     tool_hint_prefix: str = "\U0001f527"
     group_policy: Literal["open", "mention"] = "mention"
     reply_to_message: bool = False
+    quote_group_replies: bool = False
+    follow_bot_threads: bool = False
+    mention_thread_sender: bool = False
     streaming: bool = True
     domain: Literal["feishu", "lark"] = "feishu"
     topic_isolation: bool = True

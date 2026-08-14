@@ -1420,7 +1420,13 @@ class AgentLoop:
                 return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-        logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        sender_name = (msg.metadata or {}).get("sender_name")
+        sender_label = (
+            f"{sender_name} ({msg.sender_id})"
+            if isinstance(sender_name, str) and sender_name.strip()
+            else msg.sender_id
+        )
+        logger.info("Response to {}:{}: {}", msg.channel, sender_label, preview)
 
         event = None
         meta = dict(msg.metadata or {})
@@ -1450,7 +1456,13 @@ class AgentLoop:
         if ctx.kind is TurnKind.SYSTEM:
             logger.info("Processing system message from {}", msg.sender_id)
         else:
-            logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+            sender_name = (msg.metadata or {}).get("sender_name")
+            sender_label = (
+                f"{sender_name} ({msg.sender_id})"
+                if isinstance(sender_name, str) and sender_name.strip()
+                else msg.sender_id
+            )
+            logger.info("Processing message from {}:{}: {}", msg.channel, sender_label, preview)
 
         # Session is already fetched by the caller (_process_message) but
         # ensure it exists in case this handler is invoked independently.
@@ -1504,6 +1516,19 @@ class AgentLoop:
             turn_scopes=ctx.turn_scopes,
         )
         result = await self.commands.dispatch(cmd_ctx)
+        direct_raw = (ctx.msg.metadata or {}).get("direct_request_text")
+        if not isinstance(direct_raw, str) or not direct_raw.strip():
+            direct_raw = raw
+        if result is None and (direct := self.tools.match_direct_request(direct_raw)) is not None:
+            tool_name, params = direct
+            logger.info("Direct request route: {}({})", tool_name, params)
+            content = await self.tools.execute(tool_name, params)
+            result = OutboundMessage(
+                channel=ctx.msg.channel,
+                chat_id=ctx.msg.chat_id,
+                content=str(content),
+                metadata=dict(ctx.msg.metadata or {}),
+            )
         if result is not None:
             ctx.outbound = result
             # Shortcut commands skip BUILD and SAVE, so we must persist the

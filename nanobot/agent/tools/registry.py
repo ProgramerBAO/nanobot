@@ -50,6 +50,14 @@ class ToolRegistry:
                 providers.append(provider)
         return providers
 
+    def match_direct_request(self, text: str) -> tuple[str, dict[str, Any]] | None:
+        """Return the first deterministic natural-language tool route."""
+        for name, tool in self._tools.items():
+            params = tool.match_direct_request(text)
+            if params is not None:
+                return name, params
+        return None
+
     @staticmethod
     def _lookup_key(name: str) -> str:
         """Normalize names for suggestions only; never for execution."""
@@ -71,6 +79,11 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         """Check if a tool is registered."""
         return name in self._tools
+
+    def get_max_calls_per_turn(self, name: str) -> int | None:
+        """Return a tool's per-turn execution budget, if configured."""
+        tool = self._tools.get(name)
+        return tool.max_calls_per_turn if tool is not None else None
 
     @staticmethod
     def _schema_name(schema: dict[str, Any]) -> str:

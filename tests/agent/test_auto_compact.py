@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.magik_cube import MagikCubeDailyReportTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext
@@ -561,6 +562,32 @@ class TestAutoCompactIdleDetection:
         assert len(history) == 2
         assert all(m["content"] != "/help" for m in history)
         assert all(m["content"] != "help text" for m in history)
+        await loop.close_mcp()
+
+    @pytest.mark.asyncio
+    async def test_magik_usage_request_bypasses_model_tool_selection(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+        tool.execute = AsyncMock(return_value="direct usage result")  # type: ignore[method-assign]
+        loop.tools.register(tool)
+        loop.provider.chat_with_retry.reset_mock()
+        msg = InboundMessage(
+            channel="feishu",
+            sender_id="user",
+            chat_id="group",
+            content="看看昨天佛跳墙用户 GLM-5.2 有多少用量",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert response.content == "direct usage result"
+        tool.execute.assert_awaited_once_with(  # type: ignore[attr-defined]
+            save_snapshot=False,
+            tenant_query="佛跳墙",
+            model="GLM-5.2",
+        )
+        loop.provider.chat_with_retry.assert_not_awaited()
         await loop.close_mcp()
 
 

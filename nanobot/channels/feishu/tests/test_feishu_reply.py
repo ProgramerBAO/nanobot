@@ -21,6 +21,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu.runtime import FeishuChannel, FeishuConfig
+from nanobot.runtime_context import RUNTIME_CONTEXT_INPUT_META
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,6 +31,9 @@ def _make_feishu_channel(
     reply_to_message: bool = False,
     group_policy: str = "mention",
     topic_isolation: bool = True,
+    quote_group_replies: bool = False,
+    follow_bot_threads: bool = False,
+    mention_thread_sender: bool = False,
 ) -> FeishuChannel:
     config = FeishuConfig(
         enabled=True,
@@ -39,6 +43,9 @@ def _make_feishu_channel(
         reply_to_message=reply_to_message,
         group_policy=group_policy,
         topic_isolation=topic_isolation,
+        quote_group_replies=quote_group_replies,
+        follow_bot_threads=follow_bot_threads,
+        mention_thread_sender=mention_thread_sender,
     )
     channel = FeishuChannel(config, MessageBus())
     channel._client = MagicMock()
@@ -58,6 +65,7 @@ def _make_feishu_event(
     sender_open_id: str = "ou_alice",
     parent_id: str | None = None,
     root_id: str | None = None,
+    thread_id: str | None = None,
     mentions=None,
 ):
     message = SimpleNamespace(
@@ -68,6 +76,7 @@ def _make_feishu_event(
         content=content,
         parent_id=parent_id,
         root_id=root_id,
+        thread_id=thread_id,
         mentions=mentions or [],
     )
     sender = SimpleNamespace(
@@ -115,6 +124,19 @@ def test_feishu_config_topic_isolation_can_be_disabled() -> None:
 def test_feishu_config_topic_isolation_accepts_camel_case() -> None:
     config = FeishuConfig.model_validate({"topicIsolation": False})
     assert config.topic_isolation is False
+
+
+def test_feishu_bot_thread_options_accept_camel_case() -> None:
+    config = FeishuConfig.model_validate(
+        {
+            "quoteGroupReplies": True,
+            "followBotThreads": True,
+            "mentionThreadSender": True,
+        }
+    )
+    assert config.quote_group_replies is True
+    assert config.follow_bot_threads is True
+    assert config.mention_thread_sender is True
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +353,90 @@ async def test_send_uses_create_api_when_reply_disabled() -> None:
 
     channel._client.im.v1.message.create.assert_called_once()
     channel._client.im.v1.message.reply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_quotes_non_topic_group_message_without_creating_topic() -> None:
+    channel = _make_feishu_channel(
+        reply_to_message=False,
+        quote_group_replies=True,
+    )
+    reply_resp = MagicMock()
+    reply_resp.success.return_value = True
+    channel._client.im.v1.message.reply.return_value = reply_resp
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_abc",
+            content="hello",
+            metadata={"message_id": "om_001", "chat_type": "group"},
+        )
+    )
+
+    channel._client.im.v1.message.reply.assert_called_once()
+    request = channel._client.im.v1.message.reply.call_args.args[0]
+    assert request.message_id == "om_001"
+    assert request.request_body.reply_in_thread is not True
+    channel._client.im.v1.message.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_topic_text_reply_mentions_current_sender() -> None:
+    channel = _make_feishu_channel(mention_thread_sender=True)
+    reply_resp = MagicMock()
+    reply_resp.success.return_value = True
+    channel._client.im.v1.message.reply.return_value = reply_resp
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_abc",
+            content="查询完成",
+            metadata={
+                "message_id": "om_child",
+                "chat_type": "group",
+                "root_id": "om_root",
+                "thread_id": "om_root",
+                "sender_open_id": "ou_alice",
+            },
+        )
+    )
+
+    request = channel._client.im.v1.message.reply.call_args.args[0]
+    assert json.loads(request.request_body.content)["text"].startswith(
+        '<at user_id="ou_alice">用户</at> '
+    )
+
+
+@pytest.mark.asyncio
+async def test_topic_card_reply_mentions_current_sender() -> None:
+    channel = _make_feishu_channel(mention_thread_sender=True)
+    reply_resp = MagicMock()
+    reply_resp.success.return_value = True
+    channel._client.im.v1.message.reply.return_value = reply_resp
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_abc",
+            content="- 第一项\n- 第二项",
+            metadata={
+                "message_id": "om_child",
+                "chat_type": "group",
+                "root_id": "om_root",
+                "thread_id": "om_root",
+                "sender_open_id": "ou_alice",
+            },
+        )
+    )
+
+    request = channel._client.im.v1.message.reply.call_args.args[0]
+    card = json.loads(request.request_body.content)
+    assert card["elements"][0] == {
+        "tag": "markdown",
+        "content": "<at id=ou_alice></at>",
+    }
 
 
 @pytest.mark.asyncio
@@ -658,6 +764,267 @@ async def test_on_message_new_system_divider_only_in_p2p(
     assert receive_id == "ou_alice"
     assert msg_type == "system"
     assert json.loads(content)["type"] == "divider"
+
+
+@pytest.mark.asyncio
+async def test_bot_rooted_topic_allows_group_message_without_mention() -> None:
+    channel = _make_feishu_channel(
+        group_policy="mention",
+        follow_bot_threads=True,
+        topic_isolation=True,
+    )
+    channel._remember_bot_message("om_bot_root")
+    channel._handle_message = AsyncMock()
+
+    with (
+        patch.object(channel, "_add_reaction", return_value=None),
+        patch.object(channel, "_get_user_name_sync", return_value="张岩"),
+    ):
+        await channel._on_message(
+            _make_feishu_event(
+                chat_type="group",
+                content='{"text": "继续查一下"}',
+                message_id="om_child",
+                root_id="om_bot_root",
+                thread_id="omt_bot_topic",
+            )
+        )
+
+    channel._handle_message.assert_awaited_once()
+    kwargs = channel._handle_message.call_args.kwargs
+    assert kwargs["content"] == "继续查一下"
+    assert kwargs["session_key"] == "feishu:oc_abc:om_bot_root"
+    assert kwargs["metadata"]["sender_open_id"] == "ou_alice"
+    assert kwargs["metadata"]["sender_name"] == "张岩"
+    assert kwargs["metadata"]["direct_request_text"] == "继续查一下"
+    [sender_context] = kwargs["metadata"][RUNTIME_CONTEXT_INPUT_META]
+    assert '"name": "张岩"' in sender_context.content
+    assert '"open_id": "ou_alice"' in sender_context.content
+
+
+@pytest.mark.asyncio
+async def test_unrelated_topic_without_mention_is_ignored() -> None:
+    channel = _make_feishu_channel(
+        group_policy="mention",
+        follow_bot_threads=True,
+    )
+    channel._handle_message = AsyncMock()
+
+    with patch.object(channel, "_message_is_from_this_bot_sync", return_value=False):
+        await channel._on_message(
+            _make_feishu_event(
+                chat_type="group",
+                message_id="om_child",
+                root_id="om_human_root",
+                thread_id="omt_human_topic",
+            )
+        )
+
+    channel._handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_quoted_reply_without_mention_is_ignored() -> None:
+    channel = _make_feishu_channel(
+        group_policy="mention",
+        follow_bot_threads=True,
+    )
+    channel._remember_bot_message("om_bot_root")
+    channel._handle_message = AsyncMock()
+
+    await channel._on_message(
+        _make_feishu_event(
+            chat_type="group",
+            message_id="om_child",
+            root_id="om_bot_root",
+            thread_id=None,
+        )
+    )
+
+    channel._handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bot_topic_ownership_can_be_verified_after_restart() -> None:
+    channel = _make_feishu_channel(follow_bot_threads=True)
+    message = _make_feishu_event(
+        chat_type="group",
+        root_id="om_old_bot_message",
+        thread_id="omt_old_bot_topic",
+    ).event.message
+
+    with patch.object(channel, "_message_is_from_this_bot_sync", return_value=True):
+        assert await channel._is_bot_thread_message(message) is True
+
+    assert channel._bot_message_ids["om_old_bot_message"] is True
+
+
+def test_bot_message_ownership_matches_bot_open_id() -> None:
+    channel = _make_feishu_channel(follow_bot_threads=True)
+    channel._bot_open_id = "ou_this_bot"
+    response = MagicMock()
+    response.success.return_value = True
+    response.data.items = [
+        SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="app",
+                id="cli_test",
+                id_type="app_id",
+                open_bot_id="ou_this_bot",
+            )
+        )
+    ]
+    channel._client.im.v1.message.get.return_value = response
+
+    assert channel._message_is_from_this_bot_sync("om_bot_message") is True
+
+
+def test_get_chat_history_reads_thread_container_and_sender_id() -> None:
+    channel = _make_feishu_channel()
+    response = MagicMock()
+    response.success.return_value = True
+    response.data.items = [
+        SimpleNamespace(
+            message_id="om_topic_reply",
+            create_time="1786683600000",
+            sender=SimpleNamespace(id="ou_alice", sender_name="张岩"),
+            body=SimpleNamespace(content='{"text":"话题里的消息"}'),
+            msg_type="text",
+        )
+    ]
+    response.data.has_more = False
+    response.data.page_token = None
+    channel._client.im.v1.message.list.return_value = response
+
+    items = channel.get_chat_history_sync(
+        "oc_group",
+        thread_id="omt_topic",
+    )
+
+    request = channel._client.im.v1.message.list.call_args.args[0]
+    assert request.container_id_type == "thread"
+    assert request.container_id == "omt_topic"
+    assert items[0]["sender_id"] == "ou_alice"
+    assert items[0]["sender_name"] == "张岩"
+    assert items[0]["text"] == "话题里的消息"
+
+
+def test_get_chat_history_reads_all_pages_and_expands_topics() -> None:
+    channel = _make_feishu_channel()
+
+    def _response(items, *, has_more=False, page_token=None):
+        response = MagicMock()
+        response.success.return_value = True
+        response.data.items = items
+        response.data.has_more = has_more
+        response.data.page_token = page_token
+        return response
+
+    root = SimpleNamespace(
+        message_id="om_root",
+        root_id=None,
+        parent_id=None,
+        thread_id="omt_alert",
+        create_time="1000",
+        sender=SimpleNamespace(id="ou_alice", sender_name="张岩"),
+        body=SimpleNamespace(content='{"text":"旧话题根消息"}'),
+        msg_type="text",
+    )
+    ordinary = SimpleNamespace(
+        message_id="om_plain",
+        root_id=None,
+        parent_id=None,
+        thread_id=None,
+        create_time="2500",
+        sender=SimpleNamespace(id="ou_bob", sender_name="李雷"),
+        body=SimpleNamespace(content='{"text":"普通群消息"}'),
+        msg_type="text",
+    )
+    reply = SimpleNamespace(
+        message_id="om_reply",
+        root_id="om_root",
+        parent_id="om_root",
+        thread_id="omt_alert",
+        create_time="3000",
+        sender=SimpleNamespace(id="ou_bob", sender_name="李雷"),
+        body=SimpleNamespace(content='{"text":"今天的话题回复"}'),
+        msg_type="text",
+    )
+    channel._client.im.v1.message.list.side_effect = [
+        _response([root], has_more=True, page_token="page-2"),
+        _response([ordinary]),
+        _response([root, reply]),
+    ]
+
+    items = channel.get_chat_history_sync(
+        "oc_group",
+        start_time_ms=2000,
+        end_time_ms=4000,
+    )
+
+    requests = [call.args[0] for call in channel._client.im.v1.message.list.call_args_list]
+    assert [request.container_id_type for request in requests] == ["chat", "chat", "thread"]
+    assert requests[1].page_token == "page-2"
+    assert requests[2].container_id == "omt_alert"
+    assert [item["message_id"] for item in items] == ["om_plain", "om_reply"]
+    assert items[-1]["text"] == "今天的话题回复"
+
+
+def test_get_inbound_sender_name_from_contacts() -> None:
+    channel = _make_feishu_channel()
+    response = MagicMock()
+    response.success.return_value = True
+    response.data.user = SimpleNamespace(name="张岩")
+    channel._client.contact.v3.user.get.return_value = response
+
+    assert channel._get_user_name_sync("ou_alice") == "张岩"
+    assert channel._user_name_cache["ou_alice"][0] == "张岩"
+
+
+@pytest.mark.asyncio
+async def test_group_history_summary_gets_immediate_progress_feedback() -> None:
+    channel = _make_feishu_channel(group_policy="open")
+    channel._processed_message_ids.clear()
+    channel._handle_message = AsyncMock()
+    channel.bus.publish_outbound = AsyncMock()
+
+    with (
+        patch.object(channel, "_add_reaction", return_value=None),
+        patch.object(channel, "_get_user_name_sync", return_value="张岩"),
+    ):
+        await channel._on_message(
+            _make_feishu_event(
+                chat_type="group",
+                content='{"text":"总结下群里今天有哪些告警"}',
+            )
+        )
+
+    channel.bus.publish_outbound.assert_awaited_once()
+    progress = channel.bus.publish_outbound.call_args.args[0]
+    assert isinstance(progress.event, ProgressEvent)
+    assert progress.event.tool_hint is True
+    assert "完整历史" in progress.content
+    channel._handle_message.assert_awaited_once()
+
+
+def test_human_message_is_not_treated_as_bot_owned() -> None:
+    channel = _make_feishu_channel(follow_bot_threads=True)
+    channel._bot_open_id = "ou_this_bot"
+    response = MagicMock()
+    response.success.return_value = True
+    response.data.items = [
+        SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user",
+                id="ou_this_bot",
+                id_type="open_id",
+                open_bot_id="",
+            )
+        )
+    ]
+    channel._client.im.v1.message.get.return_value = response
+
+    assert channel._message_is_from_this_bot_sync("om_human_message") is False
 
 
 @pytest.mark.asyncio

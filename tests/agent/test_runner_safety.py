@@ -10,7 +10,7 @@ from agent.runner_helpers import make_run_spec
 from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools import ToolResult
 from nanobot.config.schema import AgentDefaults
-from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
@@ -239,3 +239,54 @@ async def test_runner_throttles_repeated_workspace_bypass_attempts():
         "expected at least one escalated workspace_violation event, got: "
         f"{result.tool_events}"
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_forces_final_answer_after_tool_call_budget() -> None:
+    provider = MagicMock(spec=LLMProvider)
+
+    async def chat_with_retry(*, tools=None, **_kwargs):
+        call_number = provider.chat_with_retry.await_count
+        if call_number <= 4:
+            return LLMResponse(
+                content="继续逐日查询",
+                tool_calls=[
+                    ToolCallRequest(
+                        id=f"call_{call_number}",
+                        name="magik_cube_daily_report",
+                        arguments={"report_date": f"2026-08-{14 - call_number:02d}"},
+                    )
+                ],
+            )
+        assert tools is None
+        return LLMResponse(content="根据已查询的三天数据，可以确认用量总体稳定。")
+
+    provider.chat_with_retry = AsyncMock(side_effect=chat_with_retry)
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.get_max_calls_per_turn.side_effect = (
+        lambda name: 3 if name == "magik_cube_daily_report" else None
+    )
+    tools.execute = AsyncMock(return_value="日报查询结果")
+
+    result = await AgentRunner().run(
+        make_run_spec(
+            provider,
+            initial_messages=[{"role": "user", "content": "你还知道些什么？"}],
+            tools=tools,
+            model="test-model",
+            max_iterations=12,
+            max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        )
+    )
+
+    assert tools.execute.await_count == 3
+    assert provider.chat_with_retry.await_count == 5
+    assert result.stop_reason == "tool_call_budget"
+    assert result.error is None
+    assert result.final_content == "根据已查询的三天数据，可以确认用量总体稳定。"
+    assert result.tool_events[-1] == {
+        "name": "magik_cube_daily_report",
+        "status": "error",
+        "detail": "tool_call_budget_exceeded:3",
+    }

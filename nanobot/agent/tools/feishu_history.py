@@ -16,11 +16,17 @@ _FEISHU_HISTORY_PARAMETERS = tool_parameters_schema(
         "Optional Feishu chat_id (starts with 'oc_'). "
         "Defaults to the chat the current conversation is happening in."
     ),
-    limit=IntegerSchema(
-        20,
-        description="Max messages to return (1-100, default 20).",
-        minimum=1,
-        maximum=100,
+    thread_id=StringSchema(
+        "Optional Feishu topic/thread ID (usually starts with 'omt_'). "
+        "When omitted inside a topic, defaults to the current topic."
+    ),
+    offset=IntegerSchema(
+        0,
+        description=(
+            "Continuation offset returned by a previous call. Start with 0. When the tool "
+            "returns CONTINUE_REQUIRED, call it again with next_offset until READ_COMPLETE."
+        ),
+        minimum=0,
     ),
     start_time=StringSchema(
         "Inclusive window start. Accepts: unix seconds/ms, ISO datetime "
@@ -32,8 +38,11 @@ _FEISHU_HISTORY_PARAMETERS = tool_parameters_schema(
     ),
     required=[],
     description=(
-        "Read messages from the Feishu group/DM that the current turn belongs to, "
-        "or from an explicitly provided chat_id, optionally within a time window. "
+        "Read all visible messages from the current Feishu topic, group, or DM. Inside a "
+        "topic, the entire current topic is read by default unless the request explicitly "
+        "asks for the whole group. Group reads include ordinary messages and every visible "
+        "topic reply. Results may be returned in continuation batches; keep calling with "
+        "next_offset until READ_COMPLETE before answering. "
         "Image messages and file/doc attachments are downloaded and returned as local "
         "file paths so the agent can open them with read_file (multimodal models can "
         "see images; files like docs/sheets can be parsed from the path). "
@@ -107,6 +116,11 @@ def _fmt_ts(ms: int | None) -> str:
 class FeishuChatHistoryTool(Tool):
     """Read Feishu messages for the current chat with optional time window."""
 
+    _RESULT_PAGE_MAX_CHARS = 11_000
+
+    def __init__(self) -> None:
+        self._snapshots: dict[str, dict[str, Any]] = {}
+
     @property
     def read_only(self) -> bool:
         return True
@@ -118,11 +132,13 @@ class FeishuChatHistoryTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Read messages from the current Feishu chat (or a given chat_id), "
-            "optionally limited to a time window (e.g. 今天/昨天/最近2小时 or ISO range). "
+            "Read every visible message from the current Feishu topic/chat, including all "
+            "visible topic replies, optionally within a time window (e.g. 今天/昨天/最近2小时). "
+            "Never stop at an arbitrary message count. If CONTINUE_REQUIRED is returned, "
+            "call this tool again with next_offset and do not answer until READ_COMPLETE. "
             "Image messages and file/doc attachments are downloaded to local paths so "
-            "you can open them with read_file for summarisation. Use this to catch up "
-            "on context you may have missed."
+            "you can open them with read_file for summarisation. When the user asks about "
+            "earlier messages in a Feishu topic, call this tool to read the topic first."
         )
 
     @classmethod
@@ -153,7 +169,8 @@ class FeishuChatHistoryTool(Tool):
     async def execute(
         self,
         chat_id: str | None = None,
-        limit: int = 20,
+        thread_id: str | None = None,
+        offset: int = 0,
         start_time: str | None = None,
         end_time: str | None = None,
         **kwargs: Any,
@@ -163,10 +180,39 @@ class FeishuChatHistoryTool(Tool):
 
         req_ctx = current_request_context()
         target_chat = (chat_id or (req_ctx.chat_id if req_ctx else "") or "").strip()
-        if not target_chat:
+        request_text = ""
+        if req_ctx:
+            request_text = req_ctx.original_user_text or ""
+            if isinstance(req_ctx.metadata, dict):
+                request_text = req_ctx.metadata.get("direct_request_text") or request_text
+        whole_group_requested = any(
+            term in request_text for term in ("群里", "群聊", "群消息", "全群", "整个群")
+        )
+        current_thread = (
+            req_ctx.metadata.get("thread_id")
+            if req_ctx and isinstance(req_ctx.metadata, dict)
+            else None
+        )
+        target_thread = (
+            thread_id
+            or (current_thread if not chat_id and not whole_group_requested else None)
+            or ""
+        ).strip()
+        if not target_chat and not target_thread:
             return ToolResult.error(
-                "Error: no chat_id provided and the current conversation has no Feishu chat."
+                "Error: no chat_id/thread_id provided and the current conversation has no "
+                "Feishu chat or topic."
             )
+
+        if not start_time and not end_time:
+            for marker in ("今天", "昨天", "前天"):
+                if marker in request_text:
+                    start_time = end_time = marker
+                    break
+            else:
+                relative = _CN_REL_HOURS.search(request_text) or _CN_REL_DAYS.search(request_text)
+                if relative:
+                    start_time = relative.group(0)
 
         start_ms = _parse_time_expr(start_time, is_end=False)
         end_ms = _parse_time_expr(end_time, is_end=True)
@@ -187,30 +233,62 @@ class FeishuChatHistoryTool(Tool):
             return ToolResult.error("Error: Feishu channel is not ready yet.")
 
         loop = asyncio.get_running_loop()
-        items = await loop.run_in_executor(
-            None, lambda: get_history(target_chat, int(limit), start_ms, end_ms)
-        )
+        snapshot_key = (
+            (req_ctx.turn_id or req_ctx.session_key)
+            if req_ctx
+            else f"{target_chat}:{target_thread}"
+        ) or f"{target_chat}:{target_thread}"
+        snapshot = self._snapshots.get(snapshot_key) if offset else None
+        if snapshot is None:
+            items = await loop.run_in_executor(
+                None,
+                lambda: get_history(
+                    target_chat,
+                    None,
+                    start_ms,
+                    end_ms,
+                    thread_id=target_thread or None,
+                ),
+            )
+            window_desc = (
+                f"窗口 {start_time or '最早'} ~ {end_time or '现在'}"
+                if (start_time or end_time) else ""
+            )
+            scope_label = f"话题 {target_thread}" if target_thread else f"群 {target_chat}"
+            snapshot = {
+                "items": items,
+                "window_desc": window_desc,
+                "scope_label": scope_label,
+            }
+            self._snapshots[snapshot_key] = snapshot
+            while len(self._snapshots) > 8:
+                self._snapshots.pop(next(iter(self._snapshots)))
+        else:
+            items = snapshot["items"]
+
         if not items:
+            target_label = f"topic {target_thread}" if target_thread else f"chat {target_chat}"
             return (
-                f"No readable messages found in chat {target_chat} for the given window. "
+                f"No readable messages found in {target_label} for the given window. "
                 "The bot may lack group message permission or the chat may be empty."
+            )
+        if offset >= len(items):
+            return ToolResult.error(
+                f"Error: offset {offset} is outside the complete {len(items)}-message snapshot."
             )
 
         media_dir = get_media_dir("feishu")
-        window_desc = (
-            f"窗口 {start_time or '最早'} ~ {end_time or '现在'}"
-            if (start_time or end_time) else ""
-        )
-        lines = [
-            f"群 {target_chat} 共 {len(items)} 条消息"
-            + (f"（{window_desc}，按时间先后）：" if window_desc else "（按时间先后）：")
-        ]
+        window_desc = snapshot["window_desc"]
+        scope_label = snapshot["scope_label"]
+        lines: list[str] = []
+        rendered_chars = 0
+        next_offset = offset
 
-        for it in items:
+        for it in items[offset:]:
             ts = _fmt_ts(it.get("create_time_ms"))
             sender_open_id = it.get("sender_id", "unknown")
-            name = ""
-            if get_name is not None:
+            name = (it.get("sender_name") or "").strip()
+            if not name and get_name is not None:
                 name = await loop.run_in_executor(None, get_name, sender_open_id) or ""
             sender = name or sender_open_id
             msg_type = it.get("msg_type", "")
@@ -267,6 +345,29 @@ class FeishuChatHistoryTool(Tool):
                 for dl in doc_links:
                     parts.append(f"[云文档→feishu_doc_read: {dl}]")
 
-            lines.append(f"[{ts} {sender}] " + " ".join(parts))
+            topic_label = f" 话题:{it['thread_id']}" if it.get("thread_id") else ""
+            line = f"[{ts} {sender}{topic_label}] " + " ".join(parts)
+            if lines and rendered_chars + len(line) > self._RESULT_PAGE_MAX_CHARS:
+                break
+            lines.append(line)
+            rendered_chars += len(line) + 1
+            next_offset += 1
 
-        return "\n".join(lines)
+        header = (
+            f"{scope_label} 已完整抓取 {len(items)} 条消息，本批为第 "
+            f"{offset + 1}-{next_offset} 条"
+            + (f"（{window_desc}，按时间先后）：" if window_desc else "（按时间先后）：")
+        )
+        if next_offset < len(items):
+            continuation = (
+                f"CONTINUE_REQUIRED: next_offset={next_offset}。尚有 "
+                f"{len(items) - next_offset} 条未交给你处理；不要作答，必须继续调用 "
+                f"feishu_chat_history(offset={next_offset})，直到收到 READ_COMPLETE。"
+            )
+        else:
+            continuation = (
+                f"READ_COMPLETE: 已读取并交付该范围内全部 {len(items)} 条消息，"
+                "现在可以基于所有批次作答。"
+            )
+            self._snapshots.pop(snapshot_key, None)
+        return "\n".join([header, *lines, continuation])
