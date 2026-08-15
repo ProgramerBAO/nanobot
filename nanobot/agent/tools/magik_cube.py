@@ -928,14 +928,20 @@ class MagikCubeDailyReportTool(Tool):
             ),
             "",
         )
-        if not tenant_query:
+        all_customers = bool(
+            re.search(
+                r"(?:各大|所有|全部|各个|每个|全体)\s*(?:大客户|客户|租户)",
+                raw,
+            )
+        )
+        if not tenant_query and not all_customers:
             tenant_match = re.search(
                 r"([A-Za-z0-9_\-\u4e00-\u9fff]+)\s*(?:用户|客户|租户)", cleaned
             )
             tenant_query = tenant_match.group(1) if tenant_match else ""
 
         is_daily_report = "大客户" in raw and "日报" in raw
-        if not tenant_query and not model and not is_daily_report:
+        if not tenant_query and not model and not is_daily_report and not all_customers:
             return None
 
         params: dict[str, Any] = {"save_snapshot": False}

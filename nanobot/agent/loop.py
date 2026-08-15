@@ -1522,7 +1522,7 @@ class AgentLoop:
         if result is None and (direct := self.tools.match_direct_request(direct_raw)) is not None:
             tool_name, params = direct
             logger.info("Direct request route: {}({})", tool_name, params)
-            content = await self.tools.execute(tool_name, params)
+            content = await self.tools.execute(tool_name, params, include_retry_hint=False)
             result = OutboundMessage(
                 channel=ctx.msg.channel,
                 chat_id=ctx.msg.chat_id,

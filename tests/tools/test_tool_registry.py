@@ -292,6 +292,16 @@ async def test_registry_uses_structured_tool_result_for_errors() -> None:
     assert error_result.startswith("Error: real failure")
     assert "[Analyze the error above" in error_result
 
+    direct_result = await registry.execute(
+        "failing_tool",
+        {},
+        include_retry_hint=False,
+    )
+
+    assert isinstance(direct_result, ToolResult)
+    assert direct_result.is_error
+    assert direct_result == "Error: real failure"
+
 
 def test_get_definitions_returns_cached_result() -> None:
     registry = ToolRegistry()

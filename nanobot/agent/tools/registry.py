@@ -196,9 +196,19 @@ class ToolRegistry:
             return params
         return cls._coerce_argument_value(params.get("arguments"))
 
-    async def execute(self, name: str, params: Any) -> Any:
+    async def execute(
+        self,
+        name: str,
+        params: Any,
+        *,
+        include_retry_hint: bool = True,
+    ) -> Any:
         """Execute a tool by name with given parameters."""
-        hint = "\n\n[Analyze the error above and try a different approach.]"
+        hint = (
+            "\n\n[Analyze the error above and try a different approach.]"
+            if include_retry_hint
+            else ""
+        )
         tool, params, error = self.prepare_call(name, params)
         if error:
             return ToolResult.error(str(error) + hint)

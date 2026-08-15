@@ -359,6 +359,22 @@ def test_direct_route_prefers_configured_tenant_alias(tmp_path: Path) -> None:
     assert tool.max_calls_per_turn == 3
 
 
+def test_direct_route_treats_generic_customer_quantifiers_as_all_customers(
+    tmp_path: Path,
+) -> None:
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+
+    assert tool.match_direct_request("看看昨天各大客户都用了多少 tpm，峰值多少") == {
+        "save_snapshot": False,
+    }
+    assert tool.match_direct_request("统计昨天所有客户的 token 用量") == {
+        "save_snapshot": False,
+    }
+    assert tool.match_direct_request("查询每个租户昨天的 TPM") == {
+        "save_snapshot": False,
+    }
+
+
 def test_direct_route_does_not_capture_unrelated_questions(tmp_path: Path) -> None:
     tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
 
