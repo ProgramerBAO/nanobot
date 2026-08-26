@@ -20,8 +20,23 @@ import yaml
 from loguru import logger
 from pydantic import Field
 
+from nanobot.agent.reporting.magik_cube_intent import (
+    IntentCandidateStore,
+    classify_report_intent,
+    is_deep_analysis_request,
+    is_report_intent_candidate,
+    match_promoted_rule,
+    minimal_interactive_intent,
+)
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.schema import BooleanSchema, StringSchema, tool_parameters_schema
+from nanobot.agent.tools.schema import (
+    ArraySchema,
+    BooleanSchema,
+    ObjectSchema,
+    StringSchema,
+    tool_parameters_schema,
+)
+from nanobot.bus.events import OUTBOUND_META_AGENT_UI
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.config_base import Base
 from nanobot.utils.helpers import _write_text_atomic
@@ -76,6 +91,18 @@ class MagikCubeToolConfig(Base):
     trend_min_share: float = Field(default=0.01, ge=0, le=1)
     # 当日 Token 超过周期中位数的倍数阈值。
     spike_median_multiplier: float = Field(default=1.5, ge=1, le=10)
+    # 一次交互最多查询的客户数，避免模型 fan-out 放大管理面压力。
+    interactive_max_tenants: int = Field(default=5, ge=1, le=10)
+    # 飞书模型矩阵每页行数；较小页长兼顾移动端可读性。
+    matrix_page_size: int = Field(default=8, ge=4, le=20)
+    # 未固化报表表达最多调用一次轻量 LLM 进行结构化意图解析。
+    intent_fallback_enabled: bool = True
+    # 意图解析必须快速失败；失败后返回确定性参数卡，不进入第二次 LLM。
+    intent_fallback_timeout_seconds: float = Field(default=3.0, ge=0.5, le=10)
+    # 候选问法只保存在本机 runtime 目录，并按天自动淘汰。
+    intent_candidate_retention_days: int = Field(default=30, ge=1, le=365)
+    # 防止候选日志无界增长。
+    intent_candidate_max_entries: int = Field(default=10_000, ge=100, le=100_000)
 
 
 class MagikCubeApiError(RuntimeError):
@@ -345,6 +372,25 @@ def _format_change(current: int, baseline: int) -> str:
     return f"{arrow}{abs(change):.1f}%" if arrow else "持平"
 
 
+def _format_signed_number(value: int | float) -> str:
+    """Render an absolute delta with an explicit sign."""
+
+    if value > 0:
+        return f"+{_format_number(value)}"
+    return _format_number(value)
+
+
+def _format_delta(current: int, baseline: int) -> str:
+    """Render absolute and percentage change without hiding zero baselines."""
+
+    delta = current - baseline
+    if baseline == 0 and current > 0:
+        return f"新增 {_format_signed_number(delta)}"
+    if baseline > 0 and current == 0:
+        return f"停用 {_format_signed_number(delta)}"
+    return f"{_format_signed_number(delta)} / {_format_change(current, baseline)}"
+
+
 def _format_quota_field(label: str, change: Any) -> str | None:
     """提取一个配额字段的 old/new 值，仅在实际变化时生成报告片段。"""
 
@@ -535,6 +581,7 @@ class MagikCubeReporter:
         snapshot_path: Path,
         timezone: str,
         cache: _MagikCubeCache | None = None,
+        reporting_actions_enabled: bool = True,
     ) -> None:
         # Reporter 不持有连接生命周期；连接由 MagikCubeClient 的 async context manager 管理。
         self._client = client
@@ -543,6 +590,7 @@ class MagikCubeReporter:
         self._snapshot_path = snapshot_path
         self._tz = ZoneInfo(timezone)
         self._cache = cache or _MagikCubeCache()
+        self._reporting_actions_enabled = reporting_actions_enabled
         # 单个子查询失败时保留其它数据，并在报告末尾集中呈现 warning。
         self._warnings: list[str] = []
 
@@ -669,6 +717,484 @@ class MagikCubeReporter:
             breakdown=breakdown,
             include_tpm=include_tpm,
         )
+
+    def _tenant_query_value(self, tenant: _Tenant) -> str:
+        """Prefer a configured alias so interactive callbacks never expose tenant IDs."""
+
+        for alias, tenant_id in self._config.tenant_mappings.items():
+            if tenant_id == tenant.tenant_id:
+                return alias
+        return tenant.name
+
+    @staticmethod
+    def _interaction_base_params(
+        plan: _ComparisonPlan,
+        *,
+        granularity: str,
+        include_tpm: bool,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "start_date": plan.primary.start.isoformat(),
+            "end_date": plan.primary.end.isoformat(),
+            "comparison": "none",
+            "breakdown": "model",
+            "include_tpm": include_tpm,
+            "report_template": "matrix_card",
+            "granularity": granularity,
+            "interactive": True,
+            "save_snapshot": False,
+        }
+        if plan.comparison:
+            params["compare_start_date"] = plan.comparison.start.isoformat()
+            params["compare_end_date"] = plan.comparison.end.isoformat()
+        return params
+
+    async def prepare_scope_interaction(
+        self,
+        plan: _ComparisonPlan,
+        *,
+        tenant_query: str,
+        granularity: str,
+        include_tpm: bool,
+    ) -> ToolResult:
+        """Return a channel-agnostic customer/model-scope selection card."""
+
+        tenants = (
+            await self._list_matching_tenants(tenant_query)
+            if tenant_query
+            else await self._list_key_accounts()
+        )
+        if not tenants:
+            raise MagikCubeApiError(f"未找到匹配客户：{tenant_query or '大客户'}")
+        options = [
+            {
+                "value": self._tenant_query_value(tenant),
+                "label": tenant.name,
+                "selected": bool(tenant_query),
+            }
+            for tenant in tenants[: self._config.max_report_items]
+        ]
+        base_params = self._interaction_base_params(
+            plan, granularity=granularity, include_tpm=include_tpm
+        )
+        ui = {
+            "kind": "magik_report_form",
+            "version": 1,
+            "phase": "scope",
+            "title": "选择报表范围",
+            "period": _window_label(plan.primary),
+            "base_params": base_params,
+            "tenant_options": options,
+            "tenant_required": not bool(tenant_query),
+            "max_tenants": self._config.interactive_max_tenants,
+            "scope_options": [
+                {"value": "summary", "label": "汇总"},
+                {"value": "all", "label": "所有模型"},
+                {"value": "selected", "label": "指定模型"},
+            ],
+        }
+        names = "、".join(item["label"] for item in options)
+        content = (
+            f"请选择报表范围。周期：{_window_label(plan.primary)}。"
+            f"可选客户：{names}。模型范围：汇总、所有模型或指定模型。"
+        )
+        return ToolResult(content, metadata={OUTBOUND_META_AGENT_UI: ui})
+
+    async def prepare_model_interaction(
+        self,
+        plan: _ComparisonPlan,
+        selections: list[dict[str, Any]],
+        *,
+        granularity: str,
+        include_tpm: bool,
+    ) -> ToolResult:
+        """Return a second-round model selector for the chosen tenants."""
+
+        tenant_models: list[dict[str, Any]] = []
+        for selection in selections:
+            query = str(selection.get("tenant_query") or "").strip()
+            tenants = await self._list_matching_tenants(query)
+            if len(tenants) != 1:
+                raise MagikCubeApiError(f"客户必须精确匹配一个租户：{query}")
+            tenant = tenants[0]
+            models = await self._list_tenant_models(tenant)
+            tenant_models.append(
+                {
+                    "tenant_query": query,
+                    "tenant_label": tenant.name,
+                    "models": models,
+                }
+            )
+        ui = {
+            "kind": "magik_report_form",
+            "version": 1,
+            "phase": "models",
+            "title": "选择模型",
+            "period": _window_label(plan.primary),
+            "base_params": self._interaction_base_params(
+                plan, granularity=granularity, include_tpm=include_tpm
+            ),
+            "tenant_models": tenant_models,
+            "max_tenants": self._config.interactive_max_tenants,
+        }
+        count = sum(len(item["models"]) for item in tenant_models)
+        content = f"请选择模型。已加载 {len(tenant_models)} 个客户、{count} 个模型。"
+        return ToolResult(content, metadata={OUTBOUND_META_AGENT_UI: ui})
+
+    async def generate_matrix_report(
+        self,
+        plan: _ComparisonPlan,
+        selections: list[dict[str, Any]],
+        *,
+        granularity: str,
+        include_tpm: bool,
+    ) -> ToolResult:
+        """Generate one deterministic report-card payload per selected tenant."""
+
+        tenant_limit = self._config.interactive_max_tenants
+        if not selections or len(selections) > tenant_limit:
+            raise MagikCubeApiError(f"一次必须选择 1 到 {tenant_limit} 个客户")
+        tenant_semaphore = asyncio.Semaphore(2)
+
+        async def load_one(
+            selection: dict[str, Any],
+        ) -> tuple[_Tenant, _TenantMetrics, list[tuple[str, _TenantMetrics]], str]:
+            async with tenant_semaphore:
+                query = str(selection.get("tenant_query") or "").strip()
+                scope = str(selection.get("model_scope") or "summary")
+                tenants = await self._list_matching_tenants(query)
+                if len(tenants) != 1:
+                    raise MagikCubeApiError(f"客户必须精确匹配一个租户：{query}")
+                tenant = tenants[0]
+                model_names: list[str] = []
+                if scope in {"all", "selected"}:
+                    available = await self._list_tenant_models(tenant)
+                    if scope == "all":
+                        model_names = available
+                    else:
+                        requested = [
+                            str(item).strip()
+                            for item in selection.get("models", [])
+                            if str(item).strip()
+                        ]
+                        by_key = {item.casefold(): item for item in available}
+                        unknown = [item for item in requested if item.casefold() not in by_key]
+                        if unknown:
+                            raise MagikCubeApiError(
+                                f"{tenant.name} 存在未知模型：{'、'.join(unknown)}"
+                            )
+                        model_names = [by_key[item.casefold()] for item in requested]
+                values = await asyncio.gather(
+                    self._tenant_metrics_for_windows(
+                        tenant, plan.fetch_windows, include_tpm=include_tpm
+                    ),
+                    *(
+                        self._tenant_metrics_for_windows(
+                            tenant,
+                            plan.fetch_windows,
+                            model=model_name,
+                            # 矩阵表不展示逐模型 TPM；只保留一次租户汇总 TPM 查询。
+                            include_tpm=False,
+                        )
+                        for model_name in model_names
+                    )
+                )
+                return tenant, values[0], list(zip(model_names, values[1:])), scope
+
+        loaded = await asyncio.gather(
+            *(load_one(item) for item in selections), return_exceptions=True
+        )
+        cards: list[dict[str, Any]] = []
+        for selection, result in zip(selections, loaded, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Magik Cube matrix tenant query failed: error_type={}",
+                    type(result).__name__,
+                )
+                cards.append(
+                    self._build_matrix_error_card(
+                        plan,
+                        str(selection.get("tenant_query") or "未命名客户").strip(),
+                    )
+                )
+                continue
+            tenant, summary, model_rows, scope = result
+            card = self._build_matrix_card(
+                plan,
+                tenant,
+                summary,
+                model_rows,
+                model_scope=scope,
+                granularity=granularity,
+                include_tpm=include_tpm,
+            )
+            period_days = (plan.primary.end - plan.primary.start).days + 1
+            subscription_period = (
+                "month" if granularity == "week" else "day" if period_days == 1 else "week"
+            )
+            if self._reporting_actions_enabled:
+                period_label = {"day": "日报", "week": "周报", "month": "月报"}[
+                    subscription_period
+                ]
+                card["actions"] = [
+                    {
+                        "action_id": f"subscribe:{subscription_period}",
+                        "label": f"订阅{period_label}",
+                        "style": "default",
+                        "tool_name": "report_center",
+                        "params": {
+                            "action": "subscribe",
+                            "period": subscription_period,
+                            "report_params": {
+                                "tenant_query": str(selection.get("tenant_query") or ""),
+                                "breakdown": "summary" if scope == "summary" else "model",
+                                "report_template": "matrix_card",
+                                "granularity": granularity,
+                                "include_tpm": include_tpm,
+                                "comparison": (
+                                    "previous_month"
+                                    if subscription_period == "month"
+                                    else "previous_period"
+                                ),
+                                "report_selections": [dict(selection)],
+                            },
+                        },
+                        "content": "创建固定报表订阅",
+                    }
+                ]
+            cards.append(card)
+        fallback = "\n\n".join(card["fallback_text"] for card in cards)
+        ui = {"kind": "magik_report_cards", "version": 1, "cards": cards}
+        return ToolResult(fallback, metadata={OUTBOUND_META_AGENT_UI: ui})
+
+    @staticmethod
+    def _build_matrix_error_card(plan: _ComparisonPlan, tenant_query: str) -> dict[str, Any]:
+        """Represent one failed tenant explicitly without aborting sibling reports."""
+
+        title = f"{tenant_query or '未命名客户'} 报表失败"
+        quality = "数据不完整：该客户查询失败，未将缺失数据按零处理"
+        fallback = f"{title}｜{_window_label(plan.primary)}\n{quality}"
+        return {
+            "title": title,
+            "subtitle": f"{_window_label(plan.primary)}｜Asia/Shanghai",
+            "overview": ["本客户未生成任何业务数值"],
+            "segments": ["查询失败"],
+            "table": None,
+            "insights": ["请核对客户选择或稍后重试"],
+            "quality": quality,
+            "fallback_text": fallback,
+        }
+
+    @staticmethod
+    def _segment_pairs(
+        plan: _ComparisonPlan, granularity: str
+    ) -> list[tuple[str, _DateWindow, _DateWindow | None]]:
+        size = 7 if granularity == "week" else 1
+        pairs: list[tuple[str, _DateWindow, _DateWindow | None]] = []
+        cursor = plan.primary.start
+        index = 0
+        weekdays = "一二三四五六日"
+        while cursor <= plan.primary.end:
+            current = _DateWindow(cursor, min(plan.primary.end, cursor + timedelta(days=size - 1)))
+            baseline: _DateWindow | None = None
+            if plan.comparison:
+                baseline_start = plan.comparison.start + timedelta(days=index * size)
+                if baseline_start <= plan.comparison.end:
+                    baseline = _DateWindow(
+                        baseline_start,
+                        min(plan.comparison.end, baseline_start + timedelta(days=current.days - 1)),
+                    )
+            if granularity == "week":
+                label = f"W{index + 1}"
+            elif plan.primary.days == 7:
+                label = f"周{weekdays[current.start.weekday()]}"
+            else:
+                label = current.start.strftime("%m-%d")
+            pairs.append((label, current, baseline))
+            cursor = current.end + timedelta(days=1)
+            index += 1
+        return pairs
+
+    @staticmethod
+    def _window_tokens(metrics: _TenantMetrics, window: _DateWindow) -> int:
+        return sum(
+            metrics.tokens.get((window.start + timedelta(days=offset)).isoformat(), 0)
+            for offset in range(window.days)
+        )
+
+    def _segment_lines(
+        self,
+        metrics: _TenantMetrics,
+        pairs: list[tuple[str, _DateWindow, _DateWindow | None]],
+    ) -> list[str]:
+        if not metrics.token_complete:
+            return ["数据不完整"]
+        lines: list[str] = []
+        for label, current_window, baseline_window in pairs:
+            current = self._window_tokens(metrics, current_window)
+            if baseline_window is None:
+                change = "无同期数据"
+            else:
+                baseline = self._window_tokens(metrics, baseline_window)
+                change = _format_delta(current, baseline)
+            lines.append(f"{label} {_format_number(current)}｜{change}")
+        return lines
+
+    def _build_matrix_card(
+        self,
+        plan: _ComparisonPlan,
+        tenant: _Tenant,
+        summary: _TenantMetrics,
+        model_rows: list[tuple[str, _TenantMetrics]],
+        *,
+        model_scope: str,
+        granularity: str,
+        include_tpm: bool,
+    ) -> dict[str, Any]:
+        current = self._period_stats(summary, plan.primary)
+        baseline = self._period_stats(summary, plan.comparison) if plan.comparison else None
+        pairs = self._segment_pairs(plan, granularity)
+        period_change = (
+            _format_delta(current.tokens, baseline.tokens) if baseline else "无对比周期"
+        )
+        overview = [
+            f"Token **{self._value_with_quality(current.tokens, current.token_complete)}**（{period_change}）",
+            f"请求数 **{self._value_with_quality(current.requests, current.token_complete)}**"
+            + (
+                f"（{_format_delta(current.requests, baseline.requests)}）"
+                if baseline
+                else ""
+            ),
+            "平均 Token/请求 **"
+            + (
+                f"{current.average_tokens_per_request:,.0f}"
+                if current.token_complete
+                else "数据不完整"
+            )
+            + "**",
+        ]
+        if include_tpm:
+            overview.append(
+                f"峰值 TPM **{self._value_with_quality(current.peak_tpm, current.tpm_complete)}**"
+            )
+
+        tenant_total = current.tokens
+        ranked_all = sorted(
+            model_rows,
+            key=lambda pair: (
+                -self._period_stats(pair[1], plan.primary).tokens,
+                pair[0].casefold(),
+            ),
+        )
+        ranked: list[tuple[str, _TenantMetrics]] = []
+        hidden_zero_models = 0
+        for model_name, metrics in ranked_all:
+            stats = self._period_stats(metrics, plan.primary)
+            prior = self._period_stats(metrics, plan.comparison) if plan.comparison else None
+            hide_as_irrelevant = (
+                model_scope == "all"
+                and prior is not None
+                and stats.token_complete
+                and prior.token_complete
+                and stats.tokens == 0
+                and prior.tokens == 0
+            )
+            if hide_as_irrelevant:
+                hidden_zero_models += 1
+            else:
+                ranked.append((model_name, metrics))
+        rows: list[dict[str, str]] = []
+        changes: list[tuple[int, str]] = []
+        new_models: list[str] = []
+        stopped_models: list[str] = []
+        for model_name, metrics in ranked:
+            stats = self._period_stats(metrics, plan.primary)
+            prior = self._period_stats(metrics, plan.comparison) if plan.comparison else None
+            share = stats.tokens / tenant_total if tenant_total else 0.0
+            change = _format_delta(stats.tokens, prior.tokens) if prior else "无对比周期"
+            if prior:
+                delta = stats.tokens - prior.tokens
+                changes.append((delta, model_name))
+                if prior.tokens == 0 and stats.tokens > 0:
+                    new_models.append(model_name)
+                elif prior.tokens > 0 and stats.tokens == 0:
+                    stopped_models.append(model_name)
+            rows.append(
+                {
+                    "model": model_name,
+                    "total": f"{self._value_with_quality(stats.tokens, stats.token_complete)}\n占比 {share:.1%}",
+                    "change": change if stats.token_complete else "数据不完整",
+                    "segments": "\n".join(self._segment_lines(metrics, pairs)),
+                }
+            )
+
+        growth = sorted((item for item in changes if item[0] > 0), reverse=True)[:1]
+        decline = sorted(item for item in changes if item[0] < 0)[:1]
+        insights: list[str] = []
+        if growth:
+            insights.append(f"增长贡献最大：{growth[0][1]} {_format_signed_number(growth[0][0])}")
+        if decline:
+            insights.append(f"下降贡献最大：{decline[0][1]} {_format_signed_number(decline[0][0])}")
+        if new_models:
+            insights.append(f"新增：{'、'.join(sorted(new_models))}")
+        if stopped_models:
+            insights.append(f"停用：{'、'.join(sorted(stopped_models))}")
+        insights = insights[:3] or ["本期无显著模型状态变化"]
+
+        kind = (
+            "日报"
+            if plan.primary.days == 1
+            else "周报"
+            if plan.primary.days == 7
+            else "月报"
+            if plan.primary.start.day == 1
+            else "区间报表"
+        )
+        quality = (
+            "完整：无接口失败、分页截断或分片缺失"
+            if not self._warnings and summary.token_complete and summary.tpm_complete
+            else "数据不完整：" + "；".join(self._warnings[:5] or ["部分查询失败"])
+        )
+        if model_scope == "all":
+            quality += f"｜已隐藏 {hidden_zero_models} 个两期均为 0 的模型"
+        table = None
+        if model_scope != "summary":
+            columns = [
+                {"name": "model", "display_name": "模型", "data_type": "text"},
+                {"name": "total", "display_name": "周期总量 / 占比", "data_type": "text"},
+                {"name": "change", "display_name": "周期变化", "data_type": "text"},
+            ]
+            if plan.primary.days > 1:
+                columns.append(
+                    {"name": "segments", "display_name": "分段变化", "data_type": "text"}
+                )
+            table = {
+                "page_size": self._config.matrix_page_size,
+                "columns": columns,
+                "rows": rows,
+            }
+        daily_lines = self._segment_lines(summary, pairs)
+        fallback_lines = [
+            f"{tenant.name} {kind}｜{_window_label(plan.primary)}",
+            *overview,
+            "分段变化：" + "；".join(daily_lines),
+        ]
+        fallback_lines.extend(
+            f"{row['model']}｜{row['total'].replace(chr(10), '｜')}｜{row['change']}｜"
+            f"{row['segments'].replace(chr(10), '；')}"
+            for row in rows
+        )
+        fallback_lines.extend(["关键变化：" + "；".join(insights), quality])
+        return {
+            "title": f"{tenant.name} {kind}",
+            "subtitle": f"{_window_label(plan.primary)}｜Asia/Shanghai",
+            "overview": overview,
+            "segments": daily_lines,
+            "table": table,
+            "insights": insights,
+            "quality": quality,
+            "fallback_text": "\n".join(fallback_lines),
+        }
 
     async def _get_pages(
         self,
@@ -1543,6 +2069,21 @@ class MagikCubeReporter:
         return "\n".join(lines)
 
 
+# 交互卡片使用批量 selection；旧的 tenant_query/model 参数继续兼容单租户调用。
+_REPORT_SELECTION_SCHEMA = ObjectSchema(
+    tenant_query=StringSchema("Configured tenant alias or exact tenant name."),
+    model_scope=StringSchema(
+        "Report scope for this tenant.", enum=("summary", "all", "selected")
+    ),
+    models=ArraySchema(
+        StringSchema("Exact model name."),
+        description="Selected model names when model_scope=selected.",
+    ),
+    required=["tenant_query", "model_scope", "models"],
+    additional_properties=False,
+)
+
+
 # 暴露给 LLM 的参数契约。全部参数可选：默认查询 agent 时区下的昨天，并生成完整日报。
 _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
     report_date=StringSchema(
@@ -1569,6 +2110,22 @@ _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
     ),
     breakdown=StringSchema("Report dimension.", enum=("summary", "model")),
     include_tpm=BooleanSchema(default=True, description="Include daily peak TPM queries."),
+    report_template=StringSchema(
+        "Output template. full keeps the existing text report; matrix_card returns structured UI.",
+        enum=("full", "matrix_card"),
+    ),
+    granularity=StringSchema(
+        "Matrix comparison granularity.", enum=("day", "week")
+    ),
+    interactive=BooleanSchema(
+        default=False,
+        description="Return a deterministic parameter card when required slots are missing.",
+    ),
+    report_selections=ArraySchema(
+        _REPORT_SELECTION_SCHEMA,
+        description="Per-tenant model selections for matrix reports.",
+        max_items=5,
+    ),
     required=[],
     description=(
         "Generate a Magik Cube key-account daily report or deterministic date-range report. "
@@ -1601,6 +2158,7 @@ class MagikCubeDailyReportTool(Tool):
             config=ctx.config.magik_cube,
             timezone=ctx.timezone,
             snapshot_path=get_runtime_subdir("magik_cube") / "proxy_snapshot.json",
+            reporting_actions_enabled=bool(ctx.config.reporting.enable),
         )
 
     def __init__(
@@ -1608,6 +2166,7 @@ class MagikCubeDailyReportTool(Tool):
         config: MagikCubeToolConfig | None = None,
         timezone: str = "Asia/Shanghai",
         snapshot_path: Path | None = None,
+        reporting_actions_enabled: bool = True,
     ) -> None:
         self._config = config or MagikCubeToolConfig()
         # 业务报表固定使用 Asia/Shanghai；保留参数仅为兼容既有构造接口。
@@ -1616,6 +2175,12 @@ class MagikCubeDailyReportTool(Tool):
             get_runtime_subdir("magik_cube") / "proxy_snapshot.json"
         )
         self._cache = _MagikCubeCache()
+        self._reporting_actions_enabled = reporting_actions_enabled
+        self._intent_candidates = IntentCandidateStore(
+            get_runtime_subdir("magik_cube") / "intent_candidates.jsonl",
+            retention_days=self._config.intent_candidate_retention_days,
+            max_entries=self._config.intent_candidate_max_entries,
+        )
 
     @property
     def name(self) -> str:
@@ -1637,16 +2202,28 @@ class MagikCubeDailyReportTool(Tool):
         # 单次范围 Tool 已覆盖主周期和对比周期，禁止 Agent 逐日或逐模型重复调用。
         return 1
 
+    @property
+    def read_only(self) -> bool:
+        """All remote routes are constrained by the read-only allowlist."""
+
+        return True
+
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
         """把明确的中文用量问题直接路由为结构化参数，绕过一次 LLM tool 选择。"""
 
         raw = text.strip()
         # 原因解释和业务建议需要 LLM；让 Agent 调用一次范围 Tool 后只解释确定性摘要。
-        if re.search(r"(?:深度分析|原因分析|原因解释|分析原因|业务建议|优化建议)", raw):
+        if is_deep_analysis_request(raw):
             return None
+        promoted = match_promoted_rule(raw)
+        if promoted is not None:
+            return promoted.to_tool_params(
+                today=datetime.now(ZoneInfo(self._timezone)).date()
+            )
         # 第一层门槛必须出现用量/Token/TPM 语义，避免拦截普通模型能力或机器状态问题。
         if not re.search(
-            r"(?:用量|使用量|使用情况|消耗|周报|月报|日报|用了多少量|多少量|token|峰值\s*tpm|tpm)",
+            r"(?:用量|使用量|使用情况|消耗|报表|周报|月报|日报|用了多少量|多少量|"
+            r"(?<![A-Za-z0-9_])token(?![A-Za-z0-9_])|峰值\s*tpm|tpm)",
             raw,
             re.IGNORECASE,
         ):
@@ -1700,13 +2277,20 @@ class MagikCubeDailyReportTool(Tool):
             tenant_query = tenant_match.group(1) if tenant_match else ""
         if not tenant_query and not all_customers:
             # Magik tenant slug 通常含下划线；允许无需“租户”后缀直接识别。
-            slug_match = re.search(r"\b[A-Za-z][A-Za-z0-9-]*_[A-Za-z0-9_-]+\b", raw)
+            slug_match = re.search(
+                r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9-]*_[A-Za-z0-9_-]+)"
+                r"(?![A-Za-z0-9_-])",
+                raw,
+            )
             tenant_query = slug_match.group(0) if slug_match else ""
 
         # 没有租户/模型/日报/全量意图时放弃 direct route，交回正常对话流程。
         is_daily_report = "大客户" in raw and "日报" in raw
         is_standard_period_report = bool(
-            re.search(r"(?:周报|月报|近\s*7\s*天|最近\s*7\s*天|一周|上周|上个月|上月)", raw)
+            re.search(
+                r"(?:日报|周报|月报|近\s*7\s*天|最近\s*7\s*天|一周|上周|上个月|上月)",
+                raw,
+            )
         )
         if (
             not tenant_query
@@ -1717,6 +2301,14 @@ class MagikCubeDailyReportTool(Tool):
         ):
             return None
 
+        full_requested = bool(
+            re.search(r"(?:完整|详细|明细)\s*(?:日报|周报|月报|报表)", raw)
+        )
+        all_models_requested = bool(
+            re.search(r"(?:各个模型|各模型|全部模型|所有模型|每个模型|模型维度|按模型)", raw)
+        )
+        summary_requested = bool(re.search(r"(?:汇总|总览|只看总量)", raw))
+
         # 即时问答不更新 Proxy 基线，避免临时查询污染下一次定时日报的净变化。
         params: dict[str, Any] = {"save_snapshot": False}
         explicit_dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", raw)
@@ -1725,7 +2317,7 @@ class MagikCubeDailyReportTool(Tool):
         if len(explicit_dates) >= 2:
             params["start_date"], params["end_date"] = explicit_dates[:2]
             params["comparison"] = "previous_period" if re.search(r"(?:环比|对比)", raw) else "none"
-        elif "上周" in raw:
+        elif "上周" in raw or "周报" in raw:
             last_week_start = today - timedelta(days=today.weekday() + 7)
             last_week_end = last_week_start + timedelta(days=6)
             if "上上周" in raw and re.search(r"(?:和|与|对比|比较|环比)", raw):
@@ -1771,6 +2363,17 @@ class MagikCubeDailyReportTool(Tool):
                     "comparison": "previous_month",
                 }
             )
+        elif "日报" in raw:
+            if full_requested:
+                params["report_date"] = yesterday.isoformat()
+            else:
+                params.update(
+                    {
+                        "start_date": yesterday.isoformat(),
+                        "end_date": yesterday.isoformat(),
+                        "comparison": "previous_period",
+                    }
+                )
         elif explicit_dates:
             params["report_date"] = explicit_dates[0]
         elif "今天" in raw:
@@ -1778,7 +2381,7 @@ class MagikCubeDailyReportTool(Tool):
         elif "前天" in raw:
             params["report_date"] = (today - timedelta(days=2)).isoformat()
 
-        if re.search(r"(?:各个模型|各模型|全部模型|每个模型|模型维度|按模型)", raw):
+        if all_models_requested:
             params["breakdown"] = "model"
             # 模型维度统一走范围引擎；单日也用 1 天主周期与前 1 天对比。
             if "start_date" not in params:
@@ -1798,7 +2401,64 @@ class MagikCubeDailyReportTool(Tool):
             params["tenant_query"] = tenant_query
         if model:
             params["model"] = model
+
+        wants_card = not full_requested and bool(
+            is_standard_period_report or re.search(r"(?:卡片|矩阵|报表)", raw)
+        )
+        if wants_card and "start_date" in params:
+            params["report_template"] = "matrix_card"
+            params["granularity"] = (
+                "week" if re.search(r"(?:月报|上个月|上月)", raw) else "day"
+            )
+            if tenant_query and (all_models_requested or summary_requested or model):
+                scope = "all" if all_models_requested else "selected" if model else "summary"
+                params["report_selections"] = [
+                    {
+                        "tenant_query": tenant_query,
+                        "model_scope": scope,
+                        "models": [model] if model else [],
+                    }
+                ]
+            else:
+                # 裸“周报/月报”或只给客户但未给模型范围时，先用卡片补齐参数。
+                params["interactive"] = True
+        elif full_requested:
+            params["report_template"] = "full"
         return params
+
+    def is_direct_intent_candidate(self, text: str) -> bool:
+        return self._config.intent_fallback_enabled and is_report_intent_candidate(text)
+
+    async def classify_direct_request(self, text: str, runtime: Any) -> dict[str, Any] | None:
+        intent = await classify_report_intent(
+            text,
+            runtime,
+            timeout_seconds=self._config.intent_fallback_timeout_seconds,
+        )
+        if intent is None:
+            return None
+        params = intent.to_tool_params(
+            today=datetime.now(ZoneInfo(self._timezone)).date()
+        )
+        outcome = "interactive" if params.get("interactive") else "direct"
+        candidate_id = self._intent_candidates.record(text, intent, outcome)
+        logger.info(
+            "Magik report intent fallback: outcome={} candidate={} has_tenant={} scope={}",
+            outcome,
+            candidate_id,
+            bool(intent.tenant_text),
+            intent.model_scope or "missing",
+        )
+        return params
+
+    def fallback_direct_request(self, text: str) -> dict[str, Any] | None:
+        intent = minimal_interactive_intent(text)
+        if intent is None:
+            return None
+        logger.warning("Magik report intent fallback degraded to parameter card")
+        return intent.to_tool_params(
+            today=datetime.now(ZoneInfo(self._timezone)).date()
+        )
 
     async def execute(
         self,
@@ -1813,6 +2473,10 @@ class MagikCubeDailyReportTool(Tool):
         comparison: str = "none",
         breakdown: str = "summary",
         include_tpm: bool = True,
+        report_template: str = "full",
+        granularity: str = "day",
+        interactive: bool = False,
+        report_selections: list[dict[str, Any]] | None = None,
         **_kwargs: Any,
     ) -> str:
         """校验配置与日期，创建只读 client，并分派完整日报或指定用量查询。"""
@@ -1837,6 +2501,24 @@ class MagikCubeDailyReportTool(Tool):
             return ToolResult.error("Error: comparison dates require start_date and end_date")
         if breakdown not in {"summary", "model"}:
             return ToolResult.error("Error: breakdown must be summary or model")
+        if report_template not in {"full", "matrix_card"}:
+            return ToolResult.error("Error: report_template must be full or matrix_card")
+        if granularity not in {"day", "week"}:
+            return ToolResult.error("Error: granularity must be day or week")
+        selections = list(report_selections or [])
+        if len(selections) > self._config.interactive_max_tenants:
+            return ToolResult.error(
+                f"Error: report_selections supports at most "
+                f"{self._config.interactive_max_tenants} tenants"
+            )
+        for selection in selections:
+            if not isinstance(selection, dict):
+                return ToolResult.error("Error: each report selection must be an object")
+            scope = selection.get("model_scope")
+            if scope not in {"summary", "all", "selected"}:
+                return ToolResult.error(
+                    "Error: model_scope must be summary, all, or selected"
+                )
         if report_date:
             try:
                 target_date = date.fromisoformat(report_date)
@@ -1865,6 +2547,14 @@ class MagikCubeDailyReportTool(Tool):
                 )
             except ValueError as exc:
                 return ToolResult.error(f"Error: invalid report range: {exc}")
+        elif report_template == "matrix_card":
+            plan = _plan_comparison_windows(
+                target_date,
+                target_date,
+                comparison="previous_period",
+                max_request_days=self._config.max_range_days_per_request,
+                max_query_days=self._config.max_query_days,
+            )
         started = time_module.perf_counter()
         cache_hits_before = self._cache.hits
         cache_misses_before = self._cache.misses
@@ -1878,7 +2568,53 @@ class MagikCubeDailyReportTool(Tool):
                     self._snapshot_path,
                     self._timezone,
                     self._cache,
+                    self._reporting_actions_enabled,
                 )
+                if report_template == "matrix_card":
+                    assert plan is not None
+                    if interactive and not selections:
+                        return await reporter.prepare_scope_interaction(
+                            plan,
+                            tenant_query=(tenant_query or "").strip(),
+                            granularity=granularity,
+                            include_tpm=include_tpm,
+                        )
+                    if not selections:
+                        query = (tenant_query or "").strip()
+                        if not query:
+                            return ToolResult.error(
+                                "Error: matrix_card requires tenant selection"
+                            )
+                        selections = [
+                            {
+                                "tenant_query": query,
+                                "model_scope": (
+                                    "selected" if model else "all" if breakdown == "model" else "summary"
+                                ),
+                                "models": [model] if model else [],
+                            }
+                        ]
+                    needs_models = any(
+                        item.get("model_scope") == "selected" and not item.get("models")
+                        for item in selections
+                    )
+                    if needs_models:
+                        if not interactive:
+                            return ToolResult.error(
+                                "Error: selected model scope requires at least one model"
+                            )
+                        return await reporter.prepare_model_interaction(
+                            plan,
+                            selections,
+                            granularity=granularity,
+                            include_tpm=include_tpm,
+                        )
+                    return await reporter.generate_matrix_report(
+                        plan,
+                        selections,
+                        granularity=granularity,
+                        include_tpm=include_tpm,
+                    )
                 if plan is not None:
                     return await reporter.generate_range_report(
                         plan,
@@ -1902,7 +2638,7 @@ class MagikCubeDailyReportTool(Tool):
             logger.info(
                 "Magik Cube report perf: mode={} elapsed_ms={:.0f} api_calls={} "
                 "api_wait_ms={:.0f} cache_hits={} cache_misses={} http_429={} http_5xx={}",
-                "range" if plan is not None else "daily",
+                "matrix" if report_template == "matrix_card" else "range" if plan is not None else "daily",
                 elapsed_ms,
                 sum(client.route_counts.values()) if client else 0,
                 client.request_seconds * 1000 if client else 0,

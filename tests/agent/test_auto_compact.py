@@ -8,8 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.magik_cube import MagikCubeDailyReportTool
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import (
+    INBOUND_META_DIRECT_TOOL,
+    OUTBOUND_META_AGENT_UI,
+    InboundMessage,
+)
 from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext
 from nanobot.config.schema import AgentDefaults
@@ -587,6 +592,66 @@ class TestAutoCompactIdleDetection:
             tenant_query="佛跳墙",
             model="GLM-5.2",
         )
+        loop.provider.chat_with_retry.assert_not_awaited()
+        await loop.close_mcp()
+
+    @pytest.mark.asyncio
+    async def test_direct_tool_result_preserves_agent_ui_metadata(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+        ui = {"kind": "magik_report_form", "phase": "scope"}
+        tool.execute = AsyncMock(  # type: ignore[method-assign]
+            return_value=ToolResult(
+                "select report scope", metadata={OUTBOUND_META_AGENT_UI: ui}
+            )
+        )
+        loop.tools.register(tool)
+        msg = InboundMessage(
+            channel="feishu",
+            sender_id="ou_alice",
+            chat_id="ou_alice",
+            content="我要周报",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert response.metadata[OUTBOUND_META_AGENT_UI] == ui
+        loop.provider.chat_with_retry.assert_not_awaited()
+        await loop.close_mcp()
+
+    @pytest.mark.asyncio
+    async def test_feishu_callback_can_resume_only_read_only_direct_tool(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+        tool.execute = AsyncMock(return_value="matrix result")  # type: ignore[method-assign]
+        loop.tools.register(tool)
+        params = {
+            "start_date": "2026-08-17",
+            "end_date": "2026-08-23",
+            "report_template": "matrix_card",
+            "report_selections": [
+                {"tenant_query": "A", "model_scope": "all", "models": []}
+            ],
+        }
+        msg = InboundMessage(
+            channel="feishu",
+            sender_id="ou_alice",
+            chat_id="ou_alice",
+            content="callback",
+            metadata={
+                INBOUND_META_DIRECT_TOOL: {
+                    "name": "magik_cube_daily_report",
+                    "params": params,
+                }
+            },
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert response.content == "matrix result"
+        tool.execute.assert_awaited_once_with(**params)  # type: ignore[attr-defined]
         loop.provider.chat_with_retry.assert_not_awaited()
         await loop.close_mcp()
 

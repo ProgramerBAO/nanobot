@@ -923,6 +923,48 @@ export interface McpPresetsPayload {
   };
 }
 
+export interface ReportingCatalogConnector {
+  id: string;
+  name: string;
+  version: string;
+  metrics: string[];
+  dimensions: string[];
+  read_only: boolean;
+}
+
+export interface ReportingCatalogTemplate {
+  id: string;
+  name: string;
+  version: string;
+  category: string;
+  periods: string[];
+  description: string;
+}
+
+export interface ReportingGrant {
+  resource_type: string;
+  resource_id: string;
+  created_at: string;
+}
+
+export interface ReportingSettingsPayload {
+  catalog: {
+    connectors: ReportingCatalogConnector[];
+    templates: ReportingCatalogTemplate[];
+    load_errors: Record<string, string>;
+  };
+  policy: {
+    rbac_enabled: boolean;
+    resource_types: string[];
+  };
+  storage: { backend: string; retention_days: number };
+  onboarding_version: number;
+  grants: ReportingGrant[];
+  recent_runs: Array<Record<string, unknown>>;
+  subscriptions: Array<Record<string, unknown>>;
+  last_action?: { ok: boolean; action: string; path?: string };
+}
+
 export type ChannelConnectStatus = "pending" | "succeeded" | "expired" | "cancelled" | "failed";
 
 export interface ChannelConnectPayload {

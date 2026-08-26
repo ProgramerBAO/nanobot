@@ -10,6 +10,7 @@ from nanobot.agent.tools.context import ContextAware, current_request_context
 
 if TYPE_CHECKING:
     from nanobot.runtime_context import RuntimeContextProvider
+    from nanobot.utils.llm_runtime import LLMRuntime
 
 
 def is_tool_error_result(name: str, result: Any) -> bool:
@@ -56,6 +57,23 @@ class ToolRegistry:
             params = tool.match_direct_request(text)
             if params is not None:
                 return name, params
+        return None
+
+    async def resolve_direct_request(
+        self, text: str, *, runtime: LLMRuntime
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Resolve deterministic routes first, then at most one semantic fallback."""
+
+        deterministic = self.match_direct_request(text)
+        if deterministic is not None:
+            return deterministic
+        for name, tool in self._tools.items():
+            if not tool.is_direct_intent_candidate(text):
+                continue
+            params = await tool.classify_direct_request(text, runtime)
+            if params is None:
+                params = tool.fallback_direct_request(text)
+            return (name, params) if params is not None else None
         return None
 
     @staticmethod

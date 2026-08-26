@@ -86,6 +86,9 @@ pdf = [
 olostep = [
     "olostep>=0.1.0",
 ]
+reporting-postgres = [
+    "psycopg[binary]>=3.2.0,<4.0.0",
+]
 dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
@@ -108,6 +111,12 @@ nanobot = "nanobot.cli.commands:app"
 # automatically via pkgutil scanning in ToolLoader.discover().
 # [project.entry-points."nanobot.tools"]
 # my_plugin = "my_package.plugins:MyTool"
+# [project.entry-points."nanobot.report_connectors"]
+# my_connector = "my_package.reporting:MyConnector"
+# [project.entry-points."nanobot.report_templates"]
+# my_template = "my_package.reporting:MyTemplate"
+# [project.entry-points."nanobot.report_renderers"]
+# my_renderer = "my_package.reporting:MyRenderer"
 
 [build-system]
 requires = ["hatchling"]
@@ -122,10 +131,12 @@ allow-direct-references = true
 [tool.hatch.build]
 include = [
     "nanobot/**/*.py",
+    "nanobot/agent/reporting/*.json",
     "nanobot/templates/**/*.md",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
     "nanobot/channels/*/webui/**/*",
+    "nanobot/reporting/template_specs/*.json",
     "nanobot/web/dist/**/*",
 ]
 # nanobot/web/dist/ is produced by `cd webui && bun run build` and is

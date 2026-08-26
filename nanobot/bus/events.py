@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 # render it and other channels may ignore unknown keys.
 OUTBOUND_META_AGENT_UI = "_agent_ui"
 
+# Trusted in-process channels may use this to resume a validated, read-only
+# tool interaction without routing the callback payload through the LLM.
+INBOUND_META_DIRECT_TOOL = "_direct_tool_request"
+
 # Internal-only inbound metadata used by in-process channels to ask the agent
 # loop to update runtime state without going through a user session.
 INBOUND_META_RUNTIME_CONTROL = "_runtime_control"

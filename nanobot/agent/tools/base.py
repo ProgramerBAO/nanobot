@@ -12,6 +12,7 @@ if typing.TYPE_CHECKING:
 
     from nanobot.agent.tools.context import ToolContext
     from nanobot.runtime_context import RuntimeContextProvider
+    from nanobot.utils.llm_runtime import LLMRuntime
 
 _ToolT = TypeVar("_ToolT", bound="Tool")
 
@@ -75,12 +76,12 @@ class Schema(ABC):
                 errors.append(f"{label} must be >= {schema['minimum']}")
             if "maximum" in schema and val > schema["maximum"]:
                 errors.append(f"{label} must be <= {schema['maximum']}")
-        if t == "string":
+        if t == "string" and isinstance(val, str):
             if "minLength" in schema and len(val) < schema["minLength"]:
                 errors.append(f"{label} must be at least {schema['minLength']} chars")
             if "maxLength" in schema and len(val) > schema["maxLength"]:
                 errors.append(f"{label} must be at most {schema['maxLength']} chars")
-        if t == "object":
+        if t == "object" and isinstance(val, dict):
             props = schema.get("properties", {})
             for k in schema.get("required", []):
                 if k not in val:
@@ -95,7 +96,7 @@ class Schema(ABC):
                     errors.extend(
                         Schema.validate_json_schema_value(v, additional, Schema.subpath(path, k))
                     )
-        if t == "array":
+        if t == "array" and isinstance(val, list):
             if "minItems" in schema and len(val) < schema["minItems"]:
                 errors.append(f"{label} must have at least {schema['minItems']} items")
             if "maxItems" in schema and len(val) > schema["maxItems"]:
@@ -133,10 +134,18 @@ class ToolResult(str):
     """String-compatible tool output with structured status."""
 
     is_error: bool
+    metadata: dict[str, Any]
 
-    def __new__(cls, content: str, *, is_error: bool = False) -> ToolResult:
+    def __new__(
+        cls,
+        content: str,
+        *,
+        is_error: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> ToolResult:
         obj = str.__new__(cls, content)
         obj.is_error = is_error
+        obj.metadata = dict(metadata or {})
         return obj
 
     @classmethod
@@ -194,6 +203,16 @@ class Tool(ABC):
         """Optional hard limit for executions during one agent turn."""
         return None
 
+    @property
+    def trusted_direct(self) -> bool:
+        """Allow validated in-process channel callbacks to execute this tool directly.
+
+        This does not make arbitrary inbound metadata trusted. AgentLoop still limits
+        the metadata path to supported in-process channels, and the tool must validate
+        every state-changing action against server-side state.
+        """
+        return False
+
     # --- Plugin metadata ---
 
     config_key: str = ""
@@ -222,6 +241,23 @@ class Tool(ABC):
         Tools with an unambiguous natural-language intent may opt in.  The
         default keeps normal model-directed tool selection unchanged.
         """
+        return None
+
+    def is_direct_intent_candidate(self, text: str) -> bool:
+        """Whether this tool wants one bounded semantic-classification attempt."""
+
+        return False
+
+    async def classify_direct_request(
+        self, text: str, runtime: LLMRuntime
+    ) -> dict[str, Any] | None:
+        """Classify a candidate request after deterministic routes have missed."""
+
+        return None
+
+    def fallback_direct_request(self, text: str) -> dict[str, Any] | None:
+        """Return a deterministic fallback after classification failure."""
+
         return None
 
     @abstractmethod

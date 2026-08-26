@@ -86,6 +86,7 @@ async def run_bound_cron_job(
         "job_id": job.id,
         "job_name": job.name,
         "run_id": run_id,
+        "scheduled_at_ms": job.state.next_run_at_ms or int(time.time() * 1000),
         "prompt_ref": prompt_ref,
         "persist_content": (
             f"Scheduled cron job triggered: {job.name}\n\n{job.payload.message}"

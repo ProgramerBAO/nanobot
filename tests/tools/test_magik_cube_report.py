@@ -20,6 +20,7 @@ from nanobot.agent.tools.magik_cube import (
     _plan_comparison_windows,
     _Tenant,
 )
+from nanobot.bus.events import OUTBOUND_META_AGENT_UI
 
 
 class _FakeClient:
@@ -643,6 +644,135 @@ async def test_model_report_is_deterministic_and_metadata_is_cached(tmp_path: Pa
     assert "完整：无接口失败、分页截断或分片缺失" in first
 
 
+async def test_matrix_report_returns_single_table_payload_with_absolute_daily_deltas(
+    tmp_path: Path,
+) -> None:
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        tenant_mappings={"测试租户": "prod"},
+        matrix_page_size=8,
+    )
+    reporter = MagikCubeReporter(
+        _DeterministicReportClient(), config, tmp_path / "proxy.json", "Asia/Shanghai"
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [{"tenant_query": "测试租户", "model_scope": "all", "models": []}],
+        granularity="day",
+        include_tpm=True,
+    )
+
+    ui = result.metadata[OUTBOUND_META_AGENT_UI]
+    assert ui["kind"] == "magik_report_cards"
+    assert len(ui["cards"]) == 1
+    table = ui["cards"][0]["table"]
+    assert table["page_size"] == 8
+    assert [column["name"] for column in table["columns"]] == [
+        "model",
+        "total",
+        "change",
+        "segments",
+    ]
+    assert [row["model"] for row in table["rows"]] == ["MODEL-A", "LOW", "MODEL-B"]
+    assert "新增" in table["rows"][0]["change"]
+    assert "周五" in table["rows"][0]["segments"]
+    assert "+" in table["rows"][0]["segments"]
+
+
+async def test_matrix_report_hides_subscription_action_when_reporting_is_disabled(
+    tmp_path: Path,
+) -> None:
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        tenant_mappings={"测试租户": "prod"},
+    )
+    reporter = MagikCubeReporter(
+        _DeterministicReportClient(),
+        config,
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+        reporting_actions_enabled=False,
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [{"tenant_query": "测试租户", "model_scope": "all", "models": []}],
+        granularity="day",
+        include_tpm=True,
+    )
+
+    card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
+    assert "actions" not in card
+
+
+async def test_matrix_report_isolates_one_tenant_failure(tmp_path: Path) -> None:
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        tenant_mappings={"测试租户": "prod"},
+    )
+    reporter = MagikCubeReporter(
+        _DeterministicReportClient(), config, tmp_path / "proxy.json", "Asia/Shanghai"
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [
+            {"tenant_query": "测试租户", "model_scope": "summary", "models": []},
+            {"tenant_query": "不存在客户", "model_scope": "summary", "models": []},
+        ],
+        granularity="day",
+        include_tpm=True,
+    )
+
+    cards = result.metadata[OUTBOUND_META_AGENT_UI]["cards"]
+    assert len(cards) == 2
+    assert cards[0]["title"] == "测试租户 周报"
+    assert cards[1]["title"] == "不存在客户 报表失败"
+    assert "未将缺失数据按零处理" in cards[1]["quality"]
+    assert "不存在客户 报表失败" in result
+    assert "未将缺失数据按零处理" in result
+
+
+async def test_interactive_forms_collect_scope_then_models(tmp_path: Path) -> None:
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example", tenant_mappings={"测试租户": "prod"}
+    )
+    reporter = MagikCubeReporter(
+        _DeterministicReportClient(), config, tmp_path / "proxy.json", "Asia/Shanghai"
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    scope = await reporter.prepare_scope_interaction(
+        plan, tenant_query="测试租户", granularity="day", include_tpm=True
+    )
+    scope_ui = scope.metadata[OUTBOUND_META_AGENT_UI]
+    assert scope_ui["phase"] == "scope"
+    assert scope_ui["tenant_options"][0]["value"] == "测试租户"
+    assert scope_ui["tenant_options"][0]["selected"] is True
+
+    models = await reporter.prepare_model_interaction(
+        plan,
+        [{"tenant_query": "测试租户", "model_scope": "selected", "models": []}],
+        granularity="day",
+        include_tpm=True,
+    )
+    model_ui = models.metadata[OUTBOUND_META_AGENT_UI]
+    assert model_ui["phase"] == "models"
+    assert model_ui["tenant_models"][0]["models"] == ["LOW", "MODEL-A", "MODEL-B"]
+
+
 def test_direct_route_supports_weekly_model_slug_and_bypasses_deep_analysis(
     tmp_path: Path,
 ) -> None:
@@ -654,9 +784,40 @@ def test_direct_route_supports_weekly_model_slug_and_bypasses_deep_analysis(
     assert params is not None
     assert params["tenant_query"] == "tencent_token_hub"
     assert params["breakdown"] == "model"
+    assert params["report_template"] == "matrix_card"
+    assert params["report_selections"][0]["model_scope"] == "all"
     assert params["comparison"] == "previous_period"
     assert date.fromisoformat(params["end_date"]) - date.fromisoformat(params["start_date"]) == timedelta(days=6)
     assert tool.match_direct_request("深度分析上周和上上周各模型用量") is None
+
+
+def test_direct_route_uses_cards_only_to_fill_missing_slots(tmp_path: Path) -> None:
+    tool = MagikCubeDailyReportTool(
+        config=MagikCubeToolConfig(tenant_mappings={"A客户": "tenant-a"}),
+        snapshot_path=tmp_path / "proxy.json",
+    )
+
+    bare = tool.match_direct_request("我要周报")
+    assert bare is not None
+    assert bare["report_template"] == "matrix_card"
+    assert bare["interactive"] is True
+
+    partial = tool.match_direct_request("A客户上周周报")
+    assert partial is not None
+    assert partial["tenant_query"] == "A客户"
+    assert partial["interactive"] is True
+
+    complete = tool.match_direct_request("A客户所有模型上周周报")
+    assert complete is not None
+    assert "interactive" not in complete
+    assert complete["report_selections"] == [
+        {"tenant_query": "A客户", "model_scope": "all", "models": []}
+    ]
+
+    full = tool.match_direct_request("A客户完整周报")
+    assert full is not None
+    assert full["report_template"] == "full"
+    assert "interactive" not in full
 
 
 def test_direct_route_sends_period_reports_and_single_day_models_to_range_engine(

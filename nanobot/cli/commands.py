@@ -2504,6 +2504,221 @@ def agent(
 
 
 # ============================================================================
+# Report Commands
+# ============================================================================
+
+
+reports_app = typer.Typer(help="Manage deterministic report templates")
+report_intents_app = typer.Typer(help="Review report intent candidates")
+report_plugins_app = typer.Typer(help="Inspect report connector and template plugins")
+report_policy_app = typer.Typer(help="Manage report RBAC and declarations")
+reports_app.add_typer(report_intents_app, name="intents")
+reports_app.add_typer(report_plugins_app, name="plugins")
+reports_app.add_typer(report_policy_app, name="policy")
+app.add_typer(reports_app, name="reports")
+
+
+@report_plugins_app.command("list")
+def report_plugins_list() -> None:
+    """List fail-isolated report connectors and compatible templates."""
+
+    from nanobot.config.loader import load_config
+    from nanobot.reporting import build_default_registry
+
+    config = load_config()
+    registry = build_default_registry(
+        magik_enabled=bool(config.tools.magik_cube.enable)
+    )
+    table = Table(title="Report plugins")
+    table.add_column("Kind")
+    table.add_column("ID")
+    table.add_column("Version")
+    table.add_column("Details")
+    for plugin in registry.connectors():
+        manifest = plugin.manifest
+        table.add_row(
+            "connector",
+            manifest.connector_id,
+            manifest.version,
+            f"read_only={manifest.capabilities.read_only}",
+        )
+    for plugin in registry.templates():
+        manifest = plugin.manifest
+        table.add_row(
+            "template",
+            manifest.template_id,
+            manifest.version,
+            ",".join(sorted(manifest.periods)),
+        )
+    console.print(table)
+    for name, error_type in sorted(registry.load_errors.items()):
+        console.print(f"[yellow]Skipped {name}: {error_type}[/yellow]")
+
+
+@report_policy_app.command("status")
+def report_policy_status(
+    channel: str = typer.Option("", help="Channel used to inspect one user"),
+    user_id: str = typer.Option("", help="Channel user ID"),
+) -> None:
+    """Show report RBAC state and optional grants for one user."""
+
+    from nanobot.reporting import configured_report_state_store
+
+    store = configured_report_state_store()
+    console.print(f"RBAC: {'enabled' if store.rbac_enabled() else 'disabled'}")
+    if channel and user_id:
+        table = Table(title=f"Report grants: {channel}/{user_id}")
+        table.add_column("Resource type")
+        table.add_column("Resource ID")
+        table.add_column("Created")
+        for item in store.grants(channel, user_id):
+            table.add_row(item["resource_type"], item["resource_id"], item["created_at"])
+        console.print(table)
+
+
+@report_policy_app.command("rbac")
+def report_policy_rbac(enabled: bool = typer.Argument(...)) -> None:
+    """Enable or disable report RBAC explicitly."""
+
+    from nanobot.reporting import configured_report_state_store
+
+    configured_report_state_store().set_rbac_enabled(enabled)
+    console.print(f"Report RBAC {'enabled' if enabled else 'disabled'}.")
+
+
+def _change_report_grant(
+    *, channel: str, user_id: str, resource_type: str, resource_id: str, revoke: bool
+) -> None:
+    from nanobot.reporting import configured_report_state_store
+
+    store = configured_report_state_store()
+    if revoke:
+        changed = store.revoke(channel, user_id, resource_type, resource_id)
+        console.print("Grant revoked." if changed else "Grant did not exist.")
+    else:
+        store.grant(channel, user_id, resource_type, resource_id)
+        console.print("Grant added.")
+
+
+@report_policy_app.command("grant")
+def report_policy_grant(
+    channel: str = typer.Argument(...),
+    user_id: str = typer.Argument(...),
+    resource_type: str = typer.Argument(...),
+    resource_id: str = typer.Argument(...),
+) -> None:
+    """Grant one report resource or wildcard to one channel identity."""
+
+    _change_report_grant(
+        channel=channel,
+        user_id=user_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        revoke=False,
+    )
+
+
+@report_policy_app.command("revoke")
+def report_policy_revoke(
+    channel: str = typer.Argument(...),
+    user_id: str = typer.Argument(...),
+    resource_type: str = typer.Argument(...),
+    resource_id: str = typer.Argument(...),
+) -> None:
+    """Revoke one report resource from one channel identity."""
+
+    _change_report_grant(
+        channel=channel,
+        user_id=user_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        revoke=True,
+    )
+
+
+@report_policy_app.command("export")
+def report_policy_export() -> None:
+    """Atomically export the non-secret report catalog for Git review."""
+
+    from nanobot.webui.reporting_api import reporting_settings_action
+
+    payload = reporting_settings_action("export", {})
+    console.print(str(payload["last_action"]["path"]))
+
+
+@report_intents_app.command("list")
+def report_intents_list(
+    include_resolved: bool = typer.Option(
+        False, "--all", help="Include promoted and rejected candidates"
+    ),
+) -> None:
+    """List bounded local Magik Cube intent candidates."""
+
+    from nanobot.agent.reporting.magik_cube_intent import IntentCandidateStore
+
+    rows = IntentCandidateStore().list(include_resolved=include_resolved)
+    table = Table(title="Magik Cube intent candidates")
+    table.add_column("ID", style="cyan")
+    table.add_column("Status")
+    table.add_column("Count", justify="right")
+    table.add_column("Last seen")
+    table.add_column("Question")
+    for row in rows:
+        table.add_row(
+            str(row.get("id") or ""),
+            str(row.get("status") or "pending"),
+            str(row.get("count") or 0),
+            str(row.get("last_seen") or "")[:19],
+            str(row.get("raw_text") or ""),
+        )
+    console.print(table)
+
+
+@report_intents_app.command("promote")
+def report_intents_promote(
+    candidate_id: str = typer.Argument(..., help="Candidate ID from reports intents list"),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Atomically update the versioned literal-slot rule corpus",
+    ),
+) -> None:
+    """Preview or apply one reviewed literal-slot intent rule."""
+
+    from nanobot.agent.reporting.magik_cube_intent import promote_candidate
+
+    try:
+        rule = promote_candidate(candidate_id, apply=apply)
+    except KeyError as exc:
+        console.print(f"[red]Unknown candidate: {escape(candidate_id)}[/red]")
+        raise typer.Exit(1) from exc
+    except ValueError as exc:
+        console.print(f"[red]Invalid candidate: {escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    console.print_json(data=rule)
+    if apply:
+        console.print("[green]Rule promoted. Run targeted tests before restart.[/green]")
+    else:
+        console.print("[yellow]Dry run only. Re-run with --apply to write the rule.[/yellow]")
+
+
+@report_intents_app.command("reject")
+def report_intents_reject(
+    candidate_id: str = typer.Argument(..., help="Candidate ID from reports intents list"),
+) -> None:
+    """Mark one candidate rejected without adding a runtime rule."""
+
+    from nanobot.agent.reporting.magik_cube_intent import IntentCandidateStore
+
+    try:
+        IntentCandidateStore().set_status(candidate_id, "rejected")
+    except KeyError as exc:
+        console.print(f"[red]Unknown candidate: {escape(candidate_id)}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]Rejected {escape(candidate_id)}[/green]")
+
+
+# ============================================================================
 # Channel Commands
 # ============================================================================
 

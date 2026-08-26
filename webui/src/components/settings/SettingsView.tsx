@@ -66,6 +66,7 @@ import { useTranslation } from "react-i18next";
 import { channelUiPresentation } from "@/channel-plugins/registry";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { SkillsCatalogSettings } from "@/components/settings/SkillsCatalogSettings";
+import { ReportsSettings } from "@/components/settings/ReportsSettings";
 import { TokenUsageHeatmap } from "@/components/settings/TokenUsageHeatmap";
 import { ToggleButton } from "@/components/settings/ToggleButton";
 import {
@@ -194,6 +195,7 @@ export type SettingsSectionKey =
   | "voice"
   | "browser"
   | "channels"
+  | "reports"
   | "apps"
   | "automations"
   | "skills"
@@ -2164,6 +2166,8 @@ export function SettingsView({
             isRestarting={isRestarting || hostEngineApplying}
           />
         );
+      case "reports":
+        return <ReportsSettings token={token} />;
       case "apps":
         return (
           <AppsCatalogSettings
@@ -2413,6 +2417,7 @@ const SETTINGS_NAV_ITEMS: Array<{ key: SettingsSectionKey; icon: LucideIcon; fal
   { key: "voice", icon: Mic, fallback: "Voice" },
   { key: "browser", icon: Globe2, fallback: "Web" },
   { key: "channels", icon: MessageCircle, fallback: "Channels" },
+  { key: "reports", icon: Database, fallback: "Reports" },
   { key: "runtime", icon: Server, fallback: "System" },
   { key: "advanced", icon: ShieldCheck, fallback: "Security" },
 ];

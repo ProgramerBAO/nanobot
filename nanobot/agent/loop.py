@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import os
 import time
+import uuid
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, ExitStack, nullcontext, suppress
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from nanobot.agent.memory import Consolidator
 from nanobot.agent.model_runtime import ModelRuntimeResolver
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
@@ -39,7 +41,7 @@ from nanobot.agent.turn_delivery import (
 )
 from nanobot.agent.turn_delivery import TurnRoute as TurnRoute
 from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import INBOUND_META_DIRECT_TOOL, InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import StreamedResponseEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import (
@@ -1516,18 +1518,108 @@ class AgentLoop:
             turn_scopes=ctx.turn_scopes,
         )
         result = await self.commands.dispatch(cmd_ctx)
-        direct_raw = (ctx.msg.metadata or {}).get("direct_request_text")
+        metadata = ctx.msg.metadata or {}
+        trusted_direct = metadata.get(INBOUND_META_DIRECT_TOOL)
+        direct: tuple[str, dict[str, Any]] | None = None
+        if (
+            isinstance(trusted_direct, dict)
+            and ctx.msg.channel.split(":", 1)[0] == "feishu"
+        ):
+            tool_name = trusted_direct.get("name")
+            params = trusted_direct.get("params")
+            tool = self.tools.get(tool_name) if isinstance(tool_name, str) else None
+            if (
+                tool is not None
+                and (tool.read_only or tool.trusted_direct)
+                and isinstance(params, dict)
+            ):
+                direct = (tool_name, params)
+
+        direct_raw = metadata.get("direct_request_text")
         if not isinstance(direct_raw, str) or not direct_raw.strip():
             direct_raw = raw
-        if result is None and (direct := self.tools.match_direct_request(direct_raw)) is not None:
+        if result is None and direct is None:
+            direct = await self.tools.resolve_direct_request(
+                direct_raw,
+                runtime=self.runtime_for_session(ctx.session),
+            )
+        if result is None and direct is not None:
             tool_name, params = direct
-            logger.info("Direct request route: {}({})", tool_name, params)
-            content = await self.tools.execute(tool_name, params, include_retry_hint=False)
+            logger.info(
+                "Direct request route: {} param_keys={}",
+                tool_name,
+                sorted(str(key) for key in params),
+            )
+            direct_started = time.perf_counter()
+            denial: str | None = None
+            report_store: Any | None = None
+            if tool_name == "magik_cube_daily_report":
+                from nanobot.reporting import configured_report_state_store
+                from nanobot.reporting.authorization import authorize_magik_params
+
+                report_store = configured_report_state_store()
+                denial = authorize_magik_params(
+                    report_store,
+                    channel=ctx.msg.channel,
+                    user_id=ctx.msg.sender_id,
+                    params=params,
+                )
+            request_token = bind_request_context(self._request_context_for_turn(ctx))
+            try:
+                content = (
+                    ToolResult.error(denial)
+                    if denial
+                    else await self.tools.execute(tool_name, params, include_retry_hint=False)
+                )
+            finally:
+                reset_request_context(request_token)
+            if tool_name == "magik_cube_daily_report":
+                try:
+                    from nanobot.reporting.authorization import template_id_for_magik_params
+
+                    template_id = template_id_for_magik_params(params)
+                    assert report_store is not None
+                    report_store.record_run(
+                        run_id=uuid.uuid4().hex,
+                        channel=ctx.msg.channel,
+                        chat_id=ctx.msg.chat_id,
+                        user_id=ctx.msg.sender_id,
+                        connector_id="magik_cube",
+                        template_id=template_id,
+                        template_version="1.0",
+                        request={
+                            key: value
+                            for key, value in params.items()
+                            if key
+                            in {
+                                "start_date",
+                                "end_date",
+                                "comparison",
+                                "tenant_query",
+                                "breakdown",
+                                "granularity",
+                                "report_template",
+                                "report_selections",
+                            }
+                        },
+                        status="error" if getattr(content, "is_error", False) else "ok",
+                        duration_ms=int((time.perf_counter() - direct_started) * 1000),
+                        quality="partial" if getattr(content, "is_error", False) else "complete",
+                        error_type="tool_error" if getattr(content, "is_error", False) else "",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Report run audit failed: error_type={}", type(exc).__name__
+                    )
+            result_metadata = dict(metadata)
+            structured = getattr(content, "metadata", None)
+            if isinstance(structured, dict):
+                result_metadata.update(structured)
             result = OutboundMessage(
                 channel=ctx.msg.channel,
                 chat_id=ctx.msg.chat_id,
                 content=str(content),
-                metadata=dict(ctx.msg.metadata or {}),
+                metadata=result_metadata,
             )
         if result is not None:
             ctx.outbound = result

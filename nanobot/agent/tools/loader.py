@@ -154,6 +154,10 @@ class _LegacyErrorPrefixTool(Tool):
         return self._wrapped.concurrency_safe
 
     @property
+    def trusted_direct(self) -> bool:
+        return self._wrapped.trusted_direct
+
+    @property
     def config_key(self) -> str:
         return getattr(self._wrapped, "config_key", "")
 
