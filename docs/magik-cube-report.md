@@ -20,6 +20,12 @@
       "apiPrefix": "/api/admin-manager",
       "account": "${MAGIK_CUBE_ACCOUNT}",
       "password": "${MAGIK_CUBE_PASSWORD}",
+      "maxConcurrency": 8,
+      "maxRangeDaysPerRequest": 90,
+      "maxQueryDays": 366,
+      "cacheTtlSeconds": 300,
+      "trendMinShare": 0.01,
+      "spikeMedianMultiplier": 1.5,
       "tenantMappings": {
         "豆汁": "tenant-baka99jxwy88n",
         "佛跳墙": "tenant-baowjhsicyf65",
@@ -33,21 +39,37 @@
 
 启动 gateway 前设置凭据环境变量：
 
-```bash
-export MAGIK_CUBE_ACCOUNT='your-account'
-export MAGIK_CUBE_PASSWORD='your-password'
-nanobot gateway
+```powershell
+$env:MAGIK_CUBE_ACCOUNT = 'your-account'
+$env:MAGIK_CUBE_PASSWORD = 'your-password'
+python -m nanobot gateway
 ```
 
 如果直接访问 Admin 服务而非前端网关，将 `apiPrefix` 改为 `/api/v1`。
 
 每次生成日报时，工具先调用 `/token-api/v1/accounts/login/with-password` 获取临时 Access Token，Token 只保存在本次运行的内存中。也可以不配置账号密码，改用 `accessToken` 提供现成 Token；账号密码存在时优先自动登录。
 
-`tenantMappings` 是业务名称到租户 ID 的精确映射。临时用量查询会优先使用该映射，不再通过租户标签模糊匹配；未配置映射的名称仅与平台返回的租户名称匹配。
+`tenantMappings` 是业务名称到租户 ID 的精确映射。临时用量查询会优先使用该映射；未配置映射时会匹配平台返回的租户名称和标签。飞书也可以直接使用 `tencent_token_hub` 这类 tenant slug。
 
 登录后只调用代码内固定白名单中的查询接口。任何未列入白名单的方法或路径都会在发出网络请求前被拒绝；登录路径同样固定，不能通过配置改成其他接口。Proxy 当前配置会保存到 nanobot 实例数据目录下的 `magik_cube/proxy_snapshot.json`，用于下一次运行时计算净变化。该快照仅写入 Bot 本机，不会修改 Magik Cube 平台。
 
-为避免模型把宽泛追问误解为无限历史扫描，`magik_cube_daily_report` 每个用户回合最多执行 3 次。达到上限后 Runner 会禁用工具并要求模型根据已经返回的数据立即总结。生产实例还应设置合理的 `agents.defaults.maxToolIterations`（例如 `20`）作为全局兜底。
+标准日报、周报、月报、区间对比和模型分析在 command 阶段直接执行 Tool 并返回飞书，不进入 Agent BUILD，不调用 LLM。显式包含“深度分析、原因解释、业务建议”的请求才进入 Agent；每个用户回合最多调用一次范围 Tool，LLM 只能解释确定性摘要，不能重新计算数值。
+
+范围参数如下：
+
+- `start_date/end_date`：主周期闭区间，与 `report_date` 互斥。
+- `compare_start_date/compare_end_date`：自定义对比周期，必须成对出现。
+- `comparison`：`none|previous_period|previous_week|previous_month`。
+- `breakdown`：`summary|model`；`model` 会展示租户的全部模型。
+- `include_tpm`：默认 `true`。
+
+单请求最多 90 天，主周期与对比周期合计最多 366 天。相邻周期合并请求；超过 90 天自动分片，分片最多 2 路并发。所有业务 API 共用 `Semaphore(8)`，租户和模型清单缓存 300 秒，用量数据不缓存。
+
+飞书 fast path 示例：
+
+> 给我 tencent_token_hub 各个模型，一周的使用情况分析
+
+“近 7 天/一周”表示截至昨天的 7 个完整自然日；“上周”表示上一完整周一至周日；“上个月”表示上一完整自然月。日期统一使用 `Asia/Shanghai`。
 
 生产部署还应禁用通用 `exec`、文件和 CLI Apps 工具，并启用 `tools.restrictToWorkspace`，防止 Agent 绕过专用工具使用管理员凭据。最终的强安全边界仍应由 Magik Cube 服务端提供只读 RBAC 账号。
 
@@ -67,9 +89,12 @@ nanobot gateway
 
 - 大客户：`GET /tenants` 返回的 `isKeyAccount=true` 租户。
 - Token：报表日全天 `totalTokens`，分别与前一天、七天前比较。
+- 请求数：Token 接口返回的 `requestCount`；范围报告同时计算平均 Token/请求。
 - 峰值 TPM：租户所有 Endpoint 在当天的最大 `maxTpm`。
 - 配额变更：只展示能够映射到当前大客户 Endpoint/ModelConfig 的 TPM、RPM、并发 old/new 记录。
 - Proxy 变更：当前快照相对上一份成功快照的净变化，包括 `maxTPM`、`maxRunningRequests`、`maxNewSessions`。
 - 机器数：平台返回的 8 卡等效机器数。
 - P/D：最近一段时间实际调用中出现过的不同 `prefillPodName` 和 `podName` 数量比，不代表完整部署拓扑。
 - 告警：管理 API 暂无告警事件接口，所以第一版只显示未接入提示。
+
+范围报表还固定计算 Token/请求数/平均 Token 每请求/TPM 的绝对变化和百分比变化、模型占比、日均、峰值日期、增长/下降排行、新增/停用。模型占比不足 1% 不进入趋势异常榜；当日 Token 高于周期中位数 50% 且模型占比至少 1% 时标记峰值异常。接口失败、分页截断或分片缺失会明确标为“数据不完整”，不会按零处理。

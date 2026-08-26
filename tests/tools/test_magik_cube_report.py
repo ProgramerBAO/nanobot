@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,10 @@ from nanobot.agent.tools.magik_cube import (
     MagikCubeDailyReportTool,
     MagikCubeReporter,
     MagikCubeToolConfig,
+    _DateWindow,
     _diff_proxy_snapshots,
+    _plan_comparison_windows,
+    _Tenant,
 )
 
 
@@ -194,6 +198,28 @@ async def test_client_unwraps_envelope_and_sets_bearer_token() -> None:
     assert seen["authorization"] == "Bearer secret"
 
 
+async def test_client_applies_shared_api_concurrency_limit() -> None:
+    active = 0
+    peak = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return httpx.Response(200, json={"code": 0, "data": {"list": [], "total": 0}})
+
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example", access_token="secret", max_concurrency=8
+    )
+    async with MagikCubeClient(config, transport=httpx.MockTransport(handler)) as client:
+        await asyncio.gather(*(client.request("GET", "tenants") for _ in range(20)))
+
+    assert peak == 8
+    assert client.route_counts == {"tenants": 20}
+
+
 async def test_client_logs_in_with_password_before_read_queries() -> None:
     seen: list[tuple[str, str | None]] = []
 
@@ -356,7 +382,7 @@ def test_direct_route_prefers_configured_tenant_alias(tmp_path: Path) -> None:
         "save_snapshot": False,
         "tenant_query": "豆汁",
     }
-    assert tool.max_calls_per_turn == 3
+    assert tool.max_calls_per_turn == 1
 
 
 def test_direct_route_treats_generic_customer_quantifiers_as_all_customers(
@@ -380,3 +406,287 @@ def test_direct_route_does_not_capture_unrelated_questions(tmp_path: Path) -> No
 
     assert tool.match_direct_request("GLM-5.2 支持多长上下文？") is None
     assert tool.match_direct_request("昨天机器是否正常？") is None
+
+
+def test_comparison_planner_merges_adjacent_periods_and_chunks_long_ranges() -> None:
+    single = _plan_comparison_windows(
+        date(2026, 1, 1), date(2026, 1, 1), comparison="previous_period"
+    )
+    assert single.comparison == _DateWindow(date(2025, 12, 31), date(2025, 12, 31))
+    assert single.fetch_windows == (_DateWindow(date(2025, 12, 31), date(2026, 1, 1)),)
+
+    weekly = _plan_comparison_windows(
+        date(2026, 8, 18),
+        date(2026, 8, 24),
+        comparison="previous_period",
+    )
+    assert weekly.comparison == _DateWindow(date(2026, 8, 11), date(2026, 8, 17))
+    assert weekly.fetch_windows == (_DateWindow(date(2026, 8, 11), date(2026, 8, 24)),)
+
+    monthly = _plan_comparison_windows(
+        date(2024, 3, 1),
+        date(2024, 3, 31),
+        comparison="previous_month",
+    )
+    assert monthly.comparison == _DateWindow(date(2024, 2, 1), date(2024, 2, 29))
+    assert monthly.fetch_windows == (_DateWindow(date(2024, 2, 1), date(2024, 3, 31)),)
+
+    long_range = _plan_comparison_windows(
+        date(2026, 1, 1), date(2026, 7, 1), max_request_days=90
+    )
+    assert [window.days for window in long_range.fetch_windows] == [90, 90, 2]
+    assert long_range.fetch_windows[0].end + timedelta(days=1) == long_range.fetch_windows[1].start
+
+
+def test_comparison_planner_keeps_far_windows_exact_and_enforces_total_limit() -> None:
+    plan = _plan_comparison_windows(
+        date(2026, 8, 1),
+        date(2026, 8, 7),
+        compare_start=date(2025, 8, 1),
+        compare_end=date(2025, 8, 7),
+    )
+    assert plan.fetch_windows == (
+        _DateWindow(date(2025, 8, 1), date(2025, 8, 7)),
+        _DateWindow(date(2026, 8, 1), date(2026, 8, 7)),
+    )
+    with pytest.raises(ValueError, match="exceeds 366 days"):
+        _plan_comparison_windows(date(2025, 1, 1), date(2026, 1, 2))
+
+
+class _FilteringRangeClient:
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, Any]] = []
+
+    async def request(
+        self,
+        _method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert params is None
+        assert json_body is not None
+        self.bodies.append(json_body)
+        if path == "analysis/active-tenant-daily-usage/query":
+            return {
+                "items": [
+                    {
+                        "tenantId": "tenant-1",
+                        "points": [
+                            {"date": "2026-08-01", "totalTokens": 10, "requestCount": 1},
+                            {"date": "2026-08-01", "totalTokens": 10, "requestCount": 1},
+                            {"date": "2026-08-02", "totalTokens": 20, "requestCount": 2},
+                            {"date": "2026-08-03", "totalTokens": 999, "requestCount": 99},
+                        ],
+                    }
+                ]
+            }
+        if path == "analysis/endpoint-max-tpm/daily/query":
+            return {
+                "items": [
+                    {
+                        "endpoint": "ep-a",
+                        "points": [
+                            {"date": "2026-08-01", "maxTpm": 5},
+                            {"date": "2026-08-02", "maxTpm": 8},
+                            {"date": "2026-08-03", "maxTpm": 999},
+                        ],
+                    }
+                ]
+            }
+        raise AssertionError(path)
+
+
+async def test_range_metrics_filters_extra_day_and_deduplicates_points(tmp_path: Path) -> None:
+    reporter = MagikCubeReporter(
+        _FilteringRangeClient(),
+        MagikCubeToolConfig(base_url="https://cube.example"),
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+    )
+    metrics = await reporter._tenant_metrics_for_windows(
+        _Tenant("tenant-1", "甲客户"),
+        (_DateWindow(date(2026, 8, 1), date(2026, 8, 2)),),
+    )
+
+    assert metrics.tokens == {"2026-08-01": 10, "2026-08-02": 20}
+    assert metrics.requests == {"2026-08-01": 1, "2026-08-02": 2}
+    assert metrics.max_tpm == {"2026-08-01": 5, "2026-08-02": 8}
+    assert metrics.token_complete and metrics.tpm_complete
+
+
+class _PartialFailureClient:
+    async def request(
+        self,
+        _method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert params is None
+        assert json_body is not None
+        if path == "analysis/active-tenant-daily-usage/query":
+            raise httpx.ReadTimeout("token timeout")
+        if path == "analysis/endpoint-max-tpm/daily/query":
+            return {"items": []}
+        raise AssertionError(path)
+
+
+async def test_partial_interface_failure_is_marked_instead_of_rendered_as_zero(
+    tmp_path: Path,
+) -> None:
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example", tenant_mappings={"测试租户": "prod"}
+    )
+    reporter = MagikCubeReporter(
+        _PartialFailureClient(), config, tmp_path / "proxy.json", "Asia/Shanghai"
+    )
+    plan = _plan_comparison_windows(date(2026, 8, 1), date(2026, 8, 7))
+
+    report = await reporter.generate_range_report(plan, tenant_query="测试租户")
+
+    assert "Token 0（数据不完整）" in report
+    assert "Token/请求数 2026-08-01 ~ 2026-08-07 获取失败" in report
+    assert "完整：无接口失败" not in report
+
+
+class _DeterministicReportClient:
+    def __init__(self) -> None:
+        self.model_list_calls = 0
+        self.usage_calls = 0
+
+    async def request(
+        self,
+        _method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if path == "inference/model-configs":
+            self.model_list_calls += 1
+            return {
+                "list": [{"model": "MODEL-A"}, {"model": "MODEL-B"}, {"model": "LOW"}],
+                "total": 3,
+            }
+        assert json_body is not None
+        self.usage_calls += 1
+        model = str(json_body.get("model") or "SUMMARY")
+        if path == "analysis/active-tenant-daily-usage/query":
+            start = date.fromisoformat(str(json_body["startTime"])[:10])
+            end_exclusive = date.fromisoformat(str(json_body["endTime"])[:10])
+            points = []
+            cursor = start
+            while cursor <= end_exclusive:
+                in_current = cursor >= date(2026, 8, 8)
+                if model == "MODEL-A":
+                    tokens = 700 if cursor == date(2026, 8, 14) else (100 if in_current else 0)
+                elif model == "MODEL-B":
+                    tokens = 0 if in_current else 50
+                elif model == "LOW":
+                    tokens = 1 if in_current else 0
+                else:
+                    tokens = (10_000 if in_current else 8_000) + (
+                        700 if cursor == date(2026, 8, 14) else 0
+                    )
+                points.append(
+                    {
+                        "date": cursor.isoformat(),
+                        "totalTokens": tokens,
+                        "requestCount": 1 if tokens else 0,
+                    }
+                )
+                cursor += timedelta(days=1)
+            return {"items": [{"tenantId": "prod", "points": points}]}
+        if path == "analysis/endpoint-max-tpm/daily/query":
+            return {
+                "items": [
+                    {
+                        "endpoint": "ep-a",
+                        "points": [
+                            {"date": f"2026-08-{day:02d}", "maxTpm": day * 10}
+                            for day in range(1, 16)
+                        ],
+                    }
+                ]
+            }
+        raise AssertionError(path)
+
+
+async def test_model_report_is_deterministic_and_metadata_is_cached(tmp_path: Path) -> None:
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        tenant_mappings={"测试租户": "prod"},
+    )
+    client = _DeterministicReportClient()
+    reporter = MagikCubeReporter(client, config, tmp_path / "proxy.json", "Asia/Shanghai")
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    first = await reporter.generate_range_report(
+        plan, tenant_query="测试租户", breakdown="model", include_tpm=True
+    )
+    second = await reporter.generate_range_report(
+        plan, tenant_query="测试租户", breakdown="model", include_tpm=True
+    )
+
+    assert first == second
+    assert client.model_list_calls == 1
+    assert "新增：LOW、MODEL-A" in first
+    assert "停用：MODEL-B" in first
+    assert "MODEL-A：2026-08-14" in first
+    assert "LOW：" not in first.split("峰值异常：", 1)[1]
+    assert first.index("• MODEL-A｜") < first.index("• LOW｜") < first.index("• MODEL-B｜")
+    assert "完整：无接口失败、分页截断或分片缺失" in first
+
+
+def test_direct_route_supports_weekly_model_slug_and_bypasses_deep_analysis(
+    tmp_path: Path,
+) -> None:
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+    params = tool.match_direct_request(
+        "给我 tencent_token_hub 各个模型，一周的使用情况分析"
+    )
+
+    assert params is not None
+    assert params["tenant_query"] == "tencent_token_hub"
+    assert params["breakdown"] == "model"
+    assert params["comparison"] == "previous_period"
+    assert date.fromisoformat(params["end_date"]) - date.fromisoformat(params["start_date"]) == timedelta(days=6)
+    assert tool.match_direct_request("深度分析上周和上上周各模型用量") is None
+
+
+def test_direct_route_sends_period_reports_and_single_day_models_to_range_engine(
+    tmp_path: Path,
+) -> None:
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+
+    weekly = tool.match_direct_request("生成上周各模型用量周报")
+    assert weekly is not None
+    assert weekly["breakdown"] == "model"
+    assert weekly["comparison"] == "previous_period"
+    assert date.fromisoformat(weekly["end_date"]) - date.fromisoformat(weekly["start_date"]) == timedelta(days=6)
+
+    single_day = tool.match_direct_request("2026-08-10 tencent_token_hub 各模型用量")
+    assert single_day is not None
+    assert single_day["start_date"] == "2026-08-10"
+    assert single_day["end_date"] == "2026-08-10"
+    assert "report_date" not in single_day
+
+
+async def test_execute_rejects_comparison_dates_without_primary_range(tmp_path: Path) -> None:
+    tool = MagikCubeDailyReportTool(
+        config=MagikCubeToolConfig(
+            base_url="https://cube.example", access_token="secret"
+        ),
+        snapshot_path=tmp_path / "proxy.json",
+    )
+
+    result = await tool.execute(
+        compare_start_date="2026-08-01", compare_end_date="2026-08-07"
+    )
+
+    assert result == "Error: comparison dates require start_date and end_date"

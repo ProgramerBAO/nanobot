@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import math
 import re
+import statistics
+import time as time_module
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -14,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import yaml
+from loguru import logger
 from pydantic import Field
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
@@ -26,30 +30,62 @@ from nanobot.utils.helpers import _write_text_atomic
 class MagikCubeToolConfig(Base):
     """Connection and report settings for the Magik Cube admin API."""
 
+    # Tool 默认关闭，避免未配置 Magik Cube 时向 LLM 暴露一个不可用的工具。
     enable: bool = False
+    # 管理面 API 的 origin，例如 https://magik-cube.example.com；不要在这里重复 api_prefix。
     base_url: str = ""
+    # 业务 API 的公共前缀。请求最终会拼成 {base_url}/{api_prefix}/{route}。
     api_prefix: str = "/api/v1"
+    # 已有 Bearer token；repr=False 防止配置对象被日志或异常 repr 时泄露密钥。
     access_token: str = Field(default="", repr=False)
+    # 账号密码登录的账号。只有 account 和 password 同时存在时才会触发密码登录。
     account: str = ""
+    # 密码字段同样禁止出现在对象 repr 中。
     password: str = Field(default="", repr=False)
+    # 密码登录接口。客户端还会与严格常量比对，防止配置把凭据发送到任意路径。
     login_path: str = "/token-api/v1/accounts/login/with-password"
+    # 额外 HTTP headers，例如租户路由或网关要求的自定义 header；Authorization 由客户端管理。
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    # 固定集群列表。为空时通过 clusters API 自动发现；配置固定列表可减少一次发现请求。
     cluster_names: list[str] = Field(default_factory=list)
+    # 查询 Envoy Gateway Proxy 配置时使用的 namespace。
     proxy_namespace: str = "envoy-gateway-system"
+    # 查询 Proxy 配置时使用的 label selector 字符串。
     proxy_labels: str = "gateway.magikcompute.ai/name:magik-ai-gateway"
+    # 单次 HTTP 请求超时时间，范围限制避免配置成无超时或过短导致日报全部失败。
     timeout_seconds: int = Field(default=30, ge=1, le=600)
+    # TLS 证书校验开关。生产环境应保持 True；关闭只适合明确受控的测试环境。
     verify_ssl: bool = True
+    # P/D 观测窗口，从当前时间向前回溯该分钟数。
     pd_window_minutes: int = Field(default=15, ge=1, le=1440)
+    # 每个分页接口最多读取的页数；达到上限时可能只得到部分数据，应结合 warning 判断。
     max_pages: int = Field(default=10, ge=1, le=100)
+    # 报告中最多展示多少个租户、变更或机器条目，避免单次消息过大。
     max_report_items: int = Field(default=20, ge=1, le=100)
+    # 用户可读别名到真实 tenant ID 的映射。命中后跳过 tenants API，适合 Feishu 常用简称。
     tenant_mappings: dict[str, str] = Field(default_factory=dict)
+    # 所有只读业务 API 共用的并发上限，避免模型 fan-out 冲击管理面。
+    max_concurrency: int = Field(default=8, ge=1, le=32)
+    # 单个分析接口请求最多覆盖的自然日数；更长范围自动分片。
+    max_range_days_per_request: int = Field(default=90, ge=1, le=90)
+    # 主周期与对比周期的总查询天数上限。
+    max_query_days: int = Field(default=366, ge=1, le=366)
+    # 租户与模型清单缓存时间；用量数据始终实时读取，不进入缓存。
+    cache_ttl_seconds: int = Field(default=300, ge=0, le=3600)
+    # 模型进入趋势异常榜所需的最小 Token 占比。
+    trend_min_share: float = Field(default=0.01, ge=0, le=1)
+    # 当日 Token 超过周期中位数的倍数阈值。
+    spike_median_multiplier: float = Field(default=1.5, ge=1, le=10)
 
 
 class MagikCubeApiError(RuntimeError):
     """Raised when the Magik Cube API returns an unsuccessful response."""
 
 
+# 密码登录唯一允许的路径。登录是唯一一个非 api_prefix 下的 POST 请求。
 _PASSWORD_LOGIN_PATH = "token-api/v1/accounts/login/with-password"
+_REPORT_TIMEZONE = "Asia/Shanghai"
+# 业务 API 的最小权限边界：只允许日报所需的查询和分析接口，禁止写入、删除和任意路径访问。
 _READ_ONLY_ROUTES = frozenset(
     {
         ("GET", "clusters"),
@@ -67,6 +103,8 @@ _READ_ONLY_ROUTES = frozenset(
 
 
 class MagikCubeClient:
+    """封装认证、allowlist 校验、HTTP 调用和统一响应解包。"""
+
     def __init__(
         self,
         config: MagikCubeToolConfig,
@@ -74,7 +112,9 @@ class MagikCubeClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._config = config
+        # 只规范化前缀，不修改原始配置；route 本身在 request() 中再做 strip("/")。
         self._api_prefix = config.api_prefix.strip("/")
+        # 允许调用方注入 MockTransport，测试时无需真实访问管理面 API。
         headers = {"Accept": "application/json", **config.extra_headers}
         self._client = httpx.AsyncClient(
             base_url=config.base_url.rstrip("/") + "/",
@@ -83,8 +123,14 @@ class MagikCubeClient:
             verify=config.verify_ssl,
             transport=transport,
         )
+        self._semaphore = asyncio.Semaphore(config.max_concurrency)
+        self.route_counts: dict[str, int] = {}
+        self.request_seconds = 0.0
+        self.rate_limit_errors = 0
+        self.server_errors = 0
 
     async def __aenter__(self) -> MagikCubeClient:
+        # 凭据优先级：账号密码优先于静态 token，登录成功后用运行时 token 覆盖 header。
         if self._config.account and self._config.password:
             await self._login_with_password()
         elif self._config.access_token:
@@ -92,9 +138,11 @@ class MagikCubeClient:
         return self
 
     async def __aexit__(self, *_args: Any) -> None:
+        # 无论请求是否抛异常都关闭连接池，避免定时任务长期积累 socket。
         await self._client.aclose()
 
     async def _login_with_password(self) -> None:
+        # login_path 虽可配置，但必须精确匹配固定路径，防止凭据被转发到非预期 endpoint。
         path = self._config.login_path.lstrip("/")
         if path != _PASSWORD_LOGIN_PATH:
             raise MagikCubeApiError("password login path is not on the strict allowlist")
@@ -104,6 +152,7 @@ class MagikCubeClient:
             follow_redirects=False,
         )
         data = self._decode_response("POST", self._config.login_path, response)
+        # 兼容后端常见的 camelCase 和 snake_case 两种 token 字段命名。
         token = _pick(data, "accessToken", "access_token", default="")
         if not token:
             raise MagikCubeApiError("password login succeeded but returned no access token")
@@ -117,6 +166,7 @@ class MagikCubeClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # 所有业务请求先过 allowlist，再拼接 api prefix；因此上层 reporter 不能越权调用写接口。
         normalized_method = method.upper()
         normalized_path = path.strip("/")
         if (normalized_method, normalized_path) not in _READ_ONLY_ROUTES:
@@ -125,19 +175,31 @@ class MagikCubeClient:
                 f"{normalized_method} /{normalized_path}"
             )
         api_path = "/".join(part for part in (self._api_prefix, normalized_path) if part)
-        response = await self._client.request(
-            normalized_method,
-            api_path,
-            params=params,
-            json=json_body,
-            follow_redirects=False,
-        )
+        started = time_module.perf_counter()
+        try:
+            async with self._semaphore:
+                response = await self._client.request(
+                    normalized_method,
+                    api_path,
+                    params=params,
+                    json=json_body,
+                    follow_redirects=False,
+                )
+        finally:
+            self.route_counts[normalized_path] = self.route_counts.get(normalized_path, 0) + 1
+            self.request_seconds += time_module.perf_counter() - started
+        if response.status_code == 429:
+            self.rate_limit_errors += 1
+        elif response.status_code >= 500:
+            self.server_errors += 1
+        # 统一处理 HTTP 层和业务 code 层错误，让 reporter 只需处理 MagikCubeApiError。
         return self._decode_response(method, path, response)
 
     @staticmethod
     def _decode_response(
         method: str, path: str, response: httpx.Response
     ) -> dict[str, Any]:
+        # 管理面接口通常返回 JSON envelope；非 JSON、HTTP error、业务 code error 都转成统一异常。
         try:
             payload = response.json()
         except ValueError as exc:
@@ -158,25 +220,93 @@ class MagikCubeClient:
                     f"{method} {path} failed: {payload.get('message') or payload.get('reason') or code}"
                 )
             data = payload.get("data")
+            # data 不是 object 时按空字典处理，避免上层对 None 做大量防御；列表型结果通常包在 list 字段内。
             return data if isinstance(data, dict) else {}
         return payload
 
 
 @dataclass(frozen=True)
 class _Tenant:
+    """内部统一的租户标识；冻结后可安全在并发查询中复用。"""
+
     tenant_id: str
     name: str
+    # 保留后端 tags，便于租户识别和后续扩展查询匹配。
     tags: tuple[str, ...] = ()
 
 
 @dataclass
 class _TenantMetrics:
+    """一个租户按日期聚合后的 Token、峰值 TPM 及峰值 endpoint。"""
+
+    # key 为 YYYY-MM-DD，value 为该日 Token 总量。
     tokens: dict[str, int]
+    # key 为 YYYY-MM-DD，value 为该日请求数。
+    requests: dict[str, int]
+    # key 为 YYYY-MM-DD，value 为该日所有 endpoint 中的最大 TPM。
     max_tpm: dict[str, int]
+    # 记录 max_tpm 对应的 endpoint，便于日报定位峰值来源。
     max_tpm_endpoint: dict[str, str]
+    # 分片或接口失败时标记为 False；渲染层必须显示“不完整”，不能把缺失当零。
+    token_complete: bool = True
+    tpm_complete: bool = True
+
+
+@dataclass(frozen=True)
+class _DateWindow:
+    """Inclusive natural-day window in Asia/Shanghai semantics."""
+
+    start: date
+    end: date
+
+    @property
+    def days(self) -> int:
+        return (self.end - self.start).days + 1
+
+    def contains(self, day: str) -> bool:
+        return self.start.isoformat() <= day <= self.end.isoformat()
+
+
+@dataclass(frozen=True)
+class _ComparisonPlan:
+    """Primary/comparison windows and the minimal request windows that cover them."""
+
+    primary: _DateWindow
+    comparison: _DateWindow | None
+    fetch_windows: tuple[_DateWindow, ...]
+
+
+@dataclass
+class _CacheEntry:
+    expires_at: float
+    value: Any
+
+
+class _MagikCubeCache:
+    """Process-local TTL cache for low-churn tenant/model metadata only."""
+
+    def __init__(self) -> None:
+        self._values: dict[str, _CacheEntry] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> Any | None:
+        entry = self._values.get(key)
+        if entry is None or entry.expires_at <= time_module.monotonic():
+            self._values.pop(key, None)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return entry.value
+
+    def put(self, key: str, value: Any, ttl_seconds: int) -> None:
+        if ttl_seconds > 0:
+            self._values[key] = _CacheEntry(time_module.monotonic() + ttl_seconds, value)
 
 
 def _pick(obj: dict[str, Any], *names: str, default: Any = None) -> Any:
+    """按候选字段名读取值，兼容 API 的 camelCase/snake_case 返回格式。"""
+
     for name in names:
         if name in obj:
             return obj[name]
@@ -184,6 +314,8 @@ def _pick(obj: dict[str, Any], *names: str, default: Any = None) -> Any:
 
 
 def _as_int(value: Any) -> int:
+    """把数字、数字字符串或空值归一化为 int；异常值按 0 处理以保证单租户报告可继续。"""
+
     try:
         return int(float(value or 0))
     except (TypeError, ValueError):
@@ -191,6 +323,8 @@ def _as_int(value: Any) -> int:
 
 
 def _format_number(value: int | float) -> str:
+    """把大数转换为日报易读格式：超过 1 万用“万”，超过 1 亿用“亿”。"""
+
     absolute = abs(value)
     if absolute >= 100_000_000:
         return f"{value / 100_000_000:.2f}亿"
@@ -200,6 +334,8 @@ def _format_number(value: int | float) -> str:
 
 
 def _format_change(current: int, baseline: int) -> str:
+    """计算当前值相对基线的变化；基线为 0 时避免除零并区分“持平/新增”。"""
+
     if baseline == 0:
         if current == 0:
             return "持平"
@@ -210,6 +346,8 @@ def _format_change(current: int, baseline: int) -> str:
 
 
 def _format_quota_field(label: str, change: Any) -> str | None:
+    """提取一个配额字段的 old/new 值，仅在实际变化时生成报告片段。"""
+
     if not isinstance(change, dict):
         return None
     old = _as_int(_pick(change, "oldValue", "old_value"))
@@ -220,6 +358,8 @@ def _format_quota_field(label: str, change: Any) -> str | None:
 
 
 def _proxy_values(raw: str) -> dict[str, int]:
+    """从 Proxy 的 proxy.yaml 中只提取限流字段，忽略其它配置以减少快照噪声。"""
+
     try:
         doc = yaml.safe_load(raw)
     except yaml.YAMLError:
@@ -236,6 +376,8 @@ def _proxy_values(raw: str) -> dict[str, int]:
 def _diff_proxy_snapshots(
     old: dict[str, dict[str, int]], new: dict[str, dict[str, int]]
 ) -> list[str]:
+    """比较相邻两次 Proxy 限流快照，输出新增、删除和字段变更。"""
+
     changes: list[str] = []
     for key in sorted(old.keys() | new.keys()):
         if key not in old:
@@ -256,18 +398,131 @@ def _diff_proxy_snapshots(
 
 
 def _format_proxy_values(values: dict[str, int]) -> str:
+    """格式化 Proxy 快照中的限流字段；空结果明确提示未识别字段。"""
+
     if not values:
         return "未识别到限流字段"
     return "，".join(f"{key}={value}" for key, value in sorted(values.items()))
 
 
 def _normalize_tenant_query(value: str) -> str:
+    """统一租户查询词大小写、空白和末尾“用户/客户/租户”后缀。"""
+
     normalized = "".join(value.casefold().split())
     for suffix in ("用户", "客户", "租户"):
         if normalized.endswith(suffix):
             normalized = normalized[: -len(suffix)]
             break
     return normalized
+
+
+def _shift_month(day: date, months: int) -> date:
+    """Shift a date by whole calendar months and clamp to the target month."""
+
+    month_index = day.year * 12 + day.month - 1 + months
+    year, zero_based_month = divmod(month_index, 12)
+    month = zero_based_month + 1
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day.day, last_day))
+
+
+def _chunk_window(window: _DateWindow, max_days: int) -> list[_DateWindow]:
+    """Split an inclusive window into non-overlapping chunks."""
+
+    chunks: list[_DateWindow] = []
+    cursor = window.start
+    while cursor <= window.end:
+        chunk_end = min(window.end, cursor + timedelta(days=max_days - 1))
+        chunks.append(_DateWindow(cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def _plan_comparison_windows(
+    start: date,
+    end: date,
+    *,
+    comparison: str = "none",
+    compare_start: date | None = None,
+    compare_end: date | None = None,
+    max_request_days: int = 90,
+    max_query_days: int = 366,
+) -> _ComparisonPlan:
+    """Build exact comparison periods and minimal API request windows."""
+
+    if end < start:
+        raise ValueError("end_date must not be earlier than start_date")
+    primary = _DateWindow(start, end)
+    if (compare_start is None) != (compare_end is None):
+        raise ValueError("compare_start_date and compare_end_date must be provided together")
+    if compare_start is not None and compare_end is not None:
+        if compare_end < compare_start:
+            raise ValueError("compare_end_date must not be earlier than compare_start_date")
+        baseline = _DateWindow(compare_start, compare_end)
+    elif comparison == "none":
+        baseline = None
+    elif comparison == "previous_period":
+        baseline = _DateWindow(
+            start - timedelta(days=primary.days),
+            start - timedelta(days=1),
+        )
+    elif comparison == "previous_week":
+        baseline = _DateWindow(start - timedelta(days=7), end - timedelta(days=7))
+    elif comparison == "previous_month":
+        if start.day == 1 and end.day == calendar.monthrange(end.year, end.month)[1]:
+            baseline_end = start - timedelta(days=1)
+            baseline = _DateWindow(baseline_end.replace(day=1), baseline_end)
+        else:
+            baseline = _DateWindow(_shift_month(start, -1), _shift_month(end, -1))
+    else:
+        raise ValueError(
+            "comparison must be one of none, previous_period, previous_week, previous_month"
+        )
+
+    total_days = primary.days + (baseline.days if baseline else 0)
+    if total_days > max_query_days:
+        raise ValueError(f"total query window exceeds {max_query_days} days")
+
+    request_windows: list[_DateWindow]
+    if baseline is None:
+        request_windows = [primary]
+    else:
+        bounding = _DateWindow(min(primary.start, baseline.start), max(primary.end, baseline.end))
+        adjacent_or_overlapping = not (
+            primary.end + timedelta(days=1) < baseline.start
+            or baseline.end + timedelta(days=1) < primary.start
+        )
+        if adjacent_or_overlapping and bounding.days <= max_request_days:
+            request_windows = [bounding]
+        else:
+            request_windows = [baseline, primary]
+
+    chunks = [
+        chunk
+        for window in request_windows
+        for chunk in _chunk_window(window, max_request_days)
+    ]
+    return _ComparisonPlan(primary, baseline, tuple(chunks))
+
+
+def _window_label(window: _DateWindow) -> str:
+    return (
+        window.start.isoformat()
+        if window.start == window.end
+        else f"{window.start.isoformat()} ~ {window.end.isoformat()}"
+    )
+
+
+@dataclass(frozen=True)
+class _PeriodStats:
+    tokens: int
+    requests: int
+    peak_tpm: int
+    average_tokens_per_request: float
+    daily_average_tokens: float
+    peak_date: str
+    token_complete: bool
+    tpm_complete: bool
 
 
 class MagikCubeReporter:
@@ -279,31 +534,44 @@ class MagikCubeReporter:
         config: MagikCubeToolConfig,
         snapshot_path: Path,
         timezone: str,
+        cache: _MagikCubeCache | None = None,
     ) -> None:
+        # Reporter 不持有连接生命周期；连接由 MagikCubeClient 的 async context manager 管理。
         self._client = client
         self._config = config
+        # snapshot_path 是运行态文件，不进入代码仓库，用于跨次执行比较 Proxy 配置。
         self._snapshot_path = snapshot_path
         self._tz = ZoneInfo(timezone)
+        self._cache = cache or _MagikCubeCache()
+        # 单个子查询失败时保留其它数据，并在报告末尾集中呈现 warning。
         self._warnings: list[str] = []
 
     async def generate(self, report_date: date, *, save_snapshot: bool = True) -> str:
+        """生成完整日报，并并发执行彼此独立的统计查询。"""
+
+        # 只有 is_key_account=true 的租户进入默认日报；空结果视为业务错误而不是空日报。
         tenants = await self._list_key_accounts()
         if not tenants:
             raise MagikCubeApiError("未找到 is_key_account=true 的大客户租户")
 
-        metrics_results = await asyncio.gather(
+        # 用量、配额、Proxy、机器和 P/D 彼此独立，从首个租户请求开始就并行执行。
+        metrics_task = asyncio.gather(
             *(self._tenant_metrics(tenant, report_date) for tenant in tenants)
         )
-        metrics = {tenant.tenant_id: value for tenant, value in zip(tenants, metrics_results)}
-
-        resources_task = asyncio.create_task(self._list_customer_resources(tenants))
         quota_task = asyncio.create_task(self._list_quota_changes(report_date))
         proxy_task = asyncio.create_task(self._proxy_changes(report_date, save_snapshot))
         machines_task = asyncio.create_task(self._machine_usage())
         pd_task = asyncio.create_task(self._observed_pd_ratio())
-        resources, quotas, proxy_changes, machines, pd_summary = await asyncio.gather(
-            resources_task, quota_task, proxy_task, machines_task, pd_task
+        quotas = await quota_task
+        # 无配额变更时无需为每个租户额外查询 endpoint/model-config 归属。
+        resources_task = (
+            asyncio.create_task(self._list_customer_resources(tenants)) if quotas else None
         )
+        metrics_results, proxy_changes, machines, pd_summary = await asyncio.gather(
+            metrics_task, proxy_task, machines_task, pd_task
+        )
+        resources = await resources_task if resources_task else {}
+        metrics = {tenant.tenant_id: value for tenant, value in zip(tenants, metrics_results)}
 
         quota_lines = self._format_quota_changes(quotas, resources)
         return self._render(
@@ -323,6 +591,9 @@ class MagikCubeReporter:
         tenant_query: str = "",
         model: str = "",
     ) -> str:
+        """按租户或模型查询用量，不写入 Proxy snapshot。"""
+
+        # 指定查询默认不建立快照，避免一次预览/问答改变下一次正式日报的 diff 基线。
         tenants = (
             await self._list_matching_tenants(tenant_query)
             if tenant_query
@@ -341,136 +612,347 @@ class MagikCubeReporter:
             metrics_results,
         )
 
-    async def _list_key_accounts(self) -> list[_Tenant]:
-        tenants: list[_Tenant] = []
-        for page in range(1, self._config.max_pages + 1):
-            data = await self._client.request(
-                "GET",
-                "tenants",
-                params={"page_num": page, "page_size": 500, "isKeyAccount": "true"},
+    async def generate_range_report(
+        self,
+        plan: _ComparisonPlan,
+        *,
+        tenant_query: str = "",
+        model: str = "",
+        breakdown: str = "summary",
+        include_tpm: bool = True,
+    ) -> str:
+        """Generate a deterministic range report without any LLM calculation."""
+
+        tenants = (
+            await self._list_matching_tenants(tenant_query)
+            if tenant_query
+            else await self._list_key_accounts()
+        )
+        if not tenants:
+            raise MagikCubeApiError(f"未找到匹配客户：{tenant_query or '全部大客户'}")
+
+        summaries = await asyncio.gather(
+            *(
+                self._tenant_metrics_for_windows(
+                    tenant,
+                    plan.fetch_windows,
+                    model=model,
+                    include_tpm=include_tpm,
+                )
+                for tenant in tenants
             )
-            items = data.get("list") or []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                is_ka = bool(_pick(item, "isKeyAccount", "is_key_account", default=False))
-                if not is_ka:
-                    continue
-                tenant_id = str(_pick(item, "tenantId", "tenant_id", default=""))
-                if tenant_id:
-                    tenants.append(
-                        _Tenant(
-                            tenant_id=tenant_id,
-                            name=str(_pick(item, "tenantName", "tenant_name", default=tenant_id)),
-                            tags=tuple(
-                                str(tag)
-                                for tag in _pick(
-                                    item, "tenantTags", "tenant_tags", default=[]
-                                )
-                            ),
+        )
+        model_results: dict[str, list[tuple[str, _TenantMetrics]]] = {}
+        if breakdown == "model" and not model:
+            model_lists = await asyncio.gather(*(self._list_tenant_models(item) for item in tenants))
+            for tenant, models in zip(tenants, model_lists):
+                values = await asyncio.gather(
+                    *(
+                        self._tenant_metrics_for_windows(
+                            tenant,
+                            plan.fetch_windows,
+                            model=model_name,
+                            include_tpm=include_tpm,
                         )
+                        for model_name in models
                     )
-            total = _as_int(data.get("total"))
-            if page * 500 >= total or not items:
-                break
+                )
+                model_results[tenant.tenant_id] = list(zip(models, values))
+
+        return self._render_range_report(
+            plan,
+            tenants,
+            summaries,
+            model_results,
+            tenant_query=tenant_query,
+            model=model,
+            breakdown=breakdown,
+            include_tpm=include_tpm,
+        )
+
+    async def _get_pages(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        page_size: int = 500,
+        label: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch GET pagination with controlled concurrency and truncation visibility."""
+
+        base = dict(params or {})
+
+        async def fetch(page: int) -> dict[str, Any]:
+            return await self._client.request(
+                "GET",
+                path,
+                params={**base, "page_num": page, "page_size": page_size},
+            )
+
+        first = await fetch(1)
+        first_items = [item for item in first.get("list") or [] if isinstance(item, dict)]
+        total = _as_int(first.get("total"))
+        required_pages = max(1, math.ceil(total / page_size)) if total else 1
+        page_count = min(required_pages, self._config.max_pages)
+        pages = await asyncio.gather(*(fetch(page) for page in range(2, page_count + 1)))
+        items = list(first_items)
+        for data in pages:
+            items.extend(item for item in data.get("list") or [] if isinstance(item, dict))
+        if required_pages > self._config.max_pages:
+            self._warnings.append(
+                f"{label} 分页截断：需要 {required_pages} 页，最多读取 {self._config.max_pages} 页"
+            )
+        return items
+
+    @staticmethod
+    def _parse_tenants(items: list[dict[str, Any]]) -> list[_Tenant]:
+        tenants: list[_Tenant] = []
+        for item in items:
+            tenant_id = str(_pick(item, "tenantId", "tenant_id", default=""))
+            if not tenant_id:
+                continue
+            tenants.append(
+                _Tenant(
+                    tenant_id=tenant_id,
+                    name=str(_pick(item, "tenantName", "tenant_name", default=tenant_id)),
+                    tags=tuple(
+                        str(tag)
+                        for tag in _pick(item, "tenantTags", "tenant_tags", default=[])
+                    ),
+                )
+            )
+        return tenants
+
+    async def _list_key_accounts(self) -> list[_Tenant]:
+        """分页读取大客户租户，并缓存 300 秒。"""
+
+        cached = self._cache.get("tenants:key-accounts")
+        if cached is not None:
+            return cached
+        items = await self._get_pages(
+            "tenants",
+            params={"isKeyAccount": "true"},
+            label="大客户租户清单",
+        )
+        tenants = self._parse_tenants(
+            [
+                item
+                for item in items
+                if bool(_pick(item, "isKeyAccount", "is_key_account", default=False))
+            ]
+        )
+        self._cache.put("tenants:key-accounts", tenants, self._config.cache_ttl_seconds)
+        return tenants
+
+    async def _list_all_tenants(self) -> list[_Tenant]:
+        cached = self._cache.get("tenants:all")
+        if cached is not None:
+            return cached
+        items = await self._get_pages("tenants", label="租户清单")
+        tenants = self._parse_tenants(items)
+        self._cache.put("tenants:all", tenants, self._config.cache_ttl_seconds)
         return tenants
 
     async def _list_matching_tenants(self, query: str) -> list[_Tenant]:
+        """先命中本地 alias 映射，再对 API 返回的租户名称做精确/部分匹配。"""
+
         normalized = _normalize_tenant_query(query)
+        # alias 命中后直接使用配置的 tenant ID，避免名称变更或 API 分页导致查询不稳定。
         for alias, tenant_id in self._config.tenant_mappings.items():
             if _normalize_tenant_query(alias) == normalized:
                 return [_Tenant(tenant_id=tenant_id, name=alias)]
         exact: list[_Tenant] = []
         partial: list[_Tenant] = []
-        for page in range(1, self._config.max_pages + 1):
-            data = await self._client.request(
-                "GET", "tenants", params={"page_num": page, "page_size": 500}
-            )
-            items = data.get("list") or []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                tenant_id = str(_pick(item, "tenantId", "tenant_id", default=""))
-                if not tenant_id:
-                    continue
-                name = str(_pick(item, "tenantName", "tenant_name", default=tenant_id))
-                tags = tuple(
-                    str(tag)
-                    for tag in _pick(item, "tenantTags", "tenant_tags", default=[])
-                )
-                values = [_normalize_tenant_query(name)]
-                tenant = _Tenant(tenant_id=tenant_id, name=name, tags=tags)
-                if normalized in values:
-                    exact.append(tenant)
-                elif any(normalized in value for value in values):
-                    partial.append(tenant)
-            total = _as_int(data.get("total"))
-            if page * 500 >= total or not items:
-                break
+        # 名称和 tags 都参与匹配；精确命中优先于部分命中。
+        for tenant in await self._list_all_tenants():
+            values = [_normalize_tenant_query(tenant.name)] + [
+                _normalize_tenant_query(tag) for tag in tenant.tags
+            ]
+            if normalized in values:
+                exact.append(tenant)
+            elif any(normalized in value for value in values):
+                partial.append(tenant)
         return (exact or partial)[: self._config.max_report_items]
 
     def _day_bounds(self, day: date) -> tuple[str, str]:
+        """按配置时区生成左闭右开的一天边界，供 API 查询使用。"""
+
         start = datetime.combine(day, time.min, tzinfo=self._tz)
         end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=self._tz)
         return start.isoformat(), end.isoformat()
 
+    async def _list_tenant_models(self, tenant: _Tenant) -> list[str]:
+        """Return all distinct configured model names for one tenant."""
+
+        cache_key = f"models:{tenant.tenant_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            items = await self._get_pages(
+                "inference/model-configs",
+                params={"tenantId": tenant.tenant_id},
+                label=f"{tenant.name} 模型清单",
+            )
+        except Exception as exc:
+            self._warnings.append(f"{tenant.name} 模型清单获取失败：{exc}")
+            return []
+        models = sorted(
+            {
+                str(_pick(item, "model", "modelName", "model_name", default="")).strip()
+                for item in items
+                if str(_pick(item, "model", "modelName", "model_name", default="")).strip()
+            },
+            key=str.casefold,
+        )
+        self._cache.put(cache_key, models, self._config.cache_ttl_seconds)
+        return models
+
+    async def _tenant_metrics_for_windows(
+        self,
+        tenant: _Tenant,
+        windows: tuple[_DateWindow, ...],
+        *,
+        model: str = "",
+        include_tpm: bool = True,
+    ) -> _TenantMetrics:
+        """Query exact windows, filter API over-return, and merge chunks without overlap."""
+
+        tokens: dict[str, int] = {}
+        requests: dict[str, int] = {}
+        max_tpm: dict[str, int] = {}
+        endpoints: dict[str, str] = {}
+        token_complete = True
+        tpm_complete = True
+        chunk_semaphore = asyncio.Semaphore(2)
+
+        async def query_token(window: _DateWindow) -> tuple[dict[str, int], dict[str, int], bool]:
+            try:
+                async with chunk_semaphore:
+                    start_time, _ = self._day_bounds(window.start)
+                    _, end_time = self._day_bounds(window.end)
+                    body: dict[str, Any] = {
+                        "startTime": start_time,
+                        "endTime": end_time,
+                        "tenantId": tenant.tenant_id,
+                        "topN": 0,
+                        "timeLevel": "TIME_LEVEL_DAY",
+                    }
+                    if model:
+                        body["model"] = model
+                    data = await self._client.request(
+                        "POST",
+                        "analysis/active-tenant-daily-usage/query",
+                        json_body=body,
+                    )
+                chunk_tokens: dict[str, int] = {}
+                chunk_requests: dict[str, int] = {}
+                seen: set[tuple[str, str]] = set()
+                for index, item in enumerate(data.get("items") or []):
+                    item_key = str(
+                        _pick(
+                            item,
+                            "model",
+                            "endpoint",
+                            "tenantId",
+                            "tenant_id",
+                            default=index,
+                        )
+                    )
+                    for point in item.get("points") or []:
+                        day = str(point.get("date") or "")[:10]
+                        dedupe_key = (item_key, day)
+                        if not window.contains(day) or dedupe_key in seen:
+                            continue
+                        seen.add(dedupe_key)
+                        chunk_tokens[day] = chunk_tokens.get(day, 0) + _as_int(
+                            _pick(point, "totalTokens", "total_tokens")
+                        )
+                        chunk_requests[day] = chunk_requests.get(day, 0) + _as_int(
+                            _pick(point, "requestCount", "request_count")
+                        )
+                return chunk_tokens, chunk_requests, True
+            except Exception as exc:
+                target = f" / {model}" if model else ""
+                self._warnings.append(
+                    f"{tenant.name}{target} Token/请求数 {_window_label(window)} 获取失败：{exc}"
+                )
+                return {}, {}, False
+
+        async def query_tpm(
+            window: _DateWindow,
+        ) -> tuple[dict[str, int], dict[str, str], bool]:
+            if not include_tpm:
+                return {}, {}, True
+            try:
+                async with chunk_semaphore:
+                    body: dict[str, Any] = {
+                        "startDate": window.start.isoformat(),
+                        "endDate": window.end.isoformat(),
+                        "tenantId": tenant.tenant_id,
+                    }
+                    if model:
+                        body["model"] = model
+                    data = await self._client.request(
+                        "POST",
+                        "analysis/endpoint-max-tpm/daily/query",
+                        json_body=body,
+                    )
+                chunk_tpm: dict[str, int] = {}
+                chunk_endpoints: dict[str, str] = {}
+                for item in data.get("items") or []:
+                    endpoint = str(item.get("endpoint") or "")
+                    for point in item.get("points") or []:
+                        day = str(point.get("date") or "")[:10]
+                        if not window.contains(day):
+                            continue
+                        value = _as_int(_pick(point, "maxTpm", "max_tpm"))
+                        if value >= chunk_tpm.get(day, -1):
+                            chunk_tpm[day] = value
+                            chunk_endpoints[day] = endpoint
+                return chunk_tpm, chunk_endpoints, True
+            except Exception as exc:
+                target = f" / {model}" if model else ""
+                self._warnings.append(
+                    f"{tenant.name}{target} TPM {_window_label(window)} 获取失败：{exc}"
+                )
+                return {}, {}, False
+
+        token_results, tpm_results = await asyncio.gather(
+            asyncio.gather(*(query_token(window) for window in windows)),
+            asyncio.gather(*(query_tpm(window) for window in windows)),
+        )
+        for chunk_tokens, chunk_requests, complete in token_results:
+            token_complete = token_complete and complete
+            for day, value in chunk_tokens.items():
+                tokens[day] = tokens.get(day, 0) + value
+            for day, value in chunk_requests.items():
+                requests[day] = requests.get(day, 0) + value
+        for chunk_tpm, chunk_endpoints, complete in tpm_results:
+            tpm_complete = tpm_complete and complete
+            for day, value in chunk_tpm.items():
+                if value >= max_tpm.get(day, -1):
+                    max_tpm[day] = value
+                    endpoints[day] = chunk_endpoints.get(day, "")
+        return _TenantMetrics(
+            tokens=tokens,
+            requests=requests,
+            max_tpm=max_tpm,
+            max_tpm_endpoint=endpoints,
+            token_complete=token_complete,
+            tpm_complete=tpm_complete,
+        )
+
     async def _tenant_metrics(
         self, tenant: _Tenant, report_date: date, *, model: str = ""
     ) -> _TenantMetrics:
-        start_day = report_date - timedelta(days=7)
-        start_time, _ = self._day_bounds(start_day)
-        _, end_time = self._day_bounds(report_date)
-        tokens: dict[str, int] = {}
-        max_tpm: dict[str, int] = {}
-        endpoints: dict[str, str] = {}
-        try:
-            body = {
-                "startTime": start_time,
-                "endTime": end_time,
-                "tenantId": tenant.tenant_id,
-                "topN": 0,
-                "timeLevel": "TIME_LEVEL_DAY",
-            }
-            if model:
-                body["model"] = model
-            data = await self._client.request(
-                "POST",
-                "analysis/active-tenant-daily-usage/query",
-                json_body=body,
-            )
-            for item in data.get("items") or []:
-                for point in item.get("points") or []:
-                    day = str(point.get("date") or "")[:10]
-                    tokens[day] = tokens.get(day, 0) + _as_int(
-                        _pick(point, "totalTokens", "total_tokens")
-                    )
-        except Exception as exc:
-            self._warnings.append(f"{tenant.name} Token 用量获取失败：{exc}")
+        """查询一个租户最近 7 天 Token 总量和每日峰值 TPM。"""
 
-        try:
-            body = {
-                "startDate": start_day.isoformat(),
-                "endDate": report_date.isoformat(),
-                "tenantId": tenant.tenant_id,
-            }
-            if model:
-                body["model"] = model
-            data = await self._client.request(
-                "POST",
-                "analysis/endpoint-max-tpm/daily/query",
-                json_body=body,
-            )
-            for item in data.get("items") or []:
-                endpoint = str(item.get("endpoint") or "")
-                for point in item.get("points") or []:
-                    day = str(point.get("date") or "")[:10]
-                    value = _as_int(_pick(point, "maxTpm", "max_tpm"))
-                    if value >= max_tpm.get(day, -1):
-                        max_tpm[day] = value
-                        endpoints[day] = endpoint
-        except Exception as exc:
-            self._warnings.append(f"{tenant.name} 峰值 TPM 获取失败：{exc}")
-        return _TenantMetrics(tokens=tokens, max_tpm=max_tpm, max_tpm_endpoint=endpoints)
+        # 兼容旧日报：一次请求覆盖目标日、前日和 7 日前，渲染口径保持不变。
+        window = _DateWindow(report_date - timedelta(days=7), report_date)
+        return await self._tenant_metrics_for_windows(
+            tenant, (window,), model=model, include_tpm=True
+        )
 
     def _render_usage_query(
         self,
@@ -480,6 +962,8 @@ class MagikCubeReporter:
         tenants: list[_Tenant],
         metrics: list[_TenantMetrics],
     ) -> str:
+        """渲染指定租户/模型的轻量查询结果。"""
+
         previous = report_date - timedelta(days=1)
         week_ago = report_date - timedelta(days=7)
         day = report_date.isoformat()
@@ -520,29 +1004,258 @@ class MagikCubeReporter:
             lines.extend(f"• {warning}" for warning in self._warnings[:10])
         return "\n".join(lines)
 
+    @staticmethod
+    def _period_stats(metrics: _TenantMetrics, window: _DateWindow) -> _PeriodStats:
+        days = [
+            (window.start + timedelta(days=offset)).isoformat()
+            for offset in range(window.days)
+        ]
+        daily_tokens = {day: metrics.tokens.get(day, 0) for day in days}
+        tokens = sum(daily_tokens.values())
+        requests = sum(metrics.requests.get(day, 0) for day in days)
+        peak_tpm = max((metrics.max_tpm.get(day, 0) for day in days), default=0)
+        peak_date = max(days, key=lambda day: daily_tokens[day]) if days else ""
+        return _PeriodStats(
+            tokens=tokens,
+            requests=requests,
+            peak_tpm=peak_tpm,
+            average_tokens_per_request=(tokens / requests if requests else 0.0),
+            daily_average_tokens=(tokens / window.days if window.days else 0.0),
+            peak_date=peak_date,
+            token_complete=metrics.token_complete,
+            tpm_complete=metrics.tpm_complete,
+        )
+
+    @staticmethod
+    def _combine_metrics(items: list[_TenantMetrics]) -> _TenantMetrics:
+        combined = _TenantMetrics(tokens={}, requests={}, max_tpm={}, max_tpm_endpoint={})
+        combined.token_complete = all(item.token_complete for item in items)
+        combined.tpm_complete = all(item.tpm_complete for item in items)
+        for item in items:
+            for day, value in item.tokens.items():
+                combined.tokens[day] = combined.tokens.get(day, 0) + value
+            for day, value in item.requests.items():
+                combined.requests[day] = combined.requests.get(day, 0) + value
+            for day, value in item.max_tpm.items():
+                if value >= combined.max_tpm.get(day, -1):
+                    combined.max_tpm[day] = value
+                    combined.max_tpm_endpoint[day] = item.max_tpm_endpoint.get(day, "")
+        return combined
+
+    @staticmethod
+    def _value_with_quality(value: int | float, complete: bool) -> str:
+        rendered = _format_number(value)
+        return rendered if complete else f"{rendered}（数据不完整）"
+
+    def _period_summary_line(
+        self,
+        label: str,
+        stats: _PeriodStats,
+        *,
+        include_tpm: bool,
+    ) -> str:
+        values = [
+            f"Token {self._value_with_quality(stats.tokens, stats.token_complete)}",
+            f"请求数 {self._value_with_quality(stats.requests, stats.token_complete)}",
+            f"平均Token/请求 {_format_number(stats.average_tokens_per_request)}",
+            f"日均Token {_format_number(stats.daily_average_tokens)}",
+            f"峰值日 {stats.peak_date or '无'}",
+        ]
+        if include_tpm:
+            values.append(f"峰值TPM {self._value_with_quality(stats.peak_tpm, stats.tpm_complete)}")
+        return f"• {label}：" + "｜".join(values)
+
+    def _render_range_report(
+        self,
+        plan: _ComparisonPlan,
+        tenants: list[_Tenant],
+        summaries: list[_TenantMetrics],
+        model_results: dict[str, list[tuple[str, _TenantMetrics]]],
+        *,
+        tenant_query: str,
+        model: str,
+        breakdown: str,
+        include_tpm: bool,
+    ) -> str:
+        """Render fixed calculations in a stable, reviewable order."""
+
+        combined = self._combine_metrics(summaries)
+        current = self._period_stats(combined, plan.primary)
+        baseline = (
+            self._period_stats(combined, plan.comparison) if plan.comparison else None
+        )
+        scope = tenant_query or "全部大客户"
+        if model:
+            scope += f" / {model}"
+        lines = [
+            f"📊 Magik Cube 确定性报表 · {_window_label(plan.primary)}",
+            f"范围：{scope}｜维度：{'模型' if breakdown == 'model' else '汇总'}｜时区：Asia/Shanghai",
+            "",
+            "一、周期概览",
+            self._period_summary_line("本期", current, include_tpm=include_tpm),
+        ]
+        if baseline and plan.comparison:
+            lines.append(
+                self._period_summary_line(
+                    f"对比期（{_window_label(plan.comparison)}）",
+                    baseline,
+                    include_tpm=include_tpm,
+                )
+            )
+            lines.append(
+                f"• 变化：Token {_format_number(current.tokens - baseline.tokens)}"
+                f"（{_format_change(current.tokens, baseline.tokens)}）｜请求数 "
+                f"{_format_number(current.requests - baseline.requests)}"
+                f"（{_format_change(current.requests, baseline.requests)}）｜平均Token/请求 "
+                f"{_format_change(round(current.average_tokens_per_request), round(baseline.average_tokens_per_request))}"
+            )
+
+        if breakdown != "model" or model:
+            lines.extend(["", "二、租户明细"])
+            for tenant, metrics in sorted(zip(tenants, summaries), key=lambda pair: pair[0].name):
+                stats = self._period_stats(metrics, plan.primary)
+                detail = self._period_summary_line(tenant.name, stats, include_tpm=include_tpm)
+                if plan.comparison:
+                    prior = self._period_stats(metrics, plan.comparison)
+                    detail += f"｜Token环比 {_format_change(stats.tokens, prior.tokens)}"
+                lines.append(detail)
+        else:
+            lines.extend(["", "二、全部模型（按本期 Token 降序）"])
+            for tenant in tenants:
+                rows = model_results.get(tenant.tenant_id, [])
+                if len(tenants) > 1:
+                    lines.append(f"【{tenant.name}】")
+                tenant_summary = summaries[tenants.index(tenant)]
+                tenant_total = self._period_stats(tenant_summary, plan.primary).tokens
+                ranked = sorted(
+                    rows,
+                    key=lambda pair: (
+                        -self._period_stats(pair[1], plan.primary).tokens,
+                        pair[0].casefold(),
+                    ),
+                )
+                for model_name, metrics in ranked:
+                    stats = self._period_stats(metrics, plan.primary)
+                    share = stats.tokens / tenant_total if tenant_total else 0.0
+                    fields = [
+                        f"Token {self._value_with_quality(stats.tokens, stats.token_complete)}",
+                        f"占比 {share:.1%}",
+                        f"请求 {_format_number(stats.requests)}",
+                        f"平均Token/请求 {_format_number(stats.average_tokens_per_request)}",
+                    ]
+                    if include_tpm:
+                        fields.append(
+                            f"峰值TPM {self._value_with_quality(stats.peak_tpm, stats.tpm_complete)}"
+                        )
+                    if plan.comparison:
+                        prior = self._period_stats(metrics, plan.comparison)
+                        fields.extend(
+                            [
+                                f"对比Token {_format_number(prior.tokens)}",
+                                f"Token变化 {_format_number(stats.tokens - prior.tokens)}"
+                                f"（{_format_change(stats.tokens, prior.tokens)}）",
+                                f"请求变化 {_format_number(stats.requests - prior.requests)}"
+                                f"（{_format_change(stats.requests, prior.requests)}）",
+                                f"平均Token/请求变化 "
+                                f"{_format_change(round(stats.average_tokens_per_request), round(prior.average_tokens_per_request))}",
+                            ]
+                        )
+                        if include_tpm:
+                            fields.append(
+                                f"对比TPM {_format_number(prior.peak_tpm)}｜TPM变化 "
+                                f"{_format_change(stats.peak_tpm, prior.peak_tpm)}"
+                            )
+                    lines.append(f"• {model_name}｜" + "｜".join(fields))
+                if not ranked:
+                    lines.append("• 模型清单不可用，未生成模型明细")
+
+        lines.extend(["", "三、固定分析"])
+        if plan.comparison:
+            all_rows = [
+                (tenant, model_name, metrics)
+                for tenant in tenants
+                for model_name, metrics in model_results.get(tenant.tenant_id, [])
+            ]
+            changes = []
+            new_models = []
+            stopped_models = []
+            for tenant, model_name, metrics in all_rows:
+                now_stats = self._period_stats(metrics, plan.primary)
+                old_stats = self._period_stats(metrics, plan.comparison)
+                display_name = (
+                    f"{tenant.name}/{model_name}" if len(tenants) > 1 else model_name
+                )
+                delta = now_stats.tokens - old_stats.tokens
+                changes.append((delta, display_name))
+                if old_stats.tokens == 0 and now_stats.tokens > 0:
+                    new_models.append(display_name)
+                if old_stats.tokens > 0 and now_stats.tokens == 0:
+                    stopped_models.append(display_name)
+            growth = sorted((item for item in changes if item[0] > 0), reverse=True)[:5]
+            decline = sorted((item for item in changes if item[0] < 0))[:5]
+            lines.append(
+                "• 增长排行："
+                + ("；".join(f"{name} +{_format_number(delta)}" for delta, name in growth) or "无")
+            )
+            lines.append(
+                "• 下降排行："
+                + ("；".join(f"{name} {_format_number(delta)}" for delta, name in decline) or "无")
+            )
+            lines.append(f"• 新增：{'、'.join(sorted(new_models)) or '无'}")
+            lines.append(f"• 停用：{'、'.join(sorted(stopped_models)) or '无'}")
+        else:
+            lines.append("• 未配置对比周期，不计算增长、下降、新增和停用")
+
+        anomalies: list[str] = []
+        for tenant, summary in zip(tenants, summaries):
+            tenant_total = self._period_stats(summary, plan.primary).tokens
+            for model_name, metrics in model_results.get(tenant.tenant_id, []):
+                stats = self._period_stats(metrics, plan.primary)
+                share = stats.tokens / tenant_total if tenant_total else 0.0
+                if share < self._config.trend_min_share:
+                    continue
+                daily = [
+                    metrics.tokens.get(
+                        (plan.primary.start + timedelta(days=offset)).isoformat(), 0
+                    )
+                    for offset in range(plan.primary.days)
+                ]
+                median = statistics.median(daily) if daily else 0
+                threshold = median * self._config.spike_median_multiplier
+                peak_days = [
+                    (plan.primary.start + timedelta(days=offset)).isoformat()
+                    for offset, value in enumerate(daily)
+                    if value > threshold and value > 0
+                ]
+                if peak_days:
+                    name = f"{tenant.name}/{model_name}" if len(tenants) > 1 else model_name
+                    anomalies.append(f"{name}：{','.join(peak_days)}（占比 {share:.1%}）")
+        lines.append(f"• 峰值异常：{'；'.join(anomalies) if anomalies else '无'}")
+
+        lines.extend(["", "四、数据质量"])
+        if self._warnings:
+            lines.extend(f"• {warning}" for warning in self._warnings[:20])
+        else:
+            lines.append("• 完整：无接口失败、分页截断或分片缺失")
+        return "\n".join(lines)
+
     async def _list_customer_resources(self, tenants: list[_Tenant]) -> dict[str, _Tenant]:
+        """建立 endpoint/model-config ID 到租户的映射，用于归属配额变更。"""
+
         mapping: dict[str, _Tenant] = {}
 
         async def load(tenant: _Tenant, path: str, id_names: tuple[str, str]) -> None:
+            # 每个租户的 endpoint 和 model-config 查询可并发；失败只影响配额变更归属，不阻断日报。
             try:
-                for page in range(1, self._config.max_pages + 1):
-                    data = await self._client.request(
-                        "GET",
-                        path,
-                        params={
-                            "tenantId": tenant.tenant_id,
-                            "page_num": page,
-                            "page_size": 500,
-                        },
-                    )
-                    items = data.get("list") or []
-                    for item in items:
-                        if isinstance(item, dict):
-                            entity_id = str(_pick(item, *id_names, default=""))
-                            if entity_id:
-                                mapping[entity_id] = tenant
-                    if page * 500 >= _as_int(data.get("total")) or not items:
-                        break
+                items = await self._get_pages(
+                    path,
+                    params={"tenantId": tenant.tenant_id},
+                    label=f"{tenant.name} {path} 资源映射",
+                )
+                for item in items:
+                    entity_id = str(_pick(item, *id_names, default=""))
+                    if entity_id:
+                        mapping[entity_id] = tenant
             except Exception as exc:
                 self._warnings.append(f"{tenant.name} 配额资源映射失败：{exc}")
 
@@ -559,6 +1272,8 @@ class MagikCubeReporter:
         return mapping
 
     async def _list_quota_changes(self, report_date: date) -> list[dict[str, Any]]:
+        """分页读取目标日已执行的配额变更记录。"""
+
         start_time, end_time = self._day_bounds(report_date)
         changes: list[dict[str, Any]] = []
         try:
@@ -587,6 +1302,8 @@ class MagikCubeReporter:
     def _format_quota_changes(
         self, changes: list[dict[str, Any]], resources: dict[str, _Tenant]
     ) -> list[str]:
+        """过滤并格式化属于大客户的 TPM/RPM/并发变更。"""
+
         lines: list[str] = []
         for change in changes:
             entity_id = str(_pick(change, "entityId", "entity_id", default=""))
@@ -609,6 +1326,8 @@ class MagikCubeReporter:
         return lines[: self._config.max_report_items]
 
     async def _cluster_names(self) -> list[str]:
+        """返回配置指定的集群，或从 API 自动发现集群名称。"""
+
         if self._config.cluster_names:
             return self._config.cluster_names
         try:
@@ -621,42 +1340,45 @@ class MagikCubeReporter:
             return []
 
     async def _proxy_snapshot(self) -> tuple[dict[str, dict[str, int]], bool]:
+        """读取各集群目标 Proxy 的限流字段，并返回快照完整性。"""
+
         clusters = await self._cluster_names()
         snapshot: dict[str, dict[str, int]] = {}
-        complete = True
-        for cluster in clusters:
+        # 只有全部集群查询成功时才允许写入新基线，避免部分快照误报“已删除”。
+        async def load_cluster(cluster: str) -> tuple[dict[str, dict[str, int]], bool]:
+            values: dict[str, dict[str, int]] = {}
             try:
-                for page in range(1, self._config.max_pages + 1):
-                    data = await self._client.request(
-                        "GET",
-                        "gateway/proxy-configs",
-                        params={
-                            "clusterName": cluster,
-                            "namespace": self._config.proxy_namespace,
-                            "labels": self._config.proxy_labels,
-                            "page_num": page,
-                            "page_size": 500,
-                        },
-                    )
-                    items = data.get("list") or []
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        name = str(item.get("name") or "unknown")
-                        config_data = item.get("data") or {}
-                        if not isinstance(config_data, dict):
-                            continue
-                        raw = config_data.get("proxy.yaml")
-                        if isinstance(raw, str):
-                            snapshot[f"{cluster}/{name}"] = _proxy_values(raw)
-                    if page * 500 >= _as_int(data.get("total")) or not items:
-                        break
+                items = await self._get_pages(
+                    "gateway/proxy-configs",
+                    params={
+                        "clusterName": cluster,
+                        "namespace": self._config.proxy_namespace,
+                        "labels": self._config.proxy_labels,
+                    },
+                    label=f"{cluster} Proxy 配置",
+                )
+                for item in items:
+                    name = str(item.get("name") or "unknown")
+                    config_data = item.get("data") or {}
+                    if not isinstance(config_data, dict):
+                        continue
+                    raw = config_data.get("proxy.yaml")
+                    if isinstance(raw, str):
+                        values[f"{cluster}/{name}"] = _proxy_values(raw)
+                return values, True
             except Exception as exc:
-                complete = False
                 self._warnings.append(f"{cluster} Proxy 配置获取失败：{exc}")
+                return {}, False
+
+        results = await asyncio.gather(*(load_cluster(cluster) for cluster in clusters))
+        complete = all(item[1] for item in results)
+        for values, _ in results:
+            snapshot.update(values)
         return snapshot, complete
 
     async def _proxy_changes(self, report_date: date, save_snapshot: bool) -> list[str]:
+        """加载旧快照、计算 Proxy 净变化，并在数据完整时原子写入新快照。"""
+
         current, complete = await self._proxy_snapshot()
         previous: dict[str, dict[str, int]] | None = None
         if self._snapshot_path.exists():
@@ -667,6 +1389,7 @@ class MagikCubeReporter:
                     previous = value
             except (OSError, ValueError):
                 self._warnings.append("历史 Proxy 快照损坏，本次重新建立基线")
+        # 第一次运行只建立基线，不把全部现存配置误报成新增变更。
         changes = [] if previous is None else _diff_proxy_snapshots(previous, current)
         if save_snapshot and complete:
             self._snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -683,6 +1406,8 @@ class MagikCubeReporter:
         return changes
 
     async def _machine_usage(self) -> list[dict[str, Any]]:
+        """获取并按机器数降序排列模型机器使用情况。"""
+
         try:
             data = await self._client.request(
                 "POST",
@@ -702,37 +1427,42 @@ class MagikCubeReporter:
             return []
 
     async def _observed_pd_ratio(self) -> str:
+        """统计最近窗口内出现过的 Prefill/Decode Pod，并输出去约分后的观测比例。"""
+
         now = datetime.now(self._tz)
         start = now - timedelta(minutes=self._config.pd_window_minutes)
+        # 使用 set 去重 Pod，统计的是活跃 Pod 数而不是请求数。
         prefill: set[str] = set()
         decode: set[str] = set()
         clusters = self._config.cluster_names or [""]
+
+        async def load_cluster(cluster: str) -> list[dict[str, Any]]:
+            params: dict[str, Any] = {
+                "startTime": start.isoformat(),
+                "endTime": now.isoformat(),
+                "sortBy": "reqTimestamp",
+                "sortOrder": "desc",
+            }
+            if cluster:
+                params["clusterName"] = cluster
+            return await self._get_pages(
+                "gateway/usages",
+                params=params,
+                label=f"{cluster or '默认集群'} P/D 观测",
+            )
+
         try:
-            for cluster in clusters:
-                for page in range(1, self._config.max_pages + 1):
-                    params: dict[str, Any] = {
-                        "startTime": start.isoformat(),
-                        "endTime": now.isoformat(),
-                        "page_num": page,
-                        "page_size": 500,
-                        "sortBy": "reqTimestamp",
-                        "sortOrder": "desc",
-                    }
-                    if cluster:
-                        params["clusterName"] = cluster
-                    data = await self._client.request("GET", "gateway/usages", params=params)
-                    items = data.get("list") or []
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        p_name = str(_pick(item, "prefillPodName", "prefill_pod_name", default=""))
-                        d_name = str(_pick(item, "podName", "pod_name", default=""))
-                        if p_name:
-                            prefill.add(p_name)
-                        if d_name:
-                            decode.add(d_name)
-                    if page * 500 >= _as_int(data.get("total")) or not items:
-                        break
+            pages = await asyncio.gather(*(load_cluster(cluster) for cluster in clusters))
+            for items in pages:
+                for item in items:
+                    p_name = str(
+                        _pick(item, "prefillPodName", "prefill_pod_name", default="")
+                    )
+                    d_name = str(_pick(item, "podName", "pod_name", default=""))
+                    if p_name:
+                        prefill.add(p_name)
+                    if d_name:
+                        decode.add(d_name)
         except Exception as exc:
             self._warnings.append(f"P/D 观测数据获取失败：{exc}")
             return "暂无可用 P/D 观测数据"
@@ -755,6 +1485,8 @@ class MagikCubeReporter:
         machines: list[dict[str, Any]],
         pd_summary: str,
     ) -> str:
+        """将各子查询结果渲染成面向运营/值班人员的中文日报。"""
+
         previous = report_date - timedelta(days=1)
         week_ago = report_date - timedelta(days=7)
         lines = [f"📊 大客户运营日报 · {report_date.isoformat()}", "", "一、用量与峰值"]
@@ -786,6 +1518,7 @@ class MagikCubeReporter:
         else:
             lines.append("• Proxy：相对上一份快照无净变化")
 
+        # 当前实现没有告警事件 API，因此明确标注数据边界，不把 HTTP 错误当正式告警。
         lines.extend(["", "三、昨日告警", "• 暂未接入告警事件数据源；HTTP 错误指标不计作正式告警"])
         lines.extend(["", "四、当前机器使用情况"])
         if machines:
@@ -810,6 +1543,7 @@ class MagikCubeReporter:
         return "\n".join(lines)
 
 
+# 暴露给 LLM 的参数契约。全部参数可选：默认查询 agent 时区下的昨天，并生成完整日报。
 _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
     report_date=StringSchema(
         "Report date in YYYY-MM-DD. Defaults to yesterday in the agent timezone."
@@ -825,10 +1559,21 @@ _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
         "Optional tenant name or tenant tag, such as 佛跳墙 or tencent_token_hub."
     ),
     model=StringSchema("Optional exact model filter, such as GLM-5.2."),
+    start_date=StringSchema("Primary inclusive start date in YYYY-MM-DD."),
+    end_date=StringSchema("Primary inclusive end date in YYYY-MM-DD."),
+    compare_start_date=StringSchema("Optional comparison inclusive start date."),
+    compare_end_date=StringSchema("Optional comparison inclusive end date."),
+    comparison=StringSchema(
+        "Automatic comparison window.",
+        enum=("none", "previous_period", "previous_week", "previous_month"),
+    ),
+    breakdown=StringSchema("Report dimension.", enum=("summary", "model")),
+    include_tpm=BooleanSchema(default=True, description="Include daily peak TPM queries."),
     required=[],
     description=(
-        "Generate a Magik Cube key-account daily report, or query usage for a specified "
-        "tenant name/tag and model."
+        "Generate a Magik Cube key-account daily report or deterministic date-range report. "
+        "For deep analysis, call this tool exactly once and explain its fixed summary without "
+        "recalculating any numeric value."
     ),
 )
 
@@ -837,6 +1582,7 @@ _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
 class MagikCubeDailyReportTool(Tool):
     """Generate the daily key-account operations report."""
 
+    # 对应配置文件 tools.magikCube；Base 配置层负责 camelCase alias 映射。
     config_key = "magik_cube"
 
     @classmethod
@@ -845,10 +1591,12 @@ class MagikCubeDailyReportTool(Tool):
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
+        # 未显式 enable 时不注册该 Tool，避免无凭据环境出现无效 tool call。
         return ctx.config.magik_cube.enable
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
+        # Proxy 快照放在 runtime 子目录，和源码/用户 workspace 隔离。
         return cls(
             config=ctx.config.magik_cube,
             timezone=ctx.timezone,
@@ -862,13 +1610,16 @@ class MagikCubeDailyReportTool(Tool):
         snapshot_path: Path | None = None,
     ) -> None:
         self._config = config or MagikCubeToolConfig()
-        self._timezone = timezone
+        # 业务报表固定使用 Asia/Shanghai；保留参数仅为兼容既有构造接口。
+        self._timezone = _REPORT_TIMEZONE
         self._snapshot_path = snapshot_path or (
             get_runtime_subdir("magik_cube") / "proxy_snapshot.json"
         )
+        self._cache = _MagikCubeCache()
 
     @property
     def name(self) -> str:
+        # 该名称同时用于 LLM tool-call、调用预算和测试断言，属于稳定接口。
         return "magik_cube_daily_report"
 
     @property
@@ -883,20 +1634,25 @@ class MagikCubeDailyReportTool(Tool):
 
     @property
     def max_calls_per_turn(self) -> int | None:
-        # One focused query already includes the target day, previous day,
-        # and seven-days-prior comparisons.  Three calls leave room for a
-        # small follow-up while preventing unbounded day-by-day scans.
-        return 3
+        # 单次范围 Tool 已覆盖主周期和对比周期，禁止 Agent 逐日或逐模型重复调用。
+        return 1
 
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
+        """把明确的中文用量问题直接路由为结构化参数，绕过一次 LLM tool 选择。"""
+
         raw = text.strip()
+        # 原因解释和业务建议需要 LLM；让 Agent 调用一次范围 Tool 后只解释确定性摘要。
+        if re.search(r"(?:深度分析|原因分析|原因解释|分析原因|业务建议|优化建议)", raw):
+            return None
+        # 第一层门槛必须出现用量/Token/TPM 语义，避免拦截普通模型能力或机器状态问题。
         if not re.search(
-            r"(?:用量|使用量|用了多少量|多少量|token|峰值\s*tpm|tpm)",
+            r"(?:用量|使用量|使用情况|消耗|周报|月报|日报|用了多少量|多少量|token|峰值\s*tpm|tpm)",
             raw,
             re.IGNORECASE,
         ):
             return None
 
+        # 仅识别约定的模型族前缀，降低把普通英文单词误判为模型名的概率。
         model_match = re.search(
             r"\b(?:GLM|KIMI|MINIMAX|DEEPSEEK|QWEN|HY)[A-Z0-9._-]*\b",
             raw,
@@ -904,6 +1660,7 @@ class MagikCubeDailyReportTool(Tool):
         )
         model = model_match.group(0) if model_match else ""
 
+        # 去掉不影响实体识别的礼貌词、动作词和相对日期词，再提取“xxx 用户/客户/租户”。
         cleaned = raw
         for phrase in (
             "帮我",
@@ -920,6 +1677,7 @@ class MagikCubeDailyReportTool(Tool):
             "的",
         ):
             cleaned = cleaned.replace(phrase, " ")
+        # 已配置 alias 优先，并按长度倒序，避免短 alias 抢先匹配长 alias。
         tenant_query = next(
             (
                 alias
@@ -928,6 +1686,7 @@ class MagikCubeDailyReportTool(Tool):
             ),
             "",
         )
+        # “所有客户”等量词代表默认大客户集合，不应误提取为名为“所有”的租户。
         all_customers = bool(
             re.search(
                 r"(?:各大|所有|全部|各个|每个|全体)\s*(?:大客户|客户|租户)",
@@ -939,15 +1698,102 @@ class MagikCubeDailyReportTool(Tool):
                 r"([A-Za-z0-9_\-\u4e00-\u9fff]+)\s*(?:用户|客户|租户)", cleaned
             )
             tenant_query = tenant_match.group(1) if tenant_match else ""
+        if not tenant_query and not all_customers:
+            # Magik tenant slug 通常含下划线；允许无需“租户”后缀直接识别。
+            slug_match = re.search(r"\b[A-Za-z][A-Za-z0-9-]*_[A-Za-z0-9_-]+\b", raw)
+            tenant_query = slug_match.group(0) if slug_match else ""
 
+        # 没有租户/模型/日报/全量意图时放弃 direct route，交回正常对话流程。
         is_daily_report = "大客户" in raw and "日报" in raw
-        if not tenant_query and not model and not is_daily_report and not all_customers:
+        is_standard_period_report = bool(
+            re.search(r"(?:周报|月报|近\s*7\s*天|最近\s*7\s*天|一周|上周|上个月|上月)", raw)
+        )
+        if (
+            not tenant_query
+            and not model
+            and not is_daily_report
+            and not is_standard_period_report
+            and not all_customers
+        ):
             return None
 
+        # 即时问答不更新 Proxy 基线，避免临时查询污染下一次定时日报的净变化。
         params: dict[str, Any] = {"save_snapshot": False}
-        date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", raw)
-        if date_match:
-            params["report_date"] = date_match.group(0)
+        explicit_dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", raw)
+        today = datetime.now(ZoneInfo(self._timezone)).date()
+        yesterday = today - timedelta(days=1)
+        if len(explicit_dates) >= 2:
+            params["start_date"], params["end_date"] = explicit_dates[:2]
+            params["comparison"] = "previous_period" if re.search(r"(?:环比|对比)", raw) else "none"
+        elif "上周" in raw:
+            last_week_start = today - timedelta(days=today.weekday() + 7)
+            last_week_end = last_week_start + timedelta(days=6)
+            if "上上周" in raw and re.search(r"(?:和|与|对比|比较|环比)", raw):
+                params.update(
+                    {
+                        "start_date": last_week_start.isoformat(),
+                        "end_date": last_week_end.isoformat(),
+                        "compare_start_date": (last_week_start - timedelta(days=7)).isoformat(),
+                        "compare_end_date": (last_week_end - timedelta(days=7)).isoformat(),
+                        "comparison": "none",
+                    }
+                )
+            elif "上上周" in raw:
+                params.update(
+                    {
+                        "start_date": (last_week_start - timedelta(days=7)).isoformat(),
+                        "end_date": (last_week_end - timedelta(days=7)).isoformat(),
+                        "comparison": "previous_period",
+                    }
+                )
+            else:
+                params.update(
+                    {
+                        "start_date": last_week_start.isoformat(),
+                        "end_date": last_week_end.isoformat(),
+                        "comparison": "previous_period",
+                    }
+                )
+        elif re.search(r"(?:近\s*7\s*天|最近\s*7\s*天|一周)", raw):
+            params.update(
+                {
+                    "start_date": (yesterday - timedelta(days=6)).isoformat(),
+                    "end_date": yesterday.isoformat(),
+                    "comparison": "previous_period",
+                }
+            )
+        elif re.search(r"(?:上个月|上月|月报)", raw):
+            month_end = today.replace(day=1) - timedelta(days=1)
+            params.update(
+                {
+                    "start_date": month_end.replace(day=1).isoformat(),
+                    "end_date": month_end.isoformat(),
+                    "comparison": "previous_month",
+                }
+            )
+        elif explicit_dates:
+            params["report_date"] = explicit_dates[0]
+        elif "今天" in raw:
+            params["report_date"] = today.isoformat()
+        elif "前天" in raw:
+            params["report_date"] = (today - timedelta(days=2)).isoformat()
+
+        if re.search(r"(?:各个模型|各模型|全部模型|每个模型|模型维度|按模型)", raw):
+            params["breakdown"] = "model"
+            # 模型维度统一走范围引擎；单日也用 1 天主周期与前 1 天对比。
+            if "start_date" not in params:
+                selected = date.fromisoformat(params.pop("report_date", yesterday.isoformat()))
+                params.update(
+                    {
+                        "start_date": selected.isoformat(),
+                        "end_date": selected.isoformat(),
+                        "comparison": "previous_period",
+                    }
+                )
+        if "start_date" in params:
+            params["include_tpm"] = not bool(
+                re.search(r"(?:不含|不要|排除|无需)\s*TPM", raw, re.IGNORECASE)
+            )
         if tenant_query:
             params["tenant_query"] = tenant_query
         if model:
@@ -960,8 +1806,18 @@ class MagikCubeDailyReportTool(Tool):
         save_snapshot: bool = True,
         tenant_query: str | None = None,
         model: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        compare_start_date: str | None = None,
+        compare_end_date: str | None = None,
+        comparison: str = "none",
+        breakdown: str = "summary",
+        include_tpm: bool = True,
         **_kwargs: Any,
     ) -> str:
+        """校验配置与日期，创建只读 client，并分派完整日报或指定用量查询。"""
+
+        # 支持静态 token 或账号密码二选一；账号和密码必须成对出现。
         has_auth = bool(
             self._config.access_token
             or (self._config.account and self._config.password)
@@ -972,21 +1828,66 @@ class MagikCubeDailyReportTool(Tool):
                 "or accessToken"
             )
         tz = ZoneInfo(self._timezone)
+        range_values = (start_date, end_date, compare_start_date, compare_end_date)
+        if report_date and any(range_values):
+            return ToolResult.error("Error: report_date is mutually exclusive with range dates")
+        if bool(start_date) != bool(end_date):
+            return ToolResult.error("Error: start_date and end_date must be provided together")
+        if (compare_start_date or compare_end_date) and not (start_date and end_date):
+            return ToolResult.error("Error: comparison dates require start_date and end_date")
+        if breakdown not in {"summary", "model"}:
+            return ToolResult.error("Error: breakdown must be summary or model")
         if report_date:
             try:
                 target_date = date.fromisoformat(report_date)
             except ValueError:
                 return ToolResult.error("Error: report_date must use YYYY-MM-DD")
         else:
+            # 无显式日期时按 agent 配置时区取昨天，避免 UTC 跨日导致日报错位。
             target_date = datetime.now(tz).date() - timedelta(days=1)
+        plan: _ComparisonPlan | None = None
+        if start_date and end_date:
+            try:
+                parsed_compare_start = (
+                    date.fromisoformat(compare_start_date) if compare_start_date else None
+                )
+                parsed_compare_end = (
+                    date.fromisoformat(compare_end_date) if compare_end_date else None
+                )
+                plan = _plan_comparison_windows(
+                    date.fromisoformat(start_date),
+                    date.fromisoformat(end_date),
+                    comparison=comparison,
+                    compare_start=parsed_compare_start,
+                    compare_end=parsed_compare_end,
+                    max_request_days=self._config.max_range_days_per_request,
+                    max_query_days=self._config.max_query_days,
+                )
+            except ValueError as exc:
+                return ToolResult.error(f"Error: invalid report range: {exc}")
+        started = time_module.perf_counter()
+        cache_hits_before = self._cache.hits
+        cache_misses_before = self._cache.misses
+        client: MagikCubeClient | None = None
         try:
+            # async context 确保认证完成后再查询，并在所有路径关闭 httpx 连接池。
             async with MagikCubeClient(self._config) as client:
                 reporter = MagikCubeReporter(
                     client,
                     self._config,
                     self._snapshot_path,
                     self._timezone,
+                    self._cache,
                 )
+                if plan is not None:
+                    return await reporter.generate_range_report(
+                        plan,
+                        tenant_query=(tenant_query or "").strip(),
+                        model=(model or "").strip(),
+                        breakdown=breakdown,
+                        include_tpm=include_tpm,
+                    )
+                # 任一过滤条件存在就走轻量指定查询；否则生成含配置、机器和 P/D 的完整日报。
                 if tenant_query or model:
                     return await reporter.generate_usage_query(
                         target_date,
@@ -996,3 +1897,17 @@ class MagikCubeDailyReportTool(Tool):
                 return await reporter.generate(target_date, save_snapshot=save_snapshot)
         except (MagikCubeApiError, httpx.HTTPError) as exc:
             return ToolResult.error(f"Error: failed to generate Magik Cube report: {exc}")
+        finally:
+            elapsed_ms = (time_module.perf_counter() - started) * 1000
+            logger.info(
+                "Magik Cube report perf: mode={} elapsed_ms={:.0f} api_calls={} "
+                "api_wait_ms={:.0f} cache_hits={} cache_misses={} http_429={} http_5xx={}",
+                "range" if plan is not None else "daily",
+                elapsed_ms,
+                sum(client.route_counts.values()) if client else 0,
+                client.request_seconds * 1000 if client else 0,
+                self._cache.hits - cache_hits_before,
+                self._cache.misses - cache_misses_before,
+                client.rate_limit_errors if client else 0,
+                client.server_errors if client else 0,
+            )
