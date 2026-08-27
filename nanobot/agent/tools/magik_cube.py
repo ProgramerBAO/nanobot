@@ -79,6 +79,8 @@ class MagikCubeToolConfig(Base):
     max_report_items: int = Field(default=20, ge=1, le=100)
     # 用户可读别名到真实 tenant ID 的映射。命中后跳过 tenants API，适合 Feishu 常用简称。
     tenant_mappings: dict[str, str] = Field(default_factory=dict)
+    # 模型简称到管理面真实模型名的映射；同时用于 intent 解析和最终模型清单校验。
+    model_aliases: dict[str, str] = Field(default_factory=lambda: {"k3": "Kimi-K3"})
     # 所有只读业务 API 共用的并发上限，避免模型 fan-out 冲击管理面。
     max_concurrency: int = Field(default=8, ge=1, le=32)
     # 单个分析接口请求最多覆盖的自然日数；更长范围自动分片。
@@ -460,6 +462,17 @@ def _normalize_tenant_query(value: str) -> str:
             normalized = normalized[: -len(suffix)]
             break
     return normalized
+
+
+def _resolve_model_alias(value: str, aliases: dict[str, str]) -> str:
+    """Resolve a user-facing model alias without changing unknown model names."""
+
+    query = value.strip()
+    normalized = query.casefold()
+    for alias, model_name in aliases.items():
+        if alias.strip().casefold() == normalized and model_name.strip():
+            return model_name.strip()
+    return query
 
 
 def _shift_month(day: date, months: int) -> date:
@@ -878,12 +891,25 @@ class MagikCubeReporter:
                             if str(item).strip()
                         ]
                         by_key = {item.casefold(): item for item in available}
-                        unknown = [item for item in requested if item.casefold() not in by_key]
+                        resolved = [
+                            (item, _resolve_model_alias(item, self._config.model_aliases))
+                            for item in requested
+                        ]
+                        unknown = [
+                            original
+                            for original, canonical in resolved
+                            if canonical.casefold() not in by_key
+                        ]
                         if unknown:
                             raise MagikCubeApiError(
                                 f"{tenant.name} 存在未知模型：{'、'.join(unknown)}"
                             )
-                        model_names = [by_key[item.casefold()] for item in requested]
+                        model_names = list(
+                            dict.fromkeys(
+                                by_key[canonical.casefold()]
+                                for _original, canonical in resolved
+                            )
+                        )
                 values = await asyncio.gather(
                     self._tenant_metrics_for_windows(
                         tenant, plan.fetch_windows, include_tpm=include_tpm
@@ -943,7 +969,7 @@ class MagikCubeReporter:
                         "style": "default",
                         "tool_name": "report_center",
                         "params": {
-                            "action": "subscribe",
+                            "action": "subscription_setup",
                             "period": subscription_period,
                             "report_params": {
                                 "tenant_query": str(selection.get("tenant_query") or ""),
@@ -1119,14 +1145,14 @@ class MagikCubeReporter:
                     new_models.append(model_name)
                 elif prior.tokens > 0 and stats.tokens == 0:
                     stopped_models.append(model_name)
-            rows.append(
-                {
-                    "model": model_name,
-                    "total": f"{self._value_with_quality(stats.tokens, stats.token_complete)}\n占比 {share:.1%}",
-                    "change": change if stats.token_complete else "数据不完整",
-                    "segments": "\n".join(self._segment_lines(metrics, pairs)),
-                }
-            )
+            row = {
+                "model": model_name,
+                "total": f"{self._value_with_quality(stats.tokens, stats.token_complete)}\n占比 {share:.1%}",
+                "change": change if stats.token_complete else "数据不完整",
+            }
+            if plan.primary.days > 1:
+                row["segments"] = "\n".join(self._segment_lines(metrics, pairs))
+            rows.append(row)
 
         growth = sorted((item for item in changes if item[0] > 0), reverse=True)[:1]
         decline = sorted(item for item in changes if item[0] < 0)[:1]
@@ -1179,11 +1205,13 @@ class MagikCubeReporter:
             *overview,
             "分段变化：" + "；".join(daily_lines),
         ]
-        fallback_lines.extend(
-            f"{row['model']}｜{row['total'].replace(chr(10), '｜')}｜{row['change']}｜"
-            f"{row['segments'].replace(chr(10), '；')}"
-            for row in rows
-        )
+        for row in rows:
+            fallback_row = (
+                f"{row['model']}｜{row['total'].replace(chr(10), '｜')}｜{row['change']}"
+            )
+            if row.get("segments"):
+                fallback_row += f"｜{row['segments'].replace(chr(10), '；')}"
+            fallback_lines.append(fallback_row)
         fallback_lines.extend(["关键变化：" + "；".join(insights), quality])
         return {
             "title": f"{tenant.name} {kind}",
@@ -2229,13 +2257,25 @@ class MagikCubeDailyReportTool(Tool):
         ):
             return None
 
-        # 仅识别约定的模型族前缀，降低把普通英文单词误判为模型名的概率。
+        # 使用 ASCII 边界，避免“Kimi-K3模型”在 Unicode \b 上回退成“Kimi-”。
         model_match = re.search(
-            r"\b(?:GLM|KIMI|MINIMAX|DEEPSEEK|QWEN|HY)[A-Z0-9._-]*\b",
+            r"(?<![A-Za-z0-9._-])(?:GLM|KIMI|MINIMAX|DEEPSEEK|QWEN|HY)"
+            r"[A-Z0-9._-]*(?![A-Za-z0-9._-])",
             raw,
             re.IGNORECASE,
         )
         model = model_match.group(0) if model_match else ""
+        if not model:
+            for alias in sorted(self._config.model_aliases, key=len, reverse=True):
+                if re.search(
+                    rf"(?<![A-Za-z0-9._-]){re.escape(alias)}(?![A-Za-z0-9._-])",
+                    raw,
+                    re.IGNORECASE,
+                ):
+                    model = alias
+                    break
+        if model:
+            model = _resolve_model_alias(model, self._config.model_aliases)
 
         # 去掉不影响实体识别的礼貌词、动作词和相对日期词，再提取“xxx 用户/客户/租户”。
         cleaned = raw

@@ -104,3 +104,12 @@ run/
 
 webui/
 config.json
+
+# Local authorization state and internal Codex handoff artifacts
+pairing.json
+docs/WORK_CONTEXT.md
+docs/CODEX_SESSIONS.md
+
+# Internal company reporting deliverables
+docs/build_company_report_bot_product_doc.py
+docs/company_report_bot_product_document.docx

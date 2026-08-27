@@ -1647,6 +1647,136 @@ class FeishuChannel(BaseChannel):
             self._card_interactions[nonce] = state
         return nonce, state
 
+    def _register_subscription_interaction(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> tuple[str, _FeishuCardInteraction, list[dict[str, str]], list[dict[str, str]]]:
+        nonce = uuid.uuid4().hex
+        options: dict[str, Any] = {}
+        schedule_options: list[dict[str, str]] = []
+        schedule_specs: list[tuple[str, dict[str, Any]]] = [
+            ("日报 · 每个工作日", {"period": "day", "daily_mode": "workdays"}),
+            ("日报 · 每天", {"period": "day", "daily_mode": "every_day"}),
+        ]
+        schedule_specs.extend(
+            (f"周报 · 每周{label}", {"period": "week", "weekday": weekday})
+            for weekday, label in enumerate("一二三四五六日", start=1)
+        )
+        schedule_specs.extend(
+            (f"月报 · 每月 {month_day} 日", {"period": "month", "month_day": month_day})
+            for month_day in range(1, 29)
+        )
+        for index, (label, params) in enumerate(schedule_specs):
+            opaque = f"{nonce}:s{index}"
+            options[opaque] = params
+            schedule_options.append({"label": label, "value": opaque})
+        time_options: list[dict[str, str]] = []
+        for index in range(48):
+            clock = f"{index // 2:02d}:{(index % 2) * 30:02d}"
+            opaque = f"{nonce}:t{index}"
+            options[opaque] = clock
+            time_options.append({"label": clock, "value": opaque})
+        default_period = str(ui.get("default_period") or "week")
+        default_schedule_params = {
+            "day": {"period": "day", "daily_mode": "workdays"},
+            "week": {"period": "week", "weekday": 1},
+            "month": {"period": "month", "month_day": 1},
+        }.get(default_period, {"period": "week", "weekday": 1})
+        requested_time = str(ui.get("default_time") or "10:00")
+        default_time = requested_time if any(
+            item["label"] == requested_time for item in time_options
+        ) else "10:00"
+        state = _FeishuCardInteraction(
+            owner_open_id=str(msg.metadata.get("sender_open_id") or ""),
+            chat_id=msg.chat_id,
+            metadata=dict(msg.metadata),
+            expires_at=time.monotonic() + 600,
+            phase="subscription",
+            base_params={
+                "action": "subscribe",
+                "report_params": dict(ui.get("report_params") or {}),
+                **default_schedule_params,
+                "send_time": default_time,
+            },
+            option_values=options,
+            selected_tenants=[],
+            selected_models={},
+            max_tenants=0,
+        )
+        with self._card_interaction_lock:
+            self._card_interactions[nonce] = state
+        return nonce, state, schedule_options, time_options
+
+    def _build_subscription_card(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> dict[str, Any]:
+        nonce, _state, schedules, times = self._register_subscription_interaction(ui, msg)
+        default_period = str(ui.get("default_period") or "week")
+        default_schedule_index = {"day": 0, "week": 2, "month": 9}.get(default_period, 2)
+        default_schedule = schedules[default_schedule_index]["value"]
+        default_time_label = str(ui.get("default_time") or "10:00")
+        default_time = next(
+            (item["value"] for item in times if item["label"] == default_time_label),
+            times[20]["value"],
+        )
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": self._card_header(str(ui.get("title") or "设置报表订阅")),
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**时区**：{ui.get('timezone') or 'Asia/Shanghai'}",
+                },
+                {
+                    "tag": "form",
+                    "name": f"report_subscription_{nonce[:8]}",
+                    "elements": [
+                        {
+                            "tag": "select_static",
+                            "name": "schedule",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {"tag": "plain_text", "content": "发送周期"},
+                            "initial_option": default_schedule,
+                            "options": [
+                                {
+                                    "text": {"tag": "plain_text", "content": item["label"]},
+                                    "value": item["value"],
+                                }
+                                for item in schedules
+                            ],
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "send_time",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {"tag": "plain_text", "content": "发送时间"},
+                            "initial_option": default_time,
+                            "options": [
+                                {
+                                    "text": {"tag": "plain_text", "content": item["label"]},
+                                    "value": item["value"],
+                                }
+                                for item in times
+                            ],
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_subscription",
+                            "text": {"tag": "plain_text", "content": "创建订阅"},
+                            "type": "primary",
+                            "complex_interaction": True,
+                            "action_type": "form_submit",
+                            "value": {
+                                "interaction_id": nonce,
+                                "action": "submit_subscription",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
     def _build_scope_card(self, ui: dict[str, Any], msg: OutboundMessage) -> dict[str, Any]:
         nonce, state = self._register_scope_interaction(ui, msg)
         elements: list[dict[str, Any]] = [
@@ -2087,6 +2217,8 @@ class FeishuChannel(BaseChannel):
             ]
         if kind == "report_document":
             return [self._build_report_document(ui, msg)]
+        if kind == "report_subscription_form":
+            return [self._build_subscription_card(ui, msg)]
         return []
 
     def _split_headings(self, content: str) -> list[dict]:
@@ -3718,6 +3850,33 @@ class FeishuChannel(BaseChannel):
                 action_name = value.get("action")
                 if state.phase == "report_document":
                     pass
+                elif state.phase == "subscription":
+                    if action_name != "submit_subscription":
+                        return self._card_callback_response("error", "未知的订阅操作")
+                    params = dict(state.base_params)
+                    if "schedule" in form_value:
+                        schedule_values = self._callback_option_values(form_value["schedule"])
+                        schedule_params = (
+                            state.option_values.get(schedule_values[0])
+                            if len(schedule_values) == 1
+                            else None
+                        )
+                        if not isinstance(schedule_params, dict):
+                            return self._card_callback_response("error", "请选择有效的发送周期")
+                        params.update(schedule_params)
+                    if "send_time" in form_value:
+                        time_values = self._callback_option_values(form_value["send_time"])
+                        send_time = (
+                            state.option_values.get(time_values[0])
+                            if len(time_values) == 1
+                            else None
+                        )
+                        if not isinstance(send_time, str):
+                            return self._card_callback_response("error", "请选择有效的发送时间")
+                        params["send_time"] = send_time
+                    state.consumed = True
+                    resume_tool_name = "report_center"
+                    resume_content = "创建固定报表订阅"
                 elif action_name == "scope":
                     scope = value.get("scope")
                     if scope not in {"summary", "all", "selected"}:
@@ -3761,7 +3920,7 @@ class FeishuChannel(BaseChannel):
                 else:
                     return self._card_callback_response("error", "未知的报表操作")
 
-            if state.phase == "report_document":
+            if state.phase in {"report_document", "subscription"}:
                 scheduled = self._schedule_tool_resume(
                     state, resume_tool_name, params, resume_content
                 )
@@ -3773,6 +3932,8 @@ class FeishuChannel(BaseChannel):
                 return self._card_callback_response("error", "Gateway 当前不可用，请稍后重试")
             if state.phase == "report_document":
                 message = "正在处理"
+            elif state.phase == "subscription":
+                message = "正在创建订阅"
             else:
                 message = "正在加载模型" if params.get("interactive") else "正在生成报表"
             return self._card_callback_response("success", message)

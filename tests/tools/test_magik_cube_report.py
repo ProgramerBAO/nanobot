@@ -644,6 +644,31 @@ async def test_model_report_is_deterministic_and_metadata_is_cached(tmp_path: Pa
     assert "完整：无接口失败、分页截断或分片缺失" in first
 
 
+async def test_selected_model_alias_resolves_to_configured_model(tmp_path: Path) -> None:
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        tenant_mappings={"测试租户": "prod"},
+        model_aliases={"k3": "MODEL-A"},
+    )
+    reporter = MagikCubeReporter(
+        _DeterministicReportClient(), config, tmp_path / "proxy.json", "Asia/Shanghai"
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [{"tenant_query": "测试租户", "model_scope": "selected", "models": ["k3"]}],
+        granularity="day",
+        include_tpm=True,
+    )
+
+    card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
+    assert card["title"] == "测试租户 周报"
+    assert [row["model"] for row in card["table"]["rows"]] == ["MODEL-A"]
+
+
 async def test_matrix_report_returns_single_table_payload_with_absolute_daily_deltas(
     tmp_path: Path,
 ) -> None:
@@ -669,6 +694,9 @@ async def test_matrix_report_returns_single_table_payload_with_absolute_daily_de
     ui = result.metadata[OUTBOUND_META_AGENT_UI]
     assert ui["kind"] == "magik_report_cards"
     assert len(ui["cards"]) == 1
+    subscription_action = ui["cards"][0]["actions"][0]
+    assert subscription_action["params"]["action"] == "subscription_setup"
+    assert subscription_action["params"]["period"] == "week"
     table = ui["cards"][0]["table"]
     assert table["page_size"] == 8
     assert [column["name"] for column in table["columns"]] == [
@@ -818,6 +846,29 @@ def test_direct_route_uses_cards_only_to_fill_missing_slots(tmp_path: Path) -> N
     assert full is not None
     assert full["report_template"] == "full"
     assert "interactive" not in full
+
+
+def test_direct_route_normalizes_k3_alias_and_keeps_model_before_chinese_suffix(
+    tmp_path: Path,
+) -> None:
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+
+    for text in (
+        "tencent_token_hub k3 模型的日报",
+        "tencent_token_hub Kimi-K3模型的日报",
+    ):
+        params = tool.match_direct_request(text)
+        assert params is not None
+        assert params["report_template"] == "matrix_card"
+        assert "interactive" not in params
+        assert params["model"] == "Kimi-K3"
+        assert params["report_selections"] == [
+            {
+                "tenant_query": "tencent_token_hub",
+                "model_scope": "selected",
+                "models": ["Kimi-K3"],
+            }
+        ]
 
 
 def test_direct_route_sends_period_reports_and_single_day_models_to_range_engine(

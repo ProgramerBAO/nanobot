@@ -107,9 +107,24 @@ async def test_subscription_is_idempotent_and_uses_direct_cron(monkeypatch, tmp_
         "granularity": "day",
     }
     with request_context(context):
-        first = await tool.execute(action="subscribe", period="week", report_params=params)
-        second = await tool.execute(action="subscribe", period="week", report_params=params)
+        first = await tool.execute(
+            action="subscribe",
+            period="week",
+            weekday=1,
+            send_time="10:00",
+            report_params=params,
+        )
+        second = await tool.execute(
+            action="subscribe",
+            period="week",
+            weekday=1,
+            send_time="10:00",
+            report_params=params,
+        )
     assert "订阅已创建" in str(first)
+    assert "每周一 10:00" in str(first)
+    assert "0 10 * * 1" not in str(first)
+    assert first.metadata[OUTBOUND_META_AGENT_UI]["kind"] == "report_document"
     assert "已经存在" in str(second)
     assert len(store.subscriptions("feishu", "ou_a")) == 1
     assert len(cron.jobs) == 2
@@ -117,6 +132,32 @@ async def test_subscription_is_idempotent_and_uses_direct_cron(monkeypatch, tmp_
     direct = cron.jobs[0].origin_metadata[INBOUND_META_DIRECT_TOOL]
     assert direct["name"] == "report_center"
     assert direct["params"]["action"] == "run_subscription"
+    assert cron.jobs[0].schedule.expr == "0 10 * * 1"
+
+
+@pytest.mark.asyncio
+async def test_subscription_setup_returns_a_form_without_creating_job(
+    monkeypatch, tmp_path
+) -> None:
+    tool, _store, cron = _tool(monkeypatch, tmp_path)
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou_a",
+        session_key="feishu:chat-a",
+    )
+    with request_context(context):
+        result = await tool.execute(
+            action="subscription_setup",
+            period="day",
+            report_params={"tenant_query": "tenant-a", "breakdown": "model"},
+        )
+
+    ui = result.metadata[OUTBOUND_META_AGENT_UI]
+    assert ui["kind"] == "report_subscription_form"
+    assert ui["default_period"] == "day"
+    assert ui["default_time"] == "10:00"
+    assert cron.jobs == []
 
 
 @pytest.mark.asyncio

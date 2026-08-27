@@ -79,3 +79,17 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
 - Tool registry: `nanobot/agent/tools/registry.py`
 - WebUI dev proxy config: `webui/vite.config.ts`
 - Tests mirror the `nanobot/` package structure.
+
+## Cross-device Handoff
+
+- At the start of work, read `docs/WORK_CONTEXT.md` and `docs/CODEX_SESSIONS.md` when
+  they exist, then run `git status --short --branch`.
+- Keep durable project rules in this file or `.agent/`; keep current task state in
+  `docs/WORK_CONTEXT.md` and historical Codex session summaries in
+  `docs/CODEX_SESSIONS.md`.
+- Before handoff, update the context document with the goal, changed files,
+  verification, next action, and known risks.
+- Review generated files before staging. Never commit tokens, passwords, `.env` files,
+  `C:\Users\38658\.nanobot\config.json`, or other machine-local secrets.
+- Use `git pull --ff-only` when synchronizing another device. Do not force-push without
+  explicit approval.

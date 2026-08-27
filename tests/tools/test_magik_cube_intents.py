@@ -191,6 +191,9 @@ async def test_single_day_card_uses_daily_title_and_compact_columns(tmp_path: Pa
         "total",
         "change",
     ]
+    assert all(
+        set(row) == {"model", "total", "change"} for row in card["table"]["rows"]
+    )
     assert any("平均 Token/请求" in item for item in card["overview"])
 
 

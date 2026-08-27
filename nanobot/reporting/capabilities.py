@@ -7,6 +7,11 @@ from typing import Any
 
 from nanobot.reporting.contracts import ReportAction, ReportBlock, ReportDocument
 from nanobot.reporting.registry import ReportPluginRegistry
+from nanobot.reporting.schedules import (
+    describe_subscription_schedule,
+    report_data_period,
+    report_template_label,
+)
 from nanobot.reporting.store import ReportStateStore
 
 ONBOARDING_VERSION = 1
@@ -185,7 +190,12 @@ def subscriptions_document(rows: list[Any]) -> ReportDocument:
         actions: list[dict[str, Any]] = []
     else:
         content = "\n".join(
-            f"• {row.template_id}｜{row.schedule} {row.timezone}｜{'启用' if row.enabled else '停用'}"
+            (
+                f"• **{report_template_label(row.template_id)}**｜"
+                f"{describe_subscription_schedule(row.schedule)}｜"
+                f"{row.timezone}｜{'启用' if row.enabled else '停用'}\n"
+                f"  数据周期：{report_data_period(row.template_id)}"
+            )
             for row in rows
         )
         actions = [
@@ -203,4 +213,39 @@ def subscriptions_document(rows: list[Any]) -> ReportDocument:
         title="我的订阅",
         fallback_text=content,
         blocks=tuple(blocks),
+    )
+
+
+def subscription_created_document(row: Any) -> ReportDocument:
+    schedule = describe_subscription_schedule(row.schedule)
+    report_label = report_template_label(row.template_id)
+    data_period = report_data_period(row.template_id)
+    content = (
+        f"**报表**：{report_label}\n"
+        f"**发送计划**：{schedule}\n"
+        f"**时区**：{row.timezone}\n"
+        f"**数据周期**：{data_period}"
+    )
+    return ReportDocument(
+        title="订阅已创建",
+        subtitle=f"{report_label}｜{schedule}",
+        fallback_text=(
+            f"订阅已创建：{report_label}，{schedule}（{row.timezone}）；"
+            f"数据周期：{data_period}。"
+        ),
+        blocks=(
+            ReportBlock("markdown", {"content": content}),
+            ReportBlock(
+                "actions",
+                {
+                    "actions": [
+                        {
+                            "action_id": "subscriptions",
+                            "label": "查看我的订阅",
+                            "style": "default",
+                        }
+                    ]
+                },
+            ),
+        ),
     )

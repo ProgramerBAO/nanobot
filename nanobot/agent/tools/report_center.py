@@ -25,8 +25,10 @@ from nanobot.reporting.capabilities import (
     examples_document,
     home_document,
     recent_document,
+    subscription_created_document,
     subscriptions_document,
 )
+from nanobot.reporting.schedules import build_subscription_schedule
 from nanobot.reporting.store import ReportSubscription, get_report_state_store
 
 _HOME_RE = re.compile(
@@ -46,10 +48,10 @@ _ALLOWED_REPORT_PARAM_KEYS = frozenset(
         "comparison",
     }
 )
-_PERIOD_SCHEDULES: dict[str, tuple[str, str]] = {
-    "day": ("0 9 * * *", "usage_daily_matrix"),
-    "week": ("0 9 * * 1", "usage_weekly_matrix"),
-    "month": ("0 9 1 * *", "usage_monthly_matrix"),
+_PERIOD_TEMPLATES: dict[str, str] = {
+    "day": "usage_daily_matrix",
+    "week": "usage_weekly_matrix",
+    "month": "usage_monthly_matrix",
 }
 
 
@@ -73,6 +75,7 @@ _REPORT_CENTER_PARAMETERS = {
                 "examples",
                 "recent",
                 "subscriptions",
+                "subscription_setup",
                 "subscribe",
                 "subscription_enable",
                 "subscription_disable",
@@ -82,6 +85,10 @@ _REPORT_CENTER_PARAMETERS = {
             ],
         },
         "period": {"type": "string", "enum": ["day", "week", "month"]},
+        "send_time": {"type": "string", "maxLength": 5},
+        "daily_mode": {"type": "string", "enum": ["workdays", "every_day"]},
+        "weekday": {"type": "integer", "minimum": 1, "maximum": 7},
+        "month_day": {"type": "integer", "minimum": 1, "maximum": 28},
         "report_params": {"type": "object"},
         "subscription_id": {"type": "string", "maxLength": 64},
     },
@@ -223,10 +230,14 @@ class ReportCenterTool(Tool):
         user_id: str,
         session_key: str,
         metadata: dict[str, Any],
+        send_time: str,
+        daily_mode: str,
+        weekday: int,
+        month_day: int,
     ) -> ToolResult:
         if self._cron is None:
             return ToolResult.error("Error: report subscriptions require the Gateway Cron service")
-        if period not in _PERIOD_SCHEDULES:
+        if period not in _PERIOD_TEMPLATES:
             return ToolResult.error("Error: subscription period must be day, week, or month")
         if not user_id or not self._authorized_for_magik(channel, user_id):
             return ToolResult.error("Error: no permission for the Magik Cube connector")
@@ -239,7 +250,17 @@ class ReportCenterTool(Tool):
         )
         if denial:
             return ToolResult.error(denial)
-        cron_expr, template_id = _PERIOD_SCHEDULES[period]
+        try:
+            cron_expr = build_subscription_schedule(
+                period,
+                send_time=send_time,
+                daily_mode=daily_mode,
+                weekday=weekday,
+                month_day=month_day,
+            )
+        except ValueError as exc:
+            return ToolResult.error(f"Error: invalid subscription schedule: {exc}")
+        template_id = _PERIOD_TEMPLATES[period]
         fingerprint_payload = json.dumps(
             [channel, user_id, template_id, cron_expr, params],
             ensure_ascii=False,
@@ -286,8 +307,46 @@ class ReportCenterTool(Tool):
         )
         if not self._store.add_subscription(subscription, fingerprint):
             self._cron.remove_job(job.id)
-            return ToolResult("相同报表和周期的订阅已经存在。")
-        return ToolResult(f"订阅已创建：{template_id}，计划 {cron_expr} {self._config.timezone}。")
+            return ToolResult("相同报表和发送计划的订阅已经存在。")
+        return self._result(subscription_created_document(subscription))
+
+    def _subscription_setup(
+        self,
+        *,
+        period: str,
+        report_params: Any,
+        channel: str,
+        user_id: str,
+    ) -> ToolResult:
+        if self._cron is None:
+            return ToolResult.error("Error: report subscriptions require the Gateway Cron service")
+        if period not in _PERIOD_TEMPLATES:
+            return ToolResult.error("Error: subscription period must be day, week, or month")
+        if not user_id or not self._authorized_for_magik(channel, user_id):
+            return ToolResult.error("Error: no permission for the Magik Cube connector")
+        params = self._safe_report_params(report_params)
+        denial = authorize_magik_params(
+            self._store,
+            channel=channel,
+            user_id=user_id,
+            params=params,
+        )
+        if denial:
+            return ToolResult.error(denial)
+        return ToolResult(
+            "请选择报表发送周期和时间。",
+            metadata={
+                OUTBOUND_META_AGENT_UI: {
+                    "kind": "report_subscription_form",
+                    "version": 1,
+                    "title": "设置报表订阅",
+                    "default_period": period,
+                    "default_time": "10:00",
+                    "timezone": self._config.timezone,
+                    "report_params": params,
+                }
+            },
+        )
 
     async def _run_subscription(self, subscription_id: str, metadata: dict[str, Any]) -> Any:
         ctx = current_request_context()
@@ -339,6 +398,10 @@ class ReportCenterTool(Tool):
         self,
         action: str,
         period: str = "week",
+        send_time: str = "10:00",
+        daily_mode: str = "workdays",
+        weekday: int = 1,
+        month_day: int = 1,
         report_params: dict[str, Any] | None = None,
         subscription_id: str = "",
         **_kwargs: Any,
@@ -366,6 +429,13 @@ class ReportCenterTool(Tool):
             )
         if action == "request_access":
             return ToolResult("请联系报表平台管理员，为当前飞书账号配置所需数据范围。")
+        if action == "subscription_setup":
+            return self._subscription_setup(
+                period=period,
+                report_params=report_params or {},
+                channel=channel,
+                user_id=user_id,
+            )
         if action == "subscribe":
             return await self._subscribe(
                 period=period,
@@ -375,6 +445,10 @@ class ReportCenterTool(Tool):
                 user_id=user_id,
                 session_key=session_key,
                 metadata=metadata,
+                send_time=send_time,
+                daily_mode=daily_mode,
+                weekday=weekday,
+                month_day=month_day,
             )
         if action == "run_subscription":
             return await self._run_subscription(subscription_id, metadata)

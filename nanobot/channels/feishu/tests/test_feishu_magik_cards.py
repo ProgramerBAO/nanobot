@@ -290,6 +290,114 @@ def test_report_document_actions_are_opaque_and_owner_bound() -> None:
     assert params == {"action": "subscriptions"}
 
 
+def test_subscription_form_maps_schedule_server_side_and_is_idempotent() -> None:
+    channel = _channel()
+    ui = {
+        "kind": "report_subscription_form",
+        "title": "设置报表订阅",
+        "default_period": "day",
+        "default_time": "10:00",
+        "timezone": "Asia/Shanghai",
+        "report_params": {"tenant_query": "tenant-a", "breakdown": "model"},
+    }
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+    card = channel._build_agent_ui_cards(ui, msg)[0]
+    selectors = list(_find_tag(card, "select_static"))
+    submit = next(_find_tag(card, "button"))
+    schedule_selector = next(item for item in selectors if item["name"] == "schedule")
+    time_selector = next(item for item in selectors if item["name"] == "send_time")
+    schedule_option = schedule_selector["initial_option"]
+    time_option = time_selector["initial_option"]
+    assert "workdays" not in str(card)
+    assert "10:00" not in time_option
+    channel._schedule_tool_resume = MagicMock(return_value=True)
+
+    response = channel._on_card_action_sync(
+        _action(
+            value=submit["value"],
+            name=submit["name"],
+            form_value={"schedule": schedule_option, "send_time": time_option},
+        )
+    )
+
+    assert response.toast.type == "success"
+    _, tool_name, params, _ = channel._schedule_tool_resume.call_args.args
+    assert tool_name == "report_center"
+    assert params == {
+        "action": "subscribe",
+        "period": "day",
+        "daily_mode": "workdays",
+        "send_time": "10:00",
+        "report_params": {"tenant_query": "tenant-a", "breakdown": "model"},
+    }
+    duplicate = channel._on_card_action_sync(_action(value=submit["value"]))
+    assert duplicate.toast.type == "info"
+    channel._schedule_tool_resume.assert_called_once()
+
+
+def test_subscription_form_rejects_forged_values() -> None:
+    channel = _channel()
+    ui = {
+        "kind": "report_subscription_form",
+        "default_period": "week",
+        "report_params": {"tenant_query": "tenant-a"},
+    }
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+    card = channel._build_agent_ui_cards(ui, msg)[0]
+    submit = next(_find_tag(card, "button"))
+    channel._schedule_tool_resume = MagicMock(return_value=True)
+
+    response = channel._on_card_action_sync(
+        _action(
+            value=submit["value"],
+            name=submit["name"],
+            form_value={"schedule": "week:1", "send_time": "10:00"},
+        )
+    )
+
+    assert response.toast.type == "error"
+    channel._schedule_tool_resume.assert_not_called()
+
+
+def test_subscription_form_uses_server_defaults_when_client_omits_initial_values() -> None:
+    channel = _channel()
+    ui = {
+        "kind": "report_subscription_form",
+        "default_period": "week",
+        "default_time": "10:00",
+        "report_params": {"tenant_query": "tenant-a"},
+    }
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+    card = channel._build_agent_ui_cards(ui, msg)[0]
+    submit = next(_find_tag(card, "button"))
+    channel._schedule_tool_resume = MagicMock(return_value=True)
+
+    response = channel._on_card_action_sync(
+        _action(value=submit["value"], name=submit["name"], form_value={})
+    )
+
+    assert response.toast.type == "success"
+    params = channel._schedule_tool_resume.call_args.args[2]
+    assert params["period"] == "week"
+    assert params["weekday"] == 1
+    assert params["send_time"] == "10:00"
+
+
 @pytest.mark.asyncio
 async def test_authorized_onboarding_is_sent_once(monkeypatch, tmp_path) -> None:
     import nanobot.config.loader as config_loader
