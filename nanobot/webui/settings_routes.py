@@ -48,6 +48,10 @@ from nanobot.webui.nanobot_features_api import (
     nanobot_features_action,
     nanobot_features_payload,
 )
+from nanobot.webui.reporting_api import (
+    ReportingSettingsError,
+    reporting_settings_action,
+)
 from nanobot.webui.settings_api import (
     WebUISettingsError,
     complete_oauth_provider,
@@ -146,6 +150,11 @@ class WebUISettingsRouter:
             return self._handle_settings(request)
         if path == "/api/settings/usage":
             return self._handle_settings_usage(request)
+        if path == "/api/settings/reporting":
+            return self._handle_settings_reporting(request)
+        if path.startswith("/api/settings/reporting/"):
+            action = path.removeprefix("/api/settings/reporting/").strip("/")
+            return self._handle_settings_reporting(request, action)
         if path == "/api/settings/update":
             return self._handle_settings_update(request)
         if path == "/api/settings/model-configurations/create":
@@ -330,6 +339,20 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         return self._json_response(settings_usage_payload())
+
+    def _handle_settings_reporting(
+        self, request: WsRequest, action: str | None = None
+    ) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = reporting_settings_action(action, self._query(request))
+        except ReportingSettingsError as exc:
+            return self._error_response(exc.status, exc.message)
+        except Exception:
+            self.logger.exception("reporting settings action '{}' failed", action or "list")
+            return self._error_response(500, "reporting settings action failed")
+        return self._json_response(payload)
 
     def _handle_settings_pairing(self, request: WsRequest) -> Response:
         if not self._authorized(request):

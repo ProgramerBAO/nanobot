@@ -1,9 +1,36 @@
 """Utilities for redirecting stdlib logging to loguru."""
+
 from __future__ import annotations
 
 import logging
+import re
 
 from loguru import logger
+
+_SENSITIVE_LOG_KEYS = (
+    "access_key",
+    "ticket",
+    "access_token",
+    "refresh_token",
+    "app_secret",
+    "client_secret",
+)
+_SENSITIVE_QUERY_RE = re.compile(rf"(?i)([?&](?:{'|'.join(_SENSITIVE_LOG_KEYS)})=)[^&\s]+")
+_SENSITIVE_QUOTED_RE = re.compile(
+    rf"(?i)((?:['\"]?(?:{'|'.join(_SENSITIVE_LOG_KEYS)})['\"]?)"
+    rf"\s*[:=]\s*['\"])[^'\"]+(['\"])"
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    rf"(?i)(\b(?:{'|'.join(_SENSITIVE_LOG_KEYS)})\b\s*=\s*)[^&\s,}}\]]+"
+)
+
+
+def _redact_sensitive_log_text(message: str) -> str:
+    """Remove credentials from third-party log messages before persistence."""
+
+    redacted = _SENSITIVE_QUERY_RE.sub(r"\1[REDACTED]", message)
+    redacted = _SENSITIVE_QUOTED_RE.sub(r"\1[REDACTED]\2", redacted)
+    return _SENSITIVE_ASSIGNMENT_RE.sub(r"\1[REDACTED]", redacted)
 
 
 class _LoguruBridge(logging.Handler):
@@ -27,7 +54,10 @@ class _LoguruBridge(logging.Handler):
         while frame and frame.f_code.co_filename == logging.__file__:
             frame, depth = frame.f_back, depth + 1
         logger.opt(depth=depth, exception=record.exc_info).log(
-            level, "[{lib}] {message}", lib=self.lib_name, message=record.getMessage()
+            level,
+            "[{lib}] {message}",
+            lib=self.lib_name,
+            message=_redact_sensitive_log_text(record.getMessage()),
         )
 
 

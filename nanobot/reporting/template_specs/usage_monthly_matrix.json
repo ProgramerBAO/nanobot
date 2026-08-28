@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "template_id": "usage_monthly_matrix",
+  "display_name": "月报",
+  "version": "1.0",
+  "category": "usage",
+  "period": "month",
+  "comparison": "previous_period",
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm"],
+  "dimensions": ["tenant", "model", "date"],
+  "description": "固定月报，上月对比前一自然月。"
+}

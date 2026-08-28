@@ -20,6 +20,7 @@ import type {
   ProviderOAuthCompletionResult,
   ProviderOAuthLoginResult,
   ProviderSettingsUpdate,
+  ReportingSettingsPayload,
   SessionDeleteResult,
   SessionAutomationsPayload,
   SettingsPayload,
@@ -616,6 +617,34 @@ export async function fetchMcpPresets(
     token,
     undefined,
     API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchReportingSettings(
+  token: string,
+  filters: Record<string, string> = {},
+  base: string = "",
+): Promise<ReportingSettingsPayload> {
+  const query = new URLSearchParams(filters);
+  const suffix = query.size ? `?${query}` : "";
+  return request<ReportingSettingsPayload>(
+    `${base}/api/settings/reporting${suffix}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function runReportingSettingsAction(
+  token: string,
+  action: "rbac" | "grant" | "revoke" | "export",
+  values: Record<string, string>,
+  base: string = "",
+): Promise<ReportingSettingsPayload> {
+  const query = new URLSearchParams(values);
+  return request<ReportingSettingsPayload>(
+    `${base}/api/settings/reporting/${action}?${query}`,
+    token,
   );
 }
 

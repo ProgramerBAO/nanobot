@@ -16,13 +16,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
-from nanobot.bus.events import OutboundMessage
+from nanobot.bus.events import (
+    INBOUND_META_DIRECT_TOOL,
+    OUTBOUND_META_AGENT_UI,
+    OutboundMessage,
+)
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -889,6 +894,23 @@ class _FeishuStreamBuf:
     last_edit: float = 0.0
 
 
+@dataclass
+class _FeishuCardInteraction:
+    """Short-lived server-side state for one report interaction card."""
+
+    owner_open_id: str
+    chat_id: str
+    metadata: dict[str, Any]
+    expires_at: float
+    phase: str
+    base_params: dict[str, Any]
+    option_values: dict[str, Any]
+    selected_tenants: list[str]
+    selected_models: dict[str, list[str]]
+    max_tenants: int
+    consumed: bool = False
+
+
 class FeishuChannel(BaseChannel):
     """
     Feishu/Lark channel using WebSocket long connection.
@@ -940,6 +962,8 @@ class FeishuChannel(BaseChannel):
         self._bot_message_ids: OrderedDict[str, bool] = OrderedDict()
         self._background_tasks: set[asyncio.Task] = set()
         self._reaction_ids: dict[str, str] = {}  # message_id → reaction_id
+        self._card_interactions: dict[str, _FeishuCardInteraction] = {}
+        self._card_interaction_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # QR login — writes credentials directly to config.json
@@ -1054,6 +1078,9 @@ class FeishuChannel(BaseChannel):
         )
         builder = self._register_optional_event(
             builder, "register_p2_im_message_message_read_v1", self._on_message_read
+        )
+        builder = self._register_optional_event(
+            builder, "register_p2_card_action_trigger", self._on_card_action_sync
         )
         builder = self._register_optional_event(
             builder,
@@ -1534,6 +1561,665 @@ class FeishuChannel(BaseChannel):
         if current:
             groups.append(current)
         return groups or [[]]
+
+    def _prune_card_interactions(self) -> None:
+        now = time.monotonic()
+        with self._card_interaction_lock:
+            expired = [
+                key
+                for key, value in self._card_interactions.items()
+                if value.expires_at <= now
+            ]
+            for key in expired:
+                self._card_interactions.pop(key, None)
+
+    @staticmethod
+    def _card_header(title: str, subtitle: str = "") -> dict[str, Any]:
+        content = title if not subtitle else f"{title}｜{subtitle}"
+        return {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": content},
+        }
+
+    def _register_scope_interaction(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> tuple[str, _FeishuCardInteraction]:
+        nonce = uuid.uuid4().hex
+        options: dict[str, Any] = {}
+        selected: list[str] = []
+        for index, item in enumerate(ui.get("tenant_options") or []):
+            if not isinstance(item, dict):
+                continue
+            opaque = f"{nonce}:t{index}"
+            query = str(item.get("value") or "").strip()
+            if not query:
+                continue
+            options[opaque] = query
+            if item.get("selected"):
+                selected.append(query)
+        state = _FeishuCardInteraction(
+            owner_open_id=str(msg.metadata.get("sender_open_id") or ""),
+            chat_id=msg.chat_id,
+            metadata=dict(msg.metadata),
+            expires_at=time.monotonic() + 600,
+            phase="scope",
+            base_params=dict(ui.get("base_params") or {}),
+            option_values=options,
+            selected_tenants=selected,
+            selected_models={},
+            max_tenants=int(ui.get("max_tenants") or 5),
+        )
+        with self._card_interaction_lock:
+            self._card_interactions[nonce] = state
+        return nonce, state
+
+    def _register_model_interaction(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> tuple[str, _FeishuCardInteraction]:
+        nonce = uuid.uuid4().hex
+        options: dict[str, Any] = {}
+        tenants: list[str] = []
+        index = 0
+        for group in ui.get("tenant_models") or []:
+            if not isinstance(group, dict):
+                continue
+            query = str(group.get("tenant_query") or "").strip()
+            if not query:
+                continue
+            tenants.append(query)
+            for model in group.get("models") or []:
+                opaque = f"{nonce}:m{index}"
+                options[opaque] = (query, str(model))
+                index += 1
+        state = _FeishuCardInteraction(
+            owner_open_id=str(msg.metadata.get("sender_open_id") or ""),
+            chat_id=msg.chat_id,
+            metadata=dict(msg.metadata),
+            expires_at=time.monotonic() + 600,
+            phase="models",
+            base_params=dict(ui.get("base_params") or {}),
+            option_values=options,
+            selected_tenants=tenants,
+            selected_models={},
+            max_tenants=int(ui.get("max_tenants") or 5),
+        )
+        with self._card_interaction_lock:
+            self._card_interactions[nonce] = state
+        return nonce, state
+
+    def _register_subscription_interaction(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> tuple[str, _FeishuCardInteraction, list[dict[str, str]], list[dict[str, str]]]:
+        nonce = uuid.uuid4().hex
+        options: dict[str, Any] = {}
+        schedule_options: list[dict[str, str]] = []
+        schedule_specs: list[tuple[str, dict[str, Any]]] = [
+            ("日报 · 每个工作日", {"period": "day", "daily_mode": "workdays"}),
+            ("日报 · 每天", {"period": "day", "daily_mode": "every_day"}),
+        ]
+        schedule_specs.extend(
+            (f"周报 · 每周{label}", {"period": "week", "weekday": weekday})
+            for weekday, label in enumerate("一二三四五六日", start=1)
+        )
+        schedule_specs.extend(
+            (f"月报 · 每月 {month_day} 日", {"period": "month", "month_day": month_day})
+            for month_day in range(1, 29)
+        )
+        for index, (label, params) in enumerate(schedule_specs):
+            opaque = f"{nonce}:s{index}"
+            options[opaque] = params
+            schedule_options.append({"label": label, "value": opaque})
+        time_options: list[dict[str, str]] = []
+        for index in range(48):
+            clock = f"{index // 2:02d}:{(index % 2) * 30:02d}"
+            opaque = f"{nonce}:t{index}"
+            options[opaque] = clock
+            time_options.append({"label": clock, "value": opaque})
+        default_period = str(ui.get("default_period") or "week")
+        default_schedule_params = {
+            "day": {"period": "day", "daily_mode": "workdays"},
+            "week": {"period": "week", "weekday": 1},
+            "month": {"period": "month", "month_day": 1},
+        }.get(default_period, {"period": "week", "weekday": 1})
+        requested_time = str(ui.get("default_time") or "10:00")
+        default_time = requested_time if any(
+            item["label"] == requested_time for item in time_options
+        ) else "10:00"
+        state = _FeishuCardInteraction(
+            owner_open_id=str(msg.metadata.get("sender_open_id") or ""),
+            chat_id=msg.chat_id,
+            metadata=dict(msg.metadata),
+            expires_at=time.monotonic() + 600,
+            phase="subscription",
+            base_params={
+                "action": "subscribe",
+                "report_params": dict(ui.get("report_params") or {}),
+                **default_schedule_params,
+                "send_time": default_time,
+            },
+            option_values=options,
+            selected_tenants=[],
+            selected_models={},
+            max_tenants=0,
+        )
+        with self._card_interaction_lock:
+            self._card_interactions[nonce] = state
+        return nonce, state, schedule_options, time_options
+
+    def _build_subscription_card(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> dict[str, Any]:
+        nonce, _state, schedules, times = self._register_subscription_interaction(ui, msg)
+        default_period = str(ui.get("default_period") or "week")
+        default_schedule_index = {"day": 0, "week": 2, "month": 9}.get(default_period, 2)
+        default_schedule = schedules[default_schedule_index]["value"]
+        default_time_label = str(ui.get("default_time") or "10:00")
+        default_time = next(
+            (item["value"] for item in times if item["label"] == default_time_label),
+            times[20]["value"],
+        )
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": self._card_header(str(ui.get("title") or "设置报表订阅")),
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**时区**：{ui.get('timezone') or 'Asia/Shanghai'}",
+                },
+                {
+                    "tag": "form",
+                    "name": f"report_subscription_{nonce[:8]}",
+                    "elements": [
+                        {
+                            "tag": "select_static",
+                            "name": "schedule",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {"tag": "plain_text", "content": "发送周期"},
+                            "initial_option": default_schedule,
+                            "options": [
+                                {
+                                    "text": {"tag": "plain_text", "content": item["label"]},
+                                    "value": item["value"],
+                                }
+                                for item in schedules
+                            ],
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "send_time",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {"tag": "plain_text", "content": "发送时间"},
+                            "initial_option": default_time,
+                            "options": [
+                                {
+                                    "text": {"tag": "plain_text", "content": item["label"]},
+                                    "value": item["value"],
+                                }
+                                for item in times
+                            ],
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_subscription",
+                            "text": {"tag": "plain_text", "content": "创建订阅"},
+                            "type": "primary",
+                            "complex_interaction": True,
+                            "action_type": "form_submit",
+                            "value": {
+                                "interaction_id": nonce,
+                                "action": "submit_subscription",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
+    def _build_scope_card(self, ui: dict[str, Any], msg: OutboundMessage) -> dict[str, Any]:
+        nonce, state = self._register_scope_interaction(ui, msg)
+        elements: list[dict[str, Any]] = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**周期**：{ui.get('period', '')}\n"
+                    f"最多选择 {state.max_tenants} 个客户，随后选择模型范围。"
+                ),
+            }
+        ]
+        tenant_items = [
+            item for item in ui.get("tenant_options") or [] if isinstance(item, dict)
+        ]
+        scope_actions: list[dict[str, Any]] = []
+        for item in ui.get("scope_options") or []:
+            if not isinstance(item, dict):
+                continue
+            action = {
+                "tag": "button",
+                "name": f"scope_{item['value']}",
+                "text": {"tag": "plain_text", "content": str(item["label"])},
+                "type": "primary" if item["value"] == "all" else "default",
+                "value": {
+                    "interaction_id": nonce,
+                    "action": "scope",
+                    "scope": item["value"],
+                },
+            }
+            if ui.get("tenant_required"):
+                action["action_type"] = "form_submit"
+                action["complex_interaction"] = True
+            scope_actions.append(action)
+        if ui.get("tenant_required"):
+            options = []
+            opaque_keys = list(state.option_values)
+            for index, item in enumerate(tenant_items):
+                if index >= len(opaque_keys):
+                    break
+                options.append(
+                    {
+                        "text": {
+                            "tag": "plain_text",
+                            "content": str(item.get("label") or item.get("value") or ""),
+                        },
+                        "value": opaque_keys[index],
+                    }
+                )
+            elements.append(
+                {
+                    "tag": "form",
+                    "name": f"magik_scope_{nonce[:8]}",
+                    "elements": [
+                        {
+                            "tag": "multi_select_static",
+                            "name": "tenants",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {"tag": "plain_text", "content": "选择客户"},
+                            "options": options,
+                        },
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "none",
+                            "horizontal_spacing": "default",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [action],
+                                }
+                                for action in scope_actions
+                            ],
+                        },
+                    ],
+                }
+            )
+        else:
+            labels = "、".join(str(item.get("label") or "") for item in tenant_items)
+            elements.append({"tag": "markdown", "content": f"**客户**：{labels}"})
+            elements.append({"tag": "action", "actions": scope_actions})
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": self._card_header(str(ui.get("title") or "选择报表范围")),
+            "elements": elements,
+        }
+
+    def _build_model_card(self, ui: dict[str, Any], msg: OutboundMessage) -> dict[str, Any]:
+        nonce, state = self._register_model_interaction(ui, msg)
+        options = []
+        labels: dict[tuple[str, str], str] = {}
+        for group in ui.get("tenant_models") or []:
+            if not isinstance(group, dict):
+                continue
+            query = str(group.get("tenant_query") or "")
+            tenant_label = str(group.get("tenant_label") or query)
+            for model in group.get("models") or []:
+                labels[(query, str(model))] = (
+                    str(model) if len(state.selected_tenants) == 1 else f"{tenant_label} / {model}"
+                )
+        for opaque, value in state.option_values.items():
+            query, model = value
+            options.append(
+                {
+                    "text": {
+                        "tag": "plain_text",
+                        "content": labels.get((query, model), model),
+                    },
+                    "value": opaque,
+                }
+            )
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": self._card_header(str(ui.get("title") or "选择模型")),
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**周期**：{ui.get('period', '')}\n请选择一个或多个模型。",
+                },
+                {
+                    "tag": "form",
+                    "name": f"magik_models_{nonce[:8]}",
+                    "elements": [
+                        {
+                            "tag": "multi_select_static",
+                            "name": "models",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {"tag": "plain_text", "content": "选择模型"},
+                            "options": options,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_models",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "生成报表",
+                            },
+                            "type": "primary",
+                            "complex_interaction": True,
+                            "action_type": "form_submit",
+                            "value": {
+                                "interaction_id": nonce,
+                                "action": "submit_models",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
+    @staticmethod
+    def _callback_option_values(value: Any) -> list[str]:
+        """Normalize Feishu standalone-select and form-submit option values."""
+
+        if isinstance(value, str):
+            with suppress(ValueError):
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed]
+            return [value]
+        if isinstance(value, list | tuple | set):
+            return [str(item) for item in value]
+        return []
+
+    def _build_report_card(
+        self, card: dict[str, Any], msg: OutboundMessage | None = None
+    ) -> dict[str, Any]:
+        elements: list[dict[str, Any]] = [
+            {
+                "tag": "markdown",
+                "content": "**周期概览**\n" + "\n".join(
+                    f"• {item}" for item in card.get("overview") or []
+                ),
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": "**分段总量**\n" + "\n".join(
+                    f"• {item}" for item in card.get("segments") or []
+                ),
+            },
+        ]
+        table = card.get("table")
+        if isinstance(table, dict):
+            elements.extend(
+                [
+                    {"tag": "hr"},
+                    {"tag": "markdown", "content": "**模型矩阵**"},
+                    {
+                        "tag": "table",
+                        "page_size": int(table.get("page_size") or 8),
+                        "columns": list(table.get("columns") or []),
+                        "rows": list(table.get("rows") or []),
+                    },
+                ]
+            )
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "markdown",
+                    "content": "**关键变化**\n" + "\n".join(
+                        f"• {item}" for item in card.get("insights") or []
+                    ),
+                },
+                {
+                    "tag": "note",
+                    "elements": [
+                        {
+                            "tag": "plain_text",
+                            "content": str(card.get("quality") or ""),
+                        }
+                    ],
+                },
+            ]
+        )
+        raw_actions = [
+            item for item in card.get("actions") or [] if isinstance(item, dict)
+        ]
+        if raw_actions and msg is not None:
+            nonce, _state, actions = self._register_report_document_interaction(
+                raw_actions, msg
+            )
+            buttons = []
+            for opaque, item in actions:
+                buttons.append(
+                    {
+                        "tag": "button",
+                        "name": f"report_action_{opaque.rsplit(':', 1)[-1]}",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": str(item.get("label") or "订阅"),
+                        },
+                        "type": str(item.get("style") or "default"),
+                        "value": {
+                            "interaction_id": nonce,
+                            "action": "report_document",
+                            "action_token": opaque,
+                        },
+                    }
+                )
+            if buttons:
+                elements.append({"tag": "action", "actions": buttons})
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": self._card_header(
+                str(card.get("title") or "Magik Cube 报表"),
+                str(card.get("subtitle") or ""),
+            ),
+            "elements": elements,
+        }
+
+    def _resolve_report_document_action(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        """Resolve a public action id to a server-side direct Tool call."""
+
+        tool_name = str(item.get("tool_name") or "")
+        params = item.get("params")
+        if tool_name and isinstance(params, dict):
+            return {
+                "tool_name": tool_name,
+                "params": dict(params),
+                "content": str(item.get("content") or "继续执行报表操作"),
+            }
+        action_id = str(item.get("action_id") or "")
+        if action_id.startswith("generate:"):
+            period = action_id.partition(":")[2]
+            if period not in {"day", "week", "month", "recent7"}:
+                return None
+            from nanobot.agent.reporting.magik_cube_intent import ReportIntent
+
+            params = ReportIntent(report_kind=period).to_tool_params(  # type: ignore[arg-type]
+                today=datetime.now(ZoneInfo("Asia/Shanghai")).date()
+            )
+            return {
+                "tool_name": "magik_cube_daily_report",
+                "params": params,
+                "content": f"生成固定{period}报",
+            }
+        if action_id in {"examples", "recent", "subscriptions"}:
+            return {
+                "tool_name": "report_center",
+                "params": {"action": action_id},
+                "content": "打开报表中心",
+            }
+        if action_id == "request_access":
+            return {
+                "tool_name": "report_center",
+                "params": {"action": "request_access"},
+                "content": "申请报表权限",
+            }
+        match = re.fullmatch(r"subscription:(enable|disable|remove):([0-9a-f]{1,64})", action_id)
+        if match:
+            operation, subscription_id = match.groups()
+            return {
+                "tool_name": "report_center",
+                "params": {
+                    "action": f"subscription_{operation}",
+                    "subscription_id": subscription_id,
+                },
+                "content": "管理固定报表订阅",
+            }
+        return None
+
+    def _register_report_document_interaction(
+        self,
+        actions: list[dict[str, Any]],
+        msg: OutboundMessage,
+    ) -> tuple[str, _FeishuCardInteraction, list[tuple[str, dict[str, Any]]]]:
+        nonce = uuid.uuid4().hex
+        options: dict[str, Any] = {}
+        resolved: list[tuple[str, dict[str, Any]]] = []
+        for index, item in enumerate(actions):
+            target = self._resolve_report_document_action(item)
+            if target is None:
+                continue
+            opaque = f"{nonce}:a{index}"
+            options[opaque] = target
+            resolved.append((opaque, item))
+        state = _FeishuCardInteraction(
+            owner_open_id=str(msg.metadata.get("sender_open_id") or ""),
+            chat_id=msg.chat_id,
+            metadata=dict(msg.metadata),
+            expires_at=time.monotonic() + 600,
+            phase="report_document",
+            base_params={},
+            option_values=options,
+            selected_tenants=[],
+            selected_models={},
+            max_tenants=0,
+        )
+        if resolved:
+            with self._card_interaction_lock:
+                self._card_interactions[nonce] = state
+        return nonce, state, resolved
+
+    def _build_report_document(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> dict[str, Any]:
+        raw_actions: list[dict[str, Any]] = []
+        for block in ui.get("blocks") or []:
+            if isinstance(block, dict) and block.get("kind") == "actions":
+                raw_actions.extend(
+                    item
+                    for item in (block.get("data") or {}).get("actions") or []
+                    if isinstance(item, dict)
+                )
+        nonce, _state, actions = self._register_report_document_interaction(raw_actions, msg)
+        action_map = {id(item): opaque for opaque, item in actions}
+        elements: list[dict[str, Any]] = []
+        for block in ui.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("kind")
+            data = block.get("data") if isinstance(block.get("data"), dict) else {}
+            if kind == "markdown":
+                elements.append({"tag": "markdown", "content": str(data.get("content") or "")})
+            elif kind == "note":
+                elements.append(
+                    {
+                        "tag": "note",
+                        "elements": [
+                            {"tag": "plain_text", "content": str(data.get("content") or "")}
+                        ],
+                    }
+                )
+            elif kind == "metrics":
+                values = data.get("items") or []
+                elements.append(
+                    {
+                        "tag": "markdown",
+                        "content": "\n".join(
+                            f"**{item.get('label', '')}**：{item.get('value', '')}"
+                            for item in values
+                            if isinstance(item, dict)
+                        ),
+                    }
+                )
+            elif kind == "table":
+                elements.append(
+                    {
+                        "tag": "table",
+                        "page_size": int(data.get("page_size") or 8),
+                        "columns": list(data.get("columns") or []),
+                        "rows": list(data.get("rows") or []),
+                    }
+                )
+            elif kind == "actions":
+                buttons = []
+                for item in data.get("actions") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    opaque = action_map.get(id(item))
+                    if not opaque:
+                        continue
+                    buttons.append(
+                        {
+                            "tag": "button",
+                            "name": f"report_action_{opaque.rsplit(':', 1)[-1]}",
+                            "text": {"tag": "plain_text", "content": str(item.get("label") or "打开")},
+                            "type": str(item.get("style") or "default"),
+                            "value": {
+                                "interaction_id": nonce,
+                                "action": "report_document",
+                                "action_token": opaque,
+                            },
+                        }
+                    )
+                if buttons:
+                    elements.append({"tag": "action", "actions": buttons})
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": self._card_header(
+                str(ui.get("title") or "报表中心"), str(ui.get("subtitle") or "")
+            ),
+            "elements": elements,
+        }
+
+    def _build_agent_ui_cards(
+        self, ui: Any, msg: OutboundMessage
+    ) -> list[dict[str, Any]]:
+        if not isinstance(ui, dict):
+            return []
+        self._prune_card_interactions()
+        kind = ui.get("kind")
+        if kind == "magik_report_form":
+            phase = ui.get("phase")
+            if phase == "scope":
+                return [self._build_scope_card(ui, msg)]
+            if phase == "models":
+                return [self._build_model_card(ui, msg)]
+        if kind == "magik_report_cards":
+            return [
+                self._build_report_card(card, msg)
+                for card in ui.get("cards") or []
+                if isinstance(card, dict)
+            ]
+        if kind == "report_document":
+            return [self._build_report_document(ui, msg)]
+        if kind == "report_subscription_form":
+            return [self._build_subscription_card(ui, msg)]
+        return []
 
     def _split_headings(self, content: str) -> list[dict]:
         """Split content by headings, converting headings to div elements."""
@@ -2902,6 +3588,18 @@ class FeishuChannel(BaseChannel):
                             json.dumps({"file_key": key}, ensure_ascii=False),
                         )
 
+            agent_ui = msg.metadata.get(OUTBOUND_META_AGENT_UI)
+            structured_cards = self._build_agent_ui_cards(agent_ui, msg)
+            if structured_cards:
+                for card in structured_cards:
+                    await loop.run_in_executor(
+                        None,
+                        _do_send,
+                        "interactive",
+                        json.dumps(card, ensure_ascii=False),
+                    )
+                return
+
             if msg.content and msg.content.strip():
                 fmt = self._detect_msg_format(msg.content)
 
@@ -2943,6 +3641,305 @@ class FeishuChannel(BaseChannel):
         except Exception:
             self.logger.exception("Error sending message")
             raise
+
+    @staticmethod
+    def _card_callback_response(kind: str, content: str) -> Any:
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse,
+        )
+
+        return P2CardActionTriggerResponse(
+            {"toast": {"type": kind, "content": content}}
+        )
+
+    @staticmethod
+    def _normalize_card_action_value(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            with suppress(ValueError):
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+        return {}
+
+    @staticmethod
+    def _interaction_id_from_option(value: Any) -> str:
+        raw = str(value or "")
+        return raw.split(":", 1)[0] if ":" in raw else ""
+
+    async def _resume_tool_interaction(
+        self,
+        state: _FeishuCardInteraction,
+        tool_name: str,
+        params: dict[str, Any],
+        content: str,
+    ) -> None:
+        metadata = dict(state.metadata)
+        metadata.pop(OUTBOUND_META_AGENT_UI, None)
+        metadata[INBOUND_META_DIRECT_TOOL] = {
+            "name": tool_name,
+            "params": params,
+        }
+        metadata["direct_request_text"] = content
+        await self._handle_message(
+            sender_id=state.owner_open_id,
+            chat_id=state.chat_id,
+            content=content,
+            metadata=metadata,
+            is_dm=metadata.get("chat_type") == "p2p",
+        )
+
+    async def _resume_card_interaction(
+        self,
+        state: _FeishuCardInteraction,
+        params: dict[str, Any],
+    ) -> None:
+        await self._resume_tool_interaction(
+            state,
+            "magik_cube_daily_report",
+            params,
+            "继续生成 Magik Cube 交互式报表",
+        )
+
+    def _schedule_tool_resume(
+        self,
+        state: _FeishuCardInteraction,
+        tool_name: str,
+        params: dict[str, Any],
+        content: str,
+    ) -> bool:
+        if not self._loop or not self._loop.is_running():
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self._resume_tool_interaction(state, tool_name, params, content), self._loop
+        )
+
+        def log_failure(done: Any) -> None:
+            with suppress(Exception):
+                exc = done.exception()
+                if exc:
+                    self.logger.warning(
+                        "Report card callback failed: tool={} error_type={}",
+                        tool_name,
+                        type(exc).__name__,
+                    )
+
+        future.add_done_callback(log_failure)
+        return True
+
+    def _schedule_card_resume(
+        self, state: _FeishuCardInteraction, params: dict[str, Any]
+    ) -> bool:
+        return self._schedule_tool_resume(
+            state,
+            "magik_cube_daily_report",
+            params,
+            "继续生成 Magik Cube 交互式报表",
+        )
+
+    def _on_card_action_sync(self, data: Any) -> Any:
+        """Validate a Feishu card action and enqueue the next read-only tool stage."""
+
+        try:
+            event = getattr(data, "event", None)
+            action = getattr(event, "action", None)
+            operator = getattr(event, "operator", None)
+            operator_open_id = str(getattr(operator, "open_id", "") or "")
+            value = self._normalize_card_action_value(getattr(action, "value", None))
+            options = self._callback_option_values(getattr(action, "options", None))
+            option = getattr(action, "option", None)
+            if option and not options:
+                options = self._callback_option_values(option)
+            raw_form_value = getattr(action, "form_value", None)
+            form_value = raw_form_value if isinstance(raw_form_value, dict) else {}
+            resume_tool_name = "magik_cube_daily_report"
+            resume_content = "继续生成 Magik Cube 交互式报表"
+            interaction_id = str(value.get("interaction_id") or "")
+            if not interaction_id and options:
+                interaction_id = self._interaction_id_from_option(options[0])
+            if not interaction_id:
+                return self._card_callback_response("error", "无效的报表操作")
+
+            self.logger.debug(
+                "Magik card callback received: name={} action={} option_count={} form_fields={}",
+                str(getattr(action, "name", "") or ""),
+                str(value.get("action") or ""),
+                len(options),
+                sorted(str(item) for item in form_value),
+            )
+
+            with self._card_interaction_lock:
+                state = self._card_interactions.get(interaction_id)
+                if state is None or state.expires_at <= time.monotonic():
+                    self._card_interactions.pop(interaction_id, None)
+                    return self._card_callback_response("error", "选择卡已过期，请重新发起报表")
+                if not state.owner_open_id or operator_open_id != state.owner_open_id:
+                    return self._card_callback_response("error", "只有报表发起人可以操作")
+                if state.consumed:
+                    return self._card_callback_response("info", "该操作已提交，请勿重复点击")
+
+                if state.phase == "report_document":
+                    action_token = str(value.get("action_token") or "")
+                    target = state.option_values.get(action_token)
+                    if not isinstance(target, dict):
+                        return self._card_callback_response("error", "无效的报表操作")
+                    resume_tool_name = str(target.get("tool_name") or "")
+                    raw_params = target.get("params")
+                    if not resume_tool_name or not isinstance(raw_params, dict):
+                        return self._card_callback_response("error", "无效的报表操作")
+                    params = dict(raw_params)
+                    resume_content = str(target.get("content") or "继续执行报表操作")
+                    state.consumed = True
+                else:
+                    params = {}
+
+                if state.phase != "report_document" and "tenants" in form_value:
+                    submitted_tenants = self._callback_option_values(form_value["tenants"])
+                    selected = [
+                        state.option_values[item]
+                        for item in submitted_tenants
+                        if item in state.option_values
+                    ]
+                    if len(selected) > state.max_tenants:
+                        return self._card_callback_response(
+                            "error", f"一次最多选择 {state.max_tenants} 个客户"
+                        )
+                    state.selected_tenants = selected
+
+                if state.phase != "report_document" and "models" in form_value:
+                    submitted_models = self._callback_option_values(form_value["models"])
+                    selected_models: dict[str, list[str]] = {}
+                    for item in submitted_models:
+                        mapped = state.option_values.get(item)
+                        if not isinstance(mapped, tuple) or len(mapped) != 2:
+                            continue
+                        tenant_query, model = mapped
+                        selected_models.setdefault(tenant_query, []).append(model)
+                    state.selected_models = selected_models
+
+                name = str(getattr(action, "name", "") or "")
+                if state.phase == "report_document":
+                    pass
+                elif name == "tenants":
+                    selected = [
+                        state.option_values[item]
+                        for item in options
+                        if item in state.option_values
+                    ]
+                    if len(selected) > state.max_tenants:
+                        return self._card_callback_response(
+                            "error", f"一次最多选择 {state.max_tenants} 个客户"
+                        )
+                    state.selected_tenants = selected
+                    return self._card_callback_response(
+                        "success", f"已选择 {len(selected)} 个客户"
+                    )
+                if name == "models":
+                    selected_models: dict[str, list[str]] = {}
+                    for item in options:
+                        mapped = state.option_values.get(item)
+                        if not isinstance(mapped, tuple) or len(mapped) != 2:
+                            continue
+                        tenant_query, model = mapped
+                        selected_models.setdefault(tenant_query, []).append(model)
+                    state.selected_models = selected_models
+                    count = sum(len(items) for items in selected_models.values())
+                    return self._card_callback_response("success", f"已选择 {count} 个模型")
+
+                action_name = value.get("action")
+                if state.phase == "report_document":
+                    pass
+                elif state.phase == "subscription":
+                    if action_name != "submit_subscription":
+                        return self._card_callback_response("error", "未知的订阅操作")
+                    params = dict(state.base_params)
+                    if "schedule" in form_value:
+                        schedule_values = self._callback_option_values(form_value["schedule"])
+                        schedule_params = (
+                            state.option_values.get(schedule_values[0])
+                            if len(schedule_values) == 1
+                            else None
+                        )
+                        if not isinstance(schedule_params, dict):
+                            return self._card_callback_response("error", "请选择有效的发送周期")
+                        params.update(schedule_params)
+                    if "send_time" in form_value:
+                        time_values = self._callback_option_values(form_value["send_time"])
+                        send_time = (
+                            state.option_values.get(time_values[0])
+                            if len(time_values) == 1
+                            else None
+                        )
+                        if not isinstance(send_time, str):
+                            return self._card_callback_response("error", "请选择有效的发送时间")
+                        params["send_time"] = send_time
+                    state.consumed = True
+                    resume_tool_name = "report_center"
+                    resume_content = "创建固定报表订阅"
+                elif action_name == "scope":
+                    scope = value.get("scope")
+                    if scope not in {"summary", "all", "selected"}:
+                        return self._card_callback_response("error", "无效的模型范围")
+                    if not state.selected_tenants:
+                        return self._card_callback_response("error", "请先选择客户")
+                    state.consumed = True
+                    params = dict(state.base_params)
+                    params["interactive"] = scope == "selected"
+                    params["report_selections"] = [
+                        {
+                            "tenant_query": tenant,
+                            "model_scope": scope,
+                            "models": [],
+                        }
+                        for tenant in state.selected_tenants
+                    ]
+                elif action_name == "submit_models":
+                    if not state.selected_models:
+                        return self._card_callback_response("error", "请先选择模型")
+                    missing = [
+                        tenant
+                        for tenant in state.selected_tenants
+                        if not state.selected_models.get(tenant)
+                    ]
+                    if missing:
+                        return self._card_callback_response(
+                            "error", "每个客户至少选择一个模型"
+                        )
+                    state.consumed = True
+                    params = dict(state.base_params)
+                    params["interactive"] = False
+                    params["report_selections"] = [
+                        {
+                            "tenant_query": tenant,
+                            "model_scope": "selected",
+                            "models": state.selected_models[tenant],
+                        }
+                        for tenant in state.selected_tenants
+                    ]
+                else:
+                    return self._card_callback_response("error", "未知的报表操作")
+
+            if state.phase in {"report_document", "subscription"}:
+                scheduled = self._schedule_tool_resume(
+                    state, resume_tool_name, params, resume_content
+                )
+            else:
+                scheduled = self._schedule_card_resume(state, params)
+            if not scheduled:
+                with self._card_interaction_lock:
+                    state.consumed = False
+                return self._card_callback_response("error", "Gateway 当前不可用，请稍后重试")
+            if state.phase == "report_document":
+                message = "正在处理"
+            elif state.phase == "subscription":
+                message = "正在创建订阅"
+            else:
+                message = "正在加载模型" if params.get("interactive") else "正在生成报表"
+            return self._card_callback_response("success", message)
+        except Exception as exc:
+            self.logger.warning("Error processing Feishu card callback: {}", exc)
+            return self._card_callback_response("error", "报表操作失败，请重新发起")
 
     def _on_message_sync(self, data: Any) -> None:
         """
@@ -3191,9 +4188,58 @@ class FeishuChannel(BaseChannel):
         pass
 
     def _on_bot_p2p_chat_entered(self, data: Any) -> None:
-        """Ignore p2p-enter events when a user opens a bot chat."""
-        self.logger.debug("Bot entered p2p chat (user opened chat window)")
-        pass
+        """Send the versioned report capability home once to an authorized user."""
+
+        if not self._running or not self._loop or not self._loop.is_running():
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._send_report_home_onboarding(data), self._loop
+        )
+
+    async def _send_report_home_onboarding(self, data: Any) -> None:
+        event = getattr(data, "event", None)
+        operator_id = getattr(event, "operator_id", None)
+        user_id = str(getattr(operator_id, "open_id", "") or "")
+        chat_id = str(getattr(event, "chat_id", "") or user_id)
+        if not user_id or not chat_id or not self.is_allowed(user_id):
+            return
+        from nanobot.config.loader import load_config
+        from nanobot.reporting import build_default_registry, configured_report_state_store
+        from nanobot.reporting.capabilities import home_document
+
+        config = load_config()
+        reporting_config = config.tools.reporting
+        if not bool(getattr(reporting_config, "enable", True)):
+            return
+        version = int(reporting_config.onboarding_version)
+        store = configured_report_state_store()
+        if store.onboarding_seen(self.name, user_id, version):
+            return
+        registry = build_default_registry(
+            magik_enabled=bool(config.tools.magik_cube.enable)
+        )
+        document = home_document(
+            registry,
+            store,
+            channel=self.name,
+            user_id=user_id,
+        )
+        await self.send(
+            OutboundMessage(
+                channel=self.name,
+                chat_id=chat_id,
+                content=document.fallback_text,
+                metadata={
+                    "sender_open_id": user_id,
+                    "chat_type": "p2p",
+                    OUTBOUND_META_AGENT_UI: document.to_agent_ui(),
+                },
+            )
+        )
+        store.mark_onboarding_seen(self.name, user_id, version)
+        self.logger.info(
+            "Report onboarding delivered: channel={} version={}", self.name, version
+        )
 
     @staticmethod
     def _format_tool_hint_lines(tool_hint: str) -> str:

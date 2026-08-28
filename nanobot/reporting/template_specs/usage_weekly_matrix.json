@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "template_id": "usage_weekly_matrix",
+  "display_name": "周报",
+  "version": "1.0",
+  "category": "usage",
+  "period": "week",
+  "comparison": "previous_period",
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm"],
+  "dimensions": ["tenant", "model", "date"],
+  "description": "固定周报，上周对比上上周。"
+}
