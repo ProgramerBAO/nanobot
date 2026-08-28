@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+from pydantic import Field, field_validator
+
 from nanobot.agent.reporting.magik_cube_intent import ReportIntent as MagikReportIntent
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import current_request_context
@@ -63,6 +65,18 @@ class ReportCenterToolConfig(Base):
     run_retention_days: int = 30
     state_backend: Literal["sqlite", "postgresql"] = "sqlite"
     postgres_dsn_env: str = "NANOBOT_REPORTING_POSTGRES_DSN"
+    # Grafana expressions are deployment-owned query definitions. Secrets must
+    # be supplied as SecretRef objects, for example {"provider": "env", "key": "..."}.
+    grafana: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("grafana")
+    @classmethod
+    def _require_grafana_secret_ref(cls, value: dict[str, Any]) -> dict[str, Any]:
+        for key in ("service_account_token", "serviceAccountToken"):
+            secret = value.get(key)
+            if isinstance(secret, str) and secret.strip():
+                raise ValueError("Grafana service account credentials must use SecretRef")
+        return value
 
 
 _REPORT_CENTER_PARAMETERS = {
@@ -111,7 +125,10 @@ class ReportCenterTool(Tool):
             backend=config.state_backend,
             postgres_dsn_env=config.postgres_dsn_env,
         )
-        self._registry = build_default_registry(magik_enabled=magik_tool is not None)
+        self._registry = build_default_registry(
+            magik_enabled=magik_tool is not None,
+            grafana_config=getattr(config, "grafana", None),
+        )
         if config.rbac_enforced:
             self._store.set_rbac_enabled(True)
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
+from nanobot.reporting.business_templates import build_business_templates
 from nanobot.reporting.contracts import ReportDataset, ReportIntent, ReportQuery
+from nanobot.reporting.grafana import GrafanaConnector
 from nanobot.reporting.registry import (
     ConnectorCapabilities,
     ConnectorManifest,
@@ -14,7 +17,12 @@ from nanobot.reporting.registry import (
     TemplateManifest,
     TemplatePlugin,
 )
-from nanobot.reporting.renderer import TextChannelRenderer
+from nanobot.reporting.renderer import (
+    DingTalkReportRenderer,
+    FeishuReportRenderer,
+    TextChannelRenderer,
+    WeComReportRenderer,
+)
 from nanobot.reporting.templates import DeclarativeTemplateSpec, load_builtin_template_specs
 
 _USAGE_METRICS = frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm"})
@@ -90,14 +98,27 @@ class UsageMatrixTemplate(TemplatePlugin):
 
 
 def build_default_registry(
-    *, discover_external: bool = True, magik_enabled: bool = True
+    *,
+    discover_external: bool = True,
+    magik_enabled: bool = True,
+    grafana_config: Mapping[str, Any] | None = None,
 ) -> ReportPluginRegistry:
     registry = ReportPluginRegistry()
     registry.register_renderer(TextChannelRenderer())
+    registry.register_renderer(FeishuReportRenderer())
+    registry.register_renderer(WeComReportRenderer())
+    registry.register_renderer(DingTalkReportRenderer())
     if magik_enabled:
         registry.register_connector(MagikCubeConnector())
+    for template in build_business_templates():
+        registry.register_template(template)
     for spec in load_builtin_template_specs():
         registry.register_template(UsageMatrixTemplate(spec))
+    if grafana_config and bool(grafana_config.get("enabled", True)):
+        try:
+            registry.register_connector(GrafanaConnector.from_mapping(grafana_config))
+        except Exception as exc:
+            registry.load_errors["builtin:grafana"] = type(exc).__name__
     if discover_external:
         registry.discover_entry_points()
     return registry

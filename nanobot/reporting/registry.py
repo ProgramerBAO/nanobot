@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -20,6 +20,8 @@ class ConnectorCapabilities:
     max_window_days: int = 90
     supports_bulk_dimensions: bool = True
     read_only: bool = True
+    supports_health_check: bool = True
+    supports_catalog_discovery: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +47,12 @@ class TemplateManifest:
     required_dimensions: frozenset[str]
     connector_ids: frozenset[str] = frozenset()
     description: str = ""
+    lifecycle_state: Literal["draft", "canary", "publish", "deprecated", "rollback"] = "publish"
+    owner: str = ""
+
+    def __post_init__(self) -> None:
+        if self.lifecycle_state not in {"draft", "canary", "publish", "deprecated", "rollback"}:
+            raise ValueError("unsupported report template lifecycle state")
 
 
 class ConnectorPlugin(ABC):
@@ -106,6 +114,11 @@ class ReportPluginRegistry:
     def renderer(self, channel_id: str) -> ChannelRenderer | None:
         return self._renderers.get(channel_id) or self._renderers.get("text")
 
+    def exact_renderer(self, channel_id: str) -> ChannelRenderer | None:
+        """Return only the requested renderer, without implicit text fallback."""
+
+        return self._renderers.get(channel_id)
+
     def connector(self, connector_id: str) -> ConnectorPlugin | None:
         return self._connectors.get(connector_id)
 
@@ -166,6 +179,8 @@ class ReportPluginRegistry:
                     "metrics": sorted(item.manifest.capabilities.metrics),
                     "dimensions": sorted(item.manifest.capabilities.dimensions),
                     "read_only": item.manifest.capabilities.read_only,
+                    "max_window_days": item.manifest.capabilities.max_window_days,
+                    "supports_bulk_dimensions": item.manifest.capabilities.supports_bulk_dimensions,
                 }
                 for item in self.connectors()
             ],
@@ -177,11 +192,26 @@ class ReportPluginRegistry:
                     "category": item.manifest.category,
                     "periods": sorted(item.manifest.periods),
                     "description": item.manifest.description,
+                    "lifecycle_state": item.manifest.lifecycle_state,
+                    "owner": item.manifest.owner,
                 }
                 for item in self.templates()
             ],
             "renderers": [
-                {"id": key, "version": self._renderers[key].version}
+                {
+                    "id": key,
+                    "version": self._renderers[key].version,
+                    "capabilities": {
+                        "markdown": self._renderers[key].capabilities.markdown,
+                        "table": self._renderers[key].capabilities.table,
+                        "actions": self._renderers[key].capabilities.actions,
+                        "pagination": self._renderers[key].capabilities.pagination,
+                        "message_update": self._renderers[key].capabilities.message_update,
+                        "max_message_length": self._renderers[key].capabilities.max_message_length,
+                        "threads": self._renderers[key].capabilities.threads,
+                        "fallback_channel_id": self._renderers[key].capabilities.fallback_channel_id,
+                    },
+                }
                 for key in sorted(self._renderers)
             ],
             "load_errors": dict(self.load_errors),

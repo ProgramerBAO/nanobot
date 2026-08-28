@@ -2527,7 +2527,8 @@ def report_plugins_list() -> None:
 
     config = load_config()
     registry = build_default_registry(
-        magik_enabled=bool(config.tools.magik_cube.enable)
+        magik_enabled=bool(config.tools.magik_cube.enable),
+        grafana_config=getattr(config.tools.reporting, "grafana", None),
     )
     table = Table(title="Report plugins")
     table.add_column("Kind")

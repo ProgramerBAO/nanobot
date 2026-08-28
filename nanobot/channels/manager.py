@@ -917,6 +917,28 @@ class ChannelManager:
         """Get a channel by name."""
         return self.channels.get(name)
 
+    def report_delivery_router(self, *, registry: Any | None = None, store: Any | None = None) -> Any:
+        """Build a report DeliveryRouter over the currently initialized channels."""
+
+        from nanobot.reporting import (
+            DeliveryRouter,
+            build_default_registry,
+            configured_report_state_store,
+        )
+
+        report_registry = registry or build_default_registry(
+            grafana_config=getattr(self.config.tools.reporting, "grafana", None),
+            magik_enabled=bool(self.config.tools.magik_cube.enable),
+        )
+        report_store = store or configured_report_state_store()
+        max_attempts = int(getattr(self.config.channels, "send_max_retries", 3) or 3)
+        return DeliveryRouter(
+            report_registry,
+            report_store,
+            self.channels,
+            max_attempts=max(1, min(max_attempts, 10)),
+        )
+
     def get_status(self) -> dict[str, Any]:
         """Return actual runtime state, including enabled runtimes that failed."""
         owners = getattr(self, "_channel_owners", {})

@@ -12,8 +12,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from nanobot.config.paths import get_runtime_subdir
-
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -41,7 +39,11 @@ class ReportStateStore:
     """Small local control-plane store with explicit production migration seams."""
 
     def __init__(self, path: Path | None = None) -> None:
-        self.path = path or get_runtime_subdir("reports") / "state.db"
+        if path is None:
+            from nanobot.config.paths import get_runtime_subdir
+
+            path = get_runtime_subdir("reports") / "state.db"
+        self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._initialize()
@@ -121,6 +123,15 @@ class ReportStateStore:
                     claimed_at TEXT NOT NULL,
                     completed_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS report_delivery_attempts (
+                    idempotency_key TEXT NOT NULL,
+                    part_index INTEGER NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    error_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (idempotency_key, part_index, attempt)
+                );
                 """
             )
 
@@ -165,7 +176,10 @@ class ReportStateStore:
         self.set_setting("rbac_enabled", "true" if enabled else "false")
 
     def grant(self, channel: str, user_id: str, resource_type: str, resource_id: str) -> None:
-        if resource_type not in {"connector", "template", "tenant", "model", "capability"}:
+        if resource_type not in {
+            "connector", "template", "tenant", "project", "model", "endpoint",
+            "provider", "environment", "capability",
+        }:
             raise ValueError("unsupported report grant resource type")
         with self._lock, self._connect() as db:
             db.execute(
@@ -350,6 +364,30 @@ class ReportStateStore:
                 (status, _utc_now(), idempotency_key),
             )
 
+    def record_delivery_attempt(
+        self,
+        idempotency_key: str,
+        *,
+        part_index: int,
+        attempt: int,
+        status: str,
+        error_type: str = "",
+    ) -> None:
+        if not idempotency_key or part_index < 1 or attempt < 1:
+            raise ValueError("invalid report delivery attempt")
+        if status not in {"ok", "error"}:
+            raise ValueError("report delivery attempt status must be ok or error")
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO report_delivery_attempts(
+                    idempotency_key, part_index, attempt, status, error_type, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotency_key, part_index, attempt) DO UPDATE SET
+                    status=excluded.status, error_type=excluded.error_type,
+                    created_at=excluded.created_at""",
+                (idempotency_key, part_index, attempt, status, error_type[:128], _utc_now()),
+            )
+
     @staticmethod
     def _subscription_from_row(row: sqlite3.Row) -> ReportSubscription:
         return ReportSubscription(
@@ -457,6 +495,11 @@ class PostgresReportStateStore(ReportStateStore):
             """CREATE TABLE IF NOT EXISTS report_deliveries (
                 idempotency_key TEXT PRIMARY KEY, status TEXT NOT NULL,
                 claimed_at TEXT NOT NULL, completed_at TEXT NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS report_delivery_attempts (
+                idempotency_key TEXT NOT NULL, part_index INTEGER NOT NULL,
+                attempt INTEGER NOT NULL, status TEXT NOT NULL, error_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (idempotency_key, part_index, attempt))""",
         )
         with self._lock, self._connect() as db:
             for statement in statements:
