@@ -27,6 +27,17 @@ Admin connector is not enabled or the Gateway has not loaded it. Never substitut
 5. When an API needs an ID, first query its parent entity and carry the returned ID forward.
 6. Summarize only returned records. A 403 means the readonly account lacks that RBAC scope.
 
+## Follow-up questions
+
+- Resolve “这个租户、该客户、上述用户、它” from the most recent explicit business entity in
+  the conversation or prior tool parameters. Never send those pronouns as `tenant_query`.
+- Preserve accounting ownership. If an endpoint was called with another tenant's API key, usage
+  belongs to the API-key tenant, not to the person or tenant that was originally investigated.
+- “这两天” means yesterday through today in Asia/Shanghai; state that today's value is partial.
+- When the user asks for M Token, report `tokens / 1,000,000` and retain the exact Token count.
+- If recent history contains more than one plausible entity and does not establish a latest focus,
+  ask which tenant they mean instead of guessing.
+
 Common relationships:
 
 - username → `UserAdminService_ListAccounts` → `user_id`

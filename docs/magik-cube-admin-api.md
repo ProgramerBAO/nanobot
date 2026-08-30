@@ -21,6 +21,10 @@
 按 `search → describe → call` 工作流执行；需要父对象 ID 时，先查父对象再把 ID 传给
 下一个接口。Nanobot 始终加载的 `magik-cube-admin` 技能包含这套选择和联查规则。
 
+多轮追问中的“这个租户、该客户、上述用户”由 command 路由从最近一次结构化工具参数
+或明确的会话结论中解析；指代词本身不会作为 API 查询参数发送。如果上下文不能唯一
+确定实体，则回到普通 Agent 流程请求澄清。
+
 只读判定规则：HTTP `GET`，或 RPC 操作名以 `Get`、`List`、`Query` 开头。
 登录接口仅用于取得临时 Bearer Token，不计入 Admin API 操作数。
 

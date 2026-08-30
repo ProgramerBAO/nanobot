@@ -11,6 +11,12 @@
 管理对象查询使用 `magik_cube_admin_api`。例如“zhangyan 用户有哪些 endpoint”会直接
 执行 `tenant_endpoints`，先查租户 ID，再查该租户的 endpoint，不会经过日报接口。
 
+连续追问会从近期会话的结构化工具参数和明确业务结论中继承租户，例如在确认
+“endpoint 由 `magik_test` 租户的 API key 调用”后询问“这个租户这两天用了多少 M
+Token”，会查询 `magik_test`，而不是把“这个”当租户名。“这两天”按上海时区解释为
+昨天至今天；今天的数据会标为截至查询时刻的未完结数据。M Token 按 1,000,000 Token
+换算，并同时保留精确 Token 数。
+
 ## 配置
 
 在 `~/.nanobot/config.json` 中加入：

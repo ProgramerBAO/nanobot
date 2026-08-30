@@ -60,13 +60,22 @@ class ToolRegistry:
         return None
 
     async def resolve_direct_request(
-        self, text: str, *, runtime: LLMRuntime
+        self,
+        text: str,
+        *,
+        runtime: LLMRuntime,
+        history: list[dict[str, Any]] | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
         """Resolve deterministic routes first, then at most one semantic fallback."""
 
         deterministic = self.match_direct_request(text)
         if deterministic is not None:
             return deterministic
+        if history:
+            for name, tool in self._tools.items():
+                params = tool.match_contextual_request(text, history)
+                if params is not None:
+                    return name, params
         for name, tool in self._tools.items():
             if not tool.is_direct_intent_candidate(text):
                 continue
