@@ -6,6 +6,21 @@
 共 **206** 个操作，其中 **98** 个可由
 `magik_cube_admin_api` 只读调用；其余写操作只展示在目录中，工具会在发出网络请求前阻止。
 
+## Nanobot 查询方式
+
+管理对象、配置和关系查询应使用 `magik_cube_admin_api`，不能用只统计用量的
+`magik_cube_daily_report` 代替。对于“某租户/用户有哪些 endpoint”，工具提供
+`tenant_endpoints` 复合动作：先通过 `UserAdminService_ListTenants` 将名称解析为
+`tenant_id`，再分页调用 `InferenceAdminService_ListInferenceEndpoints`。例如：
+
+```text
+你看一下 zhangyan 用户有哪些 endpoint。
+```
+
+这类明确请求会在 command 阶段直接执行复合动作，不依赖 LLM 猜测接口。其他管理查询
+按 `search → describe → call` 工作流执行；需要父对象 ID 时，先查父对象再把 ID 传给
+下一个接口。Nanobot 始终加载的 `magik-cube-admin` 技能包含这套选择和联查规则。
+
 只读判定规则：HTTP `GET`，或 RPC 操作名以 `Get`、`List`、`Query` 开头。
 登录接口仅用于取得临时 Bearer Token，不计入 Admin API 操作数。
 

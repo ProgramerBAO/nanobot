@@ -336,6 +336,15 @@ def test_bundled_skills_use_agent_owned_paths(tmp_path: Path) -> None:
     assert "Never substitute a project-relative" in update_setup
 
 
+def test_magik_admin_skill_is_always_loaded_with_query_workflow(tmp_path: Path) -> None:
+    loader = SkillsLoader(tmp_path)
+
+    assert "magik-cube-admin" in loader.get_always_skills()
+    content = loader.load_skills_for_context(["magik-cube-admin"])
+    assert "tenant_endpoints" in content
+    assert "do not claim an API is unavailable before searching" in content
+
+
 def test_disabled_skills_excluded_from_get_always_skills(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     ws_skills = workspace / "skills"

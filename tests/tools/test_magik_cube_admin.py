@@ -255,6 +255,85 @@ async def test_call_accepts_documented_array_query_parameter() -> None:
     )
 
 
+def test_direct_route_matches_tenant_endpoint_question() -> None:
+    tool = MagikCubeAdminApiTool()
+
+    assert tool.match_direct_request("你看一下zhangyan用户有哪些endpoint。") == {
+        "action": "tenant_endpoints",
+        "tenant_query": "zhangyan",
+    }
+    assert tool.match_direct_request("查一下佛跳墙租户的接入点") == {
+        "action": "tenant_endpoints",
+        "tenant_query": "佛跳墙",
+    }
+    assert tool.match_direct_request("endpoint 状态怎么样") is None
+
+
+async def test_tenant_endpoints_resolves_tenant_then_lists_endpoints() -> None:
+    seen: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.url.query.decode()))
+        if request.url.path == "/api/admin-manager/tenants":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {"tenant_id": "tenant-zhangyan", "tenant_name": "zhangyan"}
+                        ],
+                        "total": 1,
+                    },
+                },
+            )
+        assert request.url.path == "/api/admin-manager/inference/endpoints"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "list": [
+                        {
+                            "endpoint_id": "ep-1",
+                            "endpoint_name": "glm-prod",
+                            "model": "GLM-5",
+                            "status": "ENDPOINT_STATUS_HEALTH",
+                            "project_name": "default",
+                            "tpm": 1000,
+                            "rpm": 100,
+                        }
+                    ],
+                    "total": 1,
+                },
+            },
+        )
+
+    tool = MagikCubeAdminApiTool(
+        MagikCubeToolConfig(
+            base_url="https://cube.example",
+            api_prefix="/api/admin-manager",
+            access_token="token",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await tool.execute(action="tenant_endpoints", tenant_query="zhangyan")
+
+    assert "租户 zhangyan（tenant-zhangyan）共有 1 个 endpoint" in result
+    assert "glm-prod｜ID ep-1｜模型 GLM-5｜状态 ENDPOINT_STATUS_HEALTH" in result
+    assert seen == [
+        (
+            "/api/admin-manager/tenants",
+            "page_num=1&page_size=100&tenant_name=zhangyan",
+        ),
+        (
+            "/api/admin-manager/inference/endpoints",
+            "tenant_id=tenant-zhangyan&page_num=1&page_size=500",
+        ),
+    ]
+
+
 def test_response_sanitizer_redacts_credentials_without_hiding_usage_tokens() -> None:
     value = {
         "apiKey": "secret-api-key",

@@ -8,6 +8,7 @@ import pytest
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.reporting.magik_cube_intent import IntentCandidateStore
 from nanobot.agent.tools.magik_cube import MagikCubeDailyReportTool
+from nanobot.agent.tools.magik_cube_admin import MagikCubeAdminApiTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMResponse, ToolCallRequest
@@ -32,6 +33,32 @@ def _make_loop(tmp_path: Path) -> tuple[AgentLoop, MagicMock]:
     )
     loop.tools.get_definitions = MagicMock(return_value=[])
     return loop, provider
+
+
+@pytest.mark.asyncio
+async def test_tenant_endpoint_question_routes_to_admin_without_llm(tmp_path: Path) -> None:
+    loop, provider = _make_loop(tmp_path)
+    tool = MagikCubeAdminApiTool()
+    tool.execute = AsyncMock(return_value="zhangyan endpoints")  # type: ignore[method-assign]
+    loop.tools.register(tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="user",
+            chat_id="chat",
+            content="你看一下zhangyan用户有哪些endpoint。",
+        )
+    )
+
+    assert response is not None and response.content == "zhangyan endpoints"
+    tool.execute.assert_awaited_once_with(  # type: ignore[attr-defined]
+        action="tenant_endpoints",
+        tenant_query="zhangyan",
+    )
+    provider.chat.assert_not_called()
+    provider.chat_with_retry.assert_not_awaited()
+    await loop.close_mcp()
 
 
 @pytest.mark.asyncio

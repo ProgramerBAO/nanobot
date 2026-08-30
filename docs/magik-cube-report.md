@@ -6,6 +6,11 @@
 全部只读查询接口；完整的 206 个 Admin API 操作及只读/写入分类见
 [`magik-cube-admin-api.md`](magik-cube-admin-api.md)。写操作只出现在目录中，不能通过该工具调用。
 
+两个工具的职责不同：日期范围内的 Token、请求数和 TPM 报表使用
+`magik_cube_daily_report`；租户、账号、endpoint、模型配置、账单、网关日志、集群等
+管理对象查询使用 `magik_cube_admin_api`。例如“zhangyan 用户有哪些 endpoint”会直接
+执行 `tenant_endpoints`，先查租户 ID，再查该租户的 endpoint，不会经过日报接口。
+
 ## 配置
 
 在 `~/.nanobot/config.json` 中加入：

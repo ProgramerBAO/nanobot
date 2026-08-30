@@ -126,6 +126,33 @@ def _bounded_json(value: Any, max_chars: int) -> str:
     return f"{rendered[:max_chars]}\n... [truncated {omitted} characters]"
 
 
+def _bounded_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return f"{value[:max_chars]}\n... [truncated {len(value) - max_chars} characters]"
+
+
+def _pick_field(value: dict[str, Any], *names: str, default: Any = "") -> Any:
+    for name in names:
+        if name in value:
+            return value[name]
+    return default
+
+
+def _response_rows(value: Any) -> tuple[list[dict[str, Any]], int]:
+    if not isinstance(value, dict):
+        return [], 0
+    rows = value.get("list")
+    if not isinstance(rows, list):
+        return [], 0
+    objects = [item for item in rows if isinstance(item, dict)]
+    try:
+        total = int(value.get("total", len(objects)))
+    except (TypeError, ValueError):
+        total = len(objects)
+    return objects, total
+
+
 class _MagikCubeAdminClient:
     """Authenticated client whose caller supplies a catalog-approved operation."""
 
@@ -235,8 +262,9 @@ class _MagikCubeAdminClient:
 @tool_parameters(
     tool_parameters_schema(
         action=StringSchema(
-            "search finds APIs, describe returns exact schemas, call invokes one read-only API",
-            enum=("search", "describe", "call"),
+            "search finds APIs; describe returns schemas; call invokes one read-only API; "
+            "tenant_endpoints resolves a tenant name/alias and lists its endpoints",
+            enum=("search", "describe", "call", "tenant_endpoints"),
         ),
         query=StringSchema(
             "For search: text matched against service, path, operation ID, summary, and description"
@@ -248,6 +276,9 @@ class _MagikCubeAdminClient:
         ),
         limit=IntegerSchema(20, description="For search: maximum matches", minimum=1, maximum=50),
         operation_id=StringSchema("For describe/call: exact OpenAPI operationId"),
+        tenant_query=StringSchema(
+            "For tenant_endpoints: exact tenant name, ID, slug, or configured alias"
+        ),
         path_params=ObjectSchema(
             description="For call: values for every {path_parameter}",
             additional_properties=True,
@@ -272,9 +303,11 @@ class MagikCubeAdminApiTool(Tool):
 
     name = "magik_cube_admin_api"
     description = (
-        "Search and inspect all Magik Cube Admin APIs, then call catalog-approved read-only "
-        "operations. Use search, then describe for exact parameters, then call by operation_id. "
-        "The catalog includes write APIs for visibility but call blocks them before networking."
+        "Use for Magik Cube management questions about tenants, accounts, endpoints, models, "
+        "API keys, billing, gateway logs, clusters, and configuration. Use tenant_endpoints for "
+        "questions like 'zhangyan 用户有哪些 endpoint'. For other questions use search, then "
+        "describe, then call. Do not use the daily-report tool for entity or configuration lists. "
+        "Write APIs are catalogued for visibility but blocked before networking."
     )
     config_key = "magik_cube"
 
@@ -307,6 +340,45 @@ class MagikCubeAdminApiTool(Tool):
     def max_calls_per_turn(self) -> int | None:
         return 6
 
+    def match_direct_request(self, text: str) -> dict[str, Any] | None:
+        """Route an unambiguous tenant-endpoint question to the composite query."""
+
+        raw = text.strip()
+        if not re.search(r"(?:endpoints?|接入点)", raw, re.IGNORECASE):
+            return None
+        cleaned = raw
+        for phrase in (
+            "帮我看一下",
+            "帮我查一下",
+            "你看一下",
+            "你看下",
+            "查询一下",
+            "查看一下",
+            "查一下",
+            "看一下",
+            "查询",
+            "查看",
+            "看看",
+            "请",
+        ):
+            cleaned = cleaned.replace(phrase, " ")
+        match = re.search(
+            r"^\s*([A-Za-z0-9_.\-\u4e00-\u9fff]+?)"
+            r"(?:用户|租户|客户)?\s*(?:有|的|名下|有哪些).*?(?:endpoints?|接入点)",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if match is None:
+            match = re.search(
+                r"(?:endpoints?|接入点)\s+(?:of|for)\s+([A-Za-z0-9_.\-]+)",
+                cleaned,
+                re.IGNORECASE,
+            )
+        tenant_query = match.group(1).strip() if match else ""
+        if not tenant_query:
+            return None
+        return {"action": "tenant_endpoints", "tenant_query": tenant_query}
+
     async def execute(
         self,
         action: str,
@@ -315,6 +387,7 @@ class MagikCubeAdminApiTool(Tool):
         access: str = "read",
         limit: int = 20,
         operation_id: str = "",
+        tenant_query: str = "",
         path_params: dict[str, Any] | None = None,
         query_params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
@@ -322,6 +395,8 @@ class MagikCubeAdminApiTool(Tool):
     ) -> str:
         if action == "search":
             return self._search(query=query, service=service, access=access, limit=limit)
+        if action == "tenant_endpoints":
+            return await self._tenant_endpoints(tenant_query)
         operation = _operations_by_id().get(operation_id)
         if operation is None:
             return ToolResult.error(
@@ -374,6 +449,140 @@ class MagikCubeAdminApiTool(Tool):
             "results": matches[:limit],
         }
         return _bounded_json(result, self._config.admin_max_response_chars)
+
+    async def _tenant_endpoints(self, tenant_query: str) -> str:
+        query = tenant_query.strip()
+        if not query:
+            return ToolResult.error("Error: tenant_endpoints requires tenant_query")
+        if not self._config.base_url or not (
+            self._config.access_token
+            or (self._config.account and self._config.password)
+        ):
+            return ToolResult.error(
+                "Error: configure tools.magikCube.baseUrl plus account/password or accessToken"
+            )
+        tenant_id = next(
+            (
+                value
+                for alias, value in self._config.tenant_mappings.items()
+                if alias.strip().casefold() == query.casefold()
+            ),
+            "",
+        )
+        tenant_name = query
+        try:
+            async with _MagikCubeAdminClient(
+                self._config,
+                transport=self._transport,
+            ) as client:
+                if not tenant_id:
+                    tenant_operation = _operations_by_id()["UserAdminService_ListTenants"]
+                    tenant_response = await client.call(
+                        tenant_operation,
+                        path=self._public_path(tenant_operation["path"]),
+                        query={
+                            "page_num": 1,
+                            "page_size": 100,
+                            (
+                                "tenant_id"
+                                if query.casefold().startswith("tenant-")
+                                else "tenant_name"
+                            ): query,
+                        },
+                        body=None,
+                    )
+                    tenants, _total = _response_rows(tenant_response)
+                    matches = [
+                        item
+                        for item in tenants
+                        if query.casefold()
+                        in {
+                            str(_pick_field(item, "tenantId", "tenant_id")).casefold(),
+                            str(
+                                _pick_field(item, "tenantName", "tenant_name", "name")
+                            ).casefold(),
+                        }
+                    ]
+                    if not matches and len(tenants) == 1:
+                        matches = tenants
+                    if not matches:
+                        return f"未找到租户：{query}。"
+                    if len(matches) > 1:
+                        options = "、".join(
+                            f"{_pick_field(item, 'tenantName', 'tenant_name', 'name')}"
+                            f"（{_pick_field(item, 'tenantId', 'tenant_id')}）"
+                            for item in matches[:10]
+                        )
+                        return f"匹配到多个租户，请指定一个：{options}。"
+                    tenant = matches[0]
+                    tenant_id = str(_pick_field(tenant, "tenantId", "tenant_id"))
+                    tenant_name = str(
+                        _pick_field(
+                            tenant,
+                            "tenantName",
+                            "tenant_name",
+                            "name",
+                            default=query,
+                        )
+                    )
+                endpoint_operation = _operations_by_id()[
+                    "InferenceAdminService_ListInferenceEndpoints"
+                ]
+                endpoints: list[dict[str, Any]] = []
+                total = 0
+                for page in range(1, self._config.max_pages + 1):
+                    endpoint_response = await client.call(
+                        endpoint_operation,
+                        path=self._public_path(endpoint_operation["path"]),
+                        query={
+                            "tenant_id": tenant_id,
+                            "page_num": page,
+                            "page_size": 500,
+                        },
+                        body=None,
+                    )
+                    rows, total = _response_rows(endpoint_response)
+                    endpoints.extend(rows)
+                    if not rows or len(endpoints) >= total:
+                        break
+        except (MagikCubeApiError, httpx.HTTPError, ValueError) as exc:
+            return ToolResult.error(f"Error: 查询租户 endpoint 失败：{exc}")
+        return self._render_tenant_endpoints(
+            tenant_name=tenant_name,
+            tenant_id=tenant_id,
+            endpoints=endpoints,
+            total=total,
+        )
+
+    def _render_tenant_endpoints(
+        self,
+        *,
+        tenant_name: str,
+        tenant_id: str,
+        endpoints: list[dict[str, Any]],
+        total: int,
+    ) -> str:
+        if not endpoints:
+            return f"租户 {tenant_name}（{tenant_id}）当前没有 endpoint。"
+        lines = [f"租户 {tenant_name}（{tenant_id}）共有 {total} 个 endpoint："]
+        for item in endpoints:
+            name = _pick_field(item, "endpointName", "endpoint_name", "endpoint", default="-")
+            endpoint_id = _pick_field(item, "endpointId", "endpoint_id", default="-")
+            model = _pick_field(item, "model", default="-")
+            status = _pick_field(item, "status", default="-")
+            project = _pick_field(item, "projectName", "project_name", default="-")
+            tpm = _pick_field(item, "tpm", default="-")
+            rpm = _pick_field(item, "rpm", default="-")
+            lines.append(
+                f"- {name}｜ID {endpoint_id}｜模型 {model}｜状态 {status}｜"
+                f"项目 {project}｜TPM {tpm}｜RPM {rpm}"
+            )
+        if len(endpoints) < total:
+            lines.append(
+                f"仅返回前 {len(endpoints)} 条；已达到分页上限 "
+                f"{self._config.max_pages}。"
+            )
+        return _bounded_text("\n".join(lines), self._config.admin_max_response_chars)
 
     def _describe(self, operation: dict[str, Any], *, include_response_schema: bool) -> str:
         result = {
