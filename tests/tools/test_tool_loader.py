@@ -91,6 +91,7 @@ def test_discover_finds_concrete_tools():
     assert "ExecTool" in class_names
     assert "CliAppsTool" in class_names
     assert "MessageTool" in class_names
+    assert "MagikCubeAdminApiTool" in class_names
     assert "SpawnTool" in class_names
     assert "TimeTool" in class_names
     assert "WriteStdinTool" in class_names

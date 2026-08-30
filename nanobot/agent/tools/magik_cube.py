@@ -105,6 +105,8 @@ class MagikCubeToolConfig(Base):
     intent_candidate_retention_days: int = Field(default=30, ge=1, le=365)
     # 防止候选日志无界增长。
     intent_candidate_max_entries: int = Field(default=10_000, ge=100, le=100_000)
+    # 通用 Admin API 工具单次返回给模型的最大 JSON 字符数，防止日志/明细撑满上下文。
+    admin_max_response_chars: int = Field(default=50_000, ge=1_000, le=200_000)
 
 
 class MagikCubeApiError(RuntimeError):

@@ -2,6 +2,10 @@
 
 `magik_cube_daily_report` 是一个只读的内置工具，用于汇总 Magik Cube 管理平台的大客户运营数据，并生成适合发送到飞书的日报文本。
 
+同一份连接配置还会启用 `magik_cube_admin_api`。它可以检索、说明并调用管理后台的
+全部只读查询接口；完整的 206 个 Admin API 操作及只读/写入分类见
+[`magik-cube-admin-api.md`](magik-cube-admin-api.md)。写操作只出现在目录中，不能通过该工具调用。
+
 ## 配置
 
 在 `~/.nanobot/config.json` 中加入：
@@ -16,7 +20,7 @@
   "tools": {
     "magikCube": {
       "enable": true,
-      "baseUrl": "https://your-magik-cube-host",
+      "baseUrl": "https://www.magikcloud.cn",
       "apiPrefix": "/api/admin-manager",
       "account": "${MAGIK_CUBE_ACCOUNT}",
       "password": "${MAGIK_CUBE_PASSWORD}",
@@ -46,6 +50,8 @@ python -m nanobot gateway
 ```
 
 如果直接访问 Admin 服务而非前端网关，将 `apiPrefix` 改为 `/api/v1`。
+生产前端的裸域 `https://magikcloud.cn` 会重定向到 `https://www.magikcloud.cn`；工具不会
+带着登录凭据跟随重定向，因此生产配置必须直接使用带 `www` 的地址。
 
 每次生成日报时，工具先调用 `/token-api/v1/accounts/login/with-password` 获取临时 Access Token，Token 只保存在本次运行的内存中。也可以不配置账号密码，改用 `accessToken` 提供现成 Token；账号密码存在时优先自动登录。
 
