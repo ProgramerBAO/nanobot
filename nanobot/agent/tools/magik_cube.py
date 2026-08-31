@@ -1103,7 +1103,24 @@ class MagikCubeReporter:
                                 for _original, canonical in resolved
                             )
                         )
-                values = await asyncio.gather(
+                # `selected` 的顶部指标必须和表格使用同一模型口径；否则会把
+                # K3 的模型明细和租户全模型的周期概览混在一张卡里。
+                if scope == "selected":
+                    model_metrics = await asyncio.gather(
+                        *(
+                            self._tenant_metrics_for_windows(
+                                tenant,
+                                plan.fetch_windows,
+                                model=model_name,
+                                include_tpm=include_tpm,
+                            )
+                            for model_name in model_names
+                        )
+                    )
+                    summary = self._combine_metrics(list(model_metrics))
+                    return tenant, summary, list(zip(model_names, model_metrics)), scope
+
+                summary, *model_metrics = await asyncio.gather(
                     self._tenant_metrics_for_windows(
                         tenant, plan.fetch_windows, include_tpm=include_tpm
                     ),
@@ -1112,13 +1129,13 @@ class MagikCubeReporter:
                             tenant,
                             plan.fetch_windows,
                             model=model_name,
-                            # 矩阵表不展示逐模型 TPM；只保留一次租户汇总 TPM 查询。
+                            # 全部模型表不展示逐模型 TPM；只保留一次租户汇总 TPM 查询。
                             include_tpm=False,
                         )
                         for model_name in model_names
-                    )
+                    ),
                 )
-                return tenant, values[0], list(zip(model_names, values[1:])), scope
+                return tenant, summary, list(zip(model_names, model_metrics)), scope
 
         loaded = await asyncio.gather(
             *(load_one(item) for item in selections), return_exceptions=True
@@ -2495,7 +2512,7 @@ class MagikCubeDailyReportTool(Tool):
 
         # 使用 ASCII 边界，避免“Kimi-K3模型”在 Unicode \b 上回退成“Kimi-”。
         model_match = re.search(
-            r"(?<![A-Za-z0-9._-])(?:GLM|KIMI|MINIMAX|DEEPSEEK|QWEN|HY)"
+            r"(?<![A-Za-z0-9._-])(?:GLM|KIMI|MINIMAX|DEEPSEEK|QWEN|VLLM|HY)"
             r"[A-Z0-9._-]*(?![A-Za-z0-9._-])",
             raw,
             re.IGNORECASE,
@@ -2587,12 +2604,26 @@ class MagikCubeDailyReportTool(Tool):
 
         # 即时问答不更新 Proxy 基线，避免临时查询污染下一次定时日报的净变化。
         params: dict[str, Any] = {"save_snapshot": False}
-        explicit_dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", raw)
+        # 不使用 Unicode \b：中文后缀“2026-08-29日”会让 \b 漏掉日期。
+        explicit_dates = re.findall(r"(?<![0-9])\d{4}-\d{2}-\d{2}(?![0-9])", raw)
         today = datetime.now(ZoneInfo(self._timezone)).date()
         yesterday = today - timedelta(days=1)
         if len(explicit_dates) >= 2:
             params["start_date"], params["end_date"] = explicit_dates[:2]
             params["comparison"] = "previous_period" if re.search(r"(?:环比|对比)", raw) else "none"
+        elif explicit_dates and "日报" in raw:
+            # 指定日期优先于默认昨天；普通“日报”仍由下面分支使用昨天。
+            selected_date = explicit_dates[0]
+            if full_requested:
+                params["report_date"] = selected_date
+            else:
+                params.update(
+                    {
+                        "start_date": selected_date,
+                        "end_date": selected_date,
+                        "comparison": "previous_period",
+                    }
+                )
         elif "上周" in raw or "周报" in raw:
             last_week_start = today - timedelta(days=today.weekday() + 7)
             last_week_end = last_week_start + timedelta(days=6)

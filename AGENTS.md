@@ -98,6 +98,10 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
 - A successful empty Cube response and a failed Cube query are different states.
   Only the former may be labeled as no business data; connection, auth, rate-limit,
   upstream, and tenant-resolution failures must remain explicit `missing`/`partial`.
+- Cube deterministic report routing must treat an explicit `YYYY-MM-DD` date as
+  authoritative, including Chinese suffixes such as `2026-08-29日`; only an omitted
+  date may default to yesterday. Model parsing must preserve common names such as
+  `Kimi-K3` and `vLLM` before applying exact catalog/model validation.
 
 ## Common File Locations
 

@@ -618,6 +618,7 @@ class _DeterministicReportClient:
     def __init__(self) -> None:
         self.model_list_calls = 0
         self.usage_calls = 0
+        self.requested_models: list[str] = []
 
     async def request(
         self,
@@ -638,6 +639,7 @@ class _DeterministicReportClient:
         assert json_body is not None
         self.usage_calls += 1
         model = str(json_body.get("model") or "SUMMARY")
+        self.requested_models.append(model)
         if path == "analysis/active-tenant-daily-usage/query":
             start = date.fromisoformat(str(json_body["startTime"])[:10])
             end_exclusive = date.fromisoformat(str(json_body["endTime"])[:10])
@@ -713,9 +715,8 @@ async def test_selected_model_alias_resolves_to_configured_model(tmp_path: Path)
         tenant_mappings={"测试租户": "prod"},
         model_aliases={"k3": "MODEL-A"},
     )
-    reporter = MagikCubeReporter(
-        _DeterministicReportClient(), config, tmp_path / "proxy.json", "Asia/Shanghai"
-    )
+    client = _DeterministicReportClient()
+    reporter = MagikCubeReporter(client, config, tmp_path / "proxy.json", "Asia/Shanghai")
     plan = _plan_comparison_windows(
         date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
     )
@@ -730,6 +731,42 @@ async def test_selected_model_alias_resolves_to_configured_model(tmp_path: Path)
     card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
     assert card["title"] == "生产客户 周报"
     assert [row["model"] for row in card["table"]["rows"]] == ["MODEL-A"]
+    assert "Token **1,300" in card["overview"][0]
+    assert "Token **10,700" not in card["overview"][0]
+    assert card["segments"][0].startswith("周六 100")
+    assert card["segments"][-1].startswith("周五 700")
+    assert client.requested_models == ["MODEL-A", "MODEL-A"]
+
+
+async def test_selected_model_daily_card_uses_model_for_overview_and_segments(
+    tmp_path: Path,
+) -> None:
+    client = _DeterministicReportClient()
+    reporter = MagikCubeReporter(
+        client,
+        MagikCubeToolConfig(
+            base_url="https://cube.example",
+            tenant_mappings={"测试租户": "prod"},
+            model_aliases={"k3": "MODEL-A"},
+        ),
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 14), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [{"tenant_query": "测试租户", "model_scope": "selected", "models": ["k3"]}],
+        granularity="day",
+        include_tpm=True,
+    )
+
+    card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
+    assert "Token **700**" in card["overview"][0]
+    assert card["segments"] == ["08-14 700｜+600 / ↑600.0%"]
+    assert client.requested_models == ["MODEL-A", "MODEL-A"]
 
 
 async def test_matrix_report_returns_single_table_payload_with_absolute_daily_deltas(
@@ -1044,6 +1081,33 @@ def test_direct_route_normalizes_k3_alias_and_keeps_model_before_chinese_suffix(
                 "tenant_query": "tencent_token_hub",
                 "model_scope": "selected",
                 "models": ["Kimi-K3"],
+            }
+        ]
+
+
+def test_direct_route_prefers_explicit_daily_date_and_understands_vllm(
+    tmp_path: Path,
+) -> None:
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+
+    cases = [
+        ("tencent_token_hub Kimi-K3 2026-08-29日的日报", "Kimi-K3"),
+        ("tencent_token_hub vLLM 2026-08-29日的日报", "vLLM"),
+    ]
+    for text, expected_model in cases:
+        params = tool.match_direct_request(text)
+
+        assert params is not None
+        assert params["model"] == expected_model
+        assert params["start_date"] == "2026-08-29"
+        assert params["end_date"] == "2026-08-29"
+        assert params["comparison"] == "previous_period"
+        assert params["report_template"] == "matrix_card"
+        assert params["report_selections"] == [
+            {
+                "tenant_query": "tencent_token_hub",
+                "model_scope": "selected",
+                "models": [expected_model],
             }
         ]
 
