@@ -23,6 +23,10 @@ from nanobot.reporting.contracts import (
 )
 from nanobot.reporting.registry import ReportPluginRegistry
 from nanobot.reporting.store import ReportStateStore
+from nanobot.utils.report_failures import (
+    classify_report_failure,
+    report_failure_code_from_warning,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,15 +35,23 @@ class ReportRunOutcome:
     quality: DataQuality
     duration_ms: int
     query_count: int
+    semantic_shadow: dict[str, Any] | None = None
 
 
 class ReportRunner:
     """The shared 0-LLM path used by navigation, rules, and subscriptions."""
 
-    def __init__(self, registry: ReportPluginRegistry, store: ReportStateStore) -> None:
+    def __init__(
+        self,
+        registry: ReportPluginRegistry,
+        store: ReportStateStore,
+        *,
+        semantic_shadow_enabled: bool = False,
+    ) -> None:
         self._registry = registry
         self._store = store
         self._query_slots = asyncio.Semaphore(2)
+        self._semantic_shadow_enabled = semantic_shadow_enabled
 
     def _authorize(self, intent: ReportIntent, context: ReportRunContext) -> None:
         validate_report_intent(intent)
@@ -52,6 +64,10 @@ class ReportRunner:
             ("provider", intent.provider),
             ("environment", intent.environment),
         ]
+        if intent.filters.get("all_tenants") is True:
+            # Cross-customer reports require an explicit tenant wildcard grant.
+            # A grant for one tenant must never fan out to every Cube customer.
+            checks.append(("tenant", "*"))
         checks.extend(("model", model) for model in intent.models)
         filter_scope_keys = {
             "tenant": ("tenant",),
@@ -84,16 +100,19 @@ class ReportRunner:
             try:
                 return await connector.query(query)
             except Exception as exc:
+                failure_code = classify_report_failure(exc)
                 logger.warning(
-                    "Report connector query failed: connector={} error_type={}",
+                    "Report connector query failed: connector={} error_type={} failure_code={}",
                     connector.manifest.connector_id,
                     type(exc).__name__,
+                    failure_code,
                 )
                 return ReportDataset(
                     rows=(),
                     quality="missing",
-                    warnings=(f"connector_error:{type(exc).__name__}",),
+                    warnings=(failure_code,),
                     source=connector.manifest.connector_id,
+                    metadata={"quality_reasons": (failure_code,)},
                 )
 
     @staticmethod
@@ -117,6 +136,35 @@ class ReportRunner:
                 ReportBlock("note", {"content": f"数据质量：{quality}"}),
             ),
         )
+
+    def _semantic_shadow(self, template: Any, datasets: tuple[ReportDataset, ...]) -> dict[str, Any] | None:
+        if not self._semantic_shadow_enabled:
+            return None
+        summary = getattr(template, "shadow_summary", None)
+        if not callable(summary):
+            return {"status": "unsupported"}
+        try:
+            raw = summary(datasets)
+        except Exception as exc:
+            return {"status": "unavailable", "error_type": type(exc).__name__}
+        if not isinstance(raw, dict):
+            return {"status": "unavailable", "error_type": "invalid_shadow_summary"}
+        allowed = {
+            "calculation_version",
+            "status",
+            "compared_metrics",
+            "differing_metrics",
+            "legacy_only_metrics",
+            "candidate_only_metrics",
+        }
+        safe: dict[str, Any] = {}
+        for key in allowed:
+            value = raw.get(key)
+            if isinstance(value, str):
+                safe[key] = value[:128]
+            elif isinstance(value, (list, tuple)):
+                safe[key] = [str(item)[:128] for item in value[:64]]
+        return safe or {"status": "unavailable", "error_type": "empty_shadow_summary"}
 
     @staticmethod
     def _shard_query(query: Any, max_days: int) -> tuple[Any, ...]:
@@ -157,11 +205,22 @@ class ReportRunner:
         quality = ReportRunner._quality(datasets)
         warnings = tuple(dict.fromkeys(warning for item in datasets for warning in item.warnings))
         source = ",".join(dict.fromkeys(item.source for item in datasets if item.source))
+        metadata: dict[str, Any] = {}
+        for item in datasets:
+            for key, value in item.metadata.items():
+                if isinstance(value, (list, tuple)):
+                    existing = metadata.setdefault(key, [])
+                    if not isinstance(existing, list):
+                        existing = metadata[key] = [existing]
+                    existing.extend(value)
+                elif key not in metadata:
+                    metadata[key] = value
         return ReportDataset(
             rows=tuple(row for item in datasets for row in item.rows),
             quality=quality,
             warnings=warnings,
             source=source,
+            metadata=metadata,
         )
 
     async def run(
@@ -195,16 +254,52 @@ class ReportRunner:
         quality = self._quality(datasets)
         warnings = tuple(dict.fromkeys(warning for item in datasets for warning in item.warnings))
         document = self._document(template.analyze(datasets), quality)
+        semantic_shadow = self._semantic_shadow(template, datasets)
+        if document.context is not None:
+            document_context = replace(
+                document.context,
+                quality=quality,
+                quality_reasons=tuple(
+                    dict.fromkeys(
+                        warnings
+                        + tuple(
+                            reason
+                            for dataset in datasets
+                            for reason in dataset.metadata.get("quality_reasons", ())
+                        )
+                    )
+                ),
+                template_version=context.template_version or template.manifest.version,
+            )
+            document = replace(document, context=document_context)
         fallback_text = document.fallback_text
         if quality != "complete":
             fallback_text = f"{fallback_text}\n数据质量：{quality}"
         document = replace(document, quality=quality, warnings=warnings, fallback_text=fallback_text)
         duration_ms = int((time.perf_counter() - started) * 1000)
         request = asdict(intent)
-        for key in ("start_date", "end_date"):
+        for key in (
+            "start_date",
+            "end_date",
+            "start_time",
+            "end_time",
+            "comparison_start_time",
+            "comparison_end_time",
+        ):
             if request[key] is not None:
                 request[key] = request[key].isoformat()
+        if document.context is not None:
+            request["report_context"] = asdict(document.context)
+        if warnings:
+            request["quality_reasons"] = list(warnings)
+        if semantic_shadow is not None:
+            request["semantic_shadow"] = semantic_shadow
         run_id = context.idempotency_key or context.trace_id
+        failure_codes = tuple(
+            code
+            for warning in warnings
+            if (code := report_failure_code_from_warning(warning)) is not None
+        )
         self._store.record_run(
             run_id=run_id,
             channel=context.channel,
@@ -217,14 +312,21 @@ class ReportRunner:
             status="ok" if quality != "missing" else "error",
             duration_ms=duration_ms,
             quality=quality,
-            error_type="connector_error" if quality == "missing" else "",
+            error_type=(failure_codes[0] if quality == "missing" and failure_codes else ""),
         )
         logger.info(
-            "Report run complete: connector={} template={} quality={} duration_ms={} queries={}",
+            "Report run complete: connector={} template={} quality={} duration_ms={} queries={} shadow={}",
             intent.connector_id,
             intent.template_id,
             quality,
             duration_ms,
             len(expanded_queries),
+            (semantic_shadow or {}).get("status", "disabled"),
         )
-        return ReportRunOutcome(document, quality, duration_ms, len(expanded_queries))
+        return ReportRunOutcome(
+            document,
+            quality,
+            duration_ms,
+            len(expanded_queries),
+            semantic_shadow,
+        )

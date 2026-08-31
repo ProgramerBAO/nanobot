@@ -37,11 +37,13 @@ def capability_catalog(
     *,
     channel: str,
     user_id: str,
+    health_enabled: bool = False,
+    cost_enabled: bool = False,
 ) -> tuple[Capability, ...]:
-    has_magik = registry.connector("magik_cube") is not None and store.allowed(
+    has_cube = registry.connector("magik_cube") is not None and store.allowed(
         channel, user_id, "connector", "magik_cube"
     )
-    if store.rbac_enabled() and not has_magik:
+    if store.rbac_enabled() and not has_cube:
         return (
             Capability(
                 "request_access",
@@ -51,15 +53,54 @@ def capability_catalog(
             ),
         )
     items: list[Capability] = []
-    if has_magik and _allowed(store, channel, user_id, "generate"):
-        for period, template_id, title, description in (
-            ("day", "usage_daily_matrix", "日报", "昨天对比前天"),
-            ("week", "usage_weekly_matrix", "周报", "上周对比上上周"),
-            ("month", "usage_monthly_matrix", "月报", "上月对比前一自然月"),
-            ("recent7", "usage_weekly_matrix", "区间对比", "近 7 天对比前 7 天"),
-        ):
-            if not store.allowed(channel, user_id, "template", template_id):
+    health_template = registry.template("health_sre")
+    if (
+        has_cube
+        and health_enabled
+        and health_template is not None
+        and health_template in registry.compatible_templates("magik_cube")
+        and store.allowed(channel, user_id, "template", "health_sre")
+    ):
+        items.append(
+            Capability(
+                "health_report",
+                "Cube 健康报告",
+                "近 15 分钟健康快照及日/周趋势",
+                ReportAction("health_report", "Cube 健康报告", style="primary"),
+            )
+        )
+    cost_template = registry.template("cost_account")
+    if (
+        has_cube
+        and cost_enabled
+        and cost_template is not None
+        and cost_template in registry.compatible_templates("magik_cube")
+        and store.allowed(channel, user_id, "template", "cost_account")
+    ):
+        items.append(
+            Capability(
+                "cost_report",
+                "Cube 成本与账户",
+                "上月应付金额、钱包余额和未结算金额",
+                ReportAction("cost_report", "成本与账户"),
+            )
+        )
+    if has_cube and _allowed(store, channel, user_id, "generate"):
+        period_actions = {
+            "usage_daily_matrix": ("day", "日报", "昨天对比前天"),
+            "usage_weekly_matrix": ("week", "周报", "上周对比上上周"),
+            "usage_monthly_matrix": ("month", "月报", "上月对比前一自然月"),
+        }
+        for template in registry.compatible_templates("magik_cube"):
+            manifest = template.manifest
+            if manifest.lifecycle_state not in {"publish", "canary"}:
                 continue
+            action_info = period_actions.get(manifest.template_id)
+            if action_info is None or not store.allowed(
+                channel, user_id, "template", manifest.template_id
+            ):
+                continue
+            period, title, description = action_info
             items.append(
                 Capability(
                     f"generate:{period}",
@@ -70,6 +111,15 @@ def capability_catalog(
                         label=title,
                         style="primary" if period == "week" else "default",
                     ),
+                )
+            )
+        if store.allowed(channel, user_id, "template", "usage_weekly_matrix"):
+            items.append(
+                Capability(
+                    "generate:recent7",
+                    "区间对比",
+                    "近 7 天对比前 7 天",
+                    ReportAction("generate:recent7", "区间对比"),
                 )
             )
     if _allowed(store, channel, user_id, "subscriptions"):
@@ -107,17 +157,24 @@ def home_document(
     *,
     channel: str,
     user_id: str,
+    health_enabled: bool = False,
+    cost_enabled: bool = False,
 ) -> ReportDocument:
     capabilities = capability_catalog(
-        registry, store, channel=channel, user_id=user_id
+        registry,
+        store,
+        channel=channel,
+        user_id=user_id,
+        health_enabled=health_enabled,
+        cost_enabled=cost_enabled,
     )
     if capabilities and capabilities[0].capability_id == "request_access":
         intro = "当前账号尚未获得报表数据源权限，请联系管理员授权。"
     else:
-        intro = "选择功能，或直接发送客户、模型范围和报表周期。明确请求会直接生成。"
+        intro = "选择 Cube 报表功能，或直接发送客户、模型范围和报表周期。明确请求会直接生成。"
     return ReportDocument(
         title="报表中心",
-        subtitle="确定性报表 · 固定口径 · 0 LLM",
+        subtitle="确定性报表 · 固定口径",
         document_id="report_home",
         fallback_text=(
             "报表中心\n"
@@ -149,14 +206,23 @@ def home_document(
     )
 
 
-def examples_document(authorized: bool) -> ReportDocument:
-    examples = ["我要周报", "我要日报", "查看我的订阅", "查看最近报表"]
+def examples_document(
+    authorized: bool,
+    *,
+    cost_enabled: bool = False,
+    all_tenant_model_enabled: bool = False,
+) -> ReportDocument:
+    examples = ["我要周报", "我要日报", "健康报告", "查看我的订阅", "查看最近报表"]
     if authorized:
         examples[:0] = [
             "客户英文标识所有模型的周报",
             "客户英文标识完整月报",
             "客户英文标识近7天使用情况",
         ]
+        if all_tenant_model_enabled:
+            examples.insert(0, "Kimi-K3模型的日报（全部客户）")
+    if cost_enabled:
+        examples.insert(0, "成本报告")
     return ReportDocument(
         title="报表问法示例",
         fallback_text="可直接发送：\n" + "\n".join(f"- {item}" for item in examples),
@@ -173,10 +239,21 @@ def recent_document(rows: list[dict[str, Any]]) -> ReportDocument:
     if not rows:
         content = "暂无报表运行记录。生成第一张报表后会显示在这里。"
     else:
-        content = "\n".join(
-            f"• {row['created_at'][:19]}｜{row['template_id']}｜{row['status']}｜{row['duration_ms']}ms"
-            for row in rows
-        )
+        lines: list[str] = []
+        for row in rows:
+            request = row.get("request") if isinstance(row.get("request"), dict) else {}
+            report_context = request.get("report_context")
+            window = ""
+            if isinstance(report_context, dict):
+                current = report_context.get("current_window")
+                if isinstance(current, dict):
+                    window = f"｜窗口 {current.get('start', '')} - {current.get('end', '')}"
+            lines.append(
+                f"• {row['created_at'][:19]}｜{row['template_id']}｜"
+                f"{row['status']}｜质量 {row.get('quality', 'unknown')}｜"
+                f"{row['duration_ms']}ms{window}"
+            )
+        content = "\n".join(lines)
     return ReportDocument(
         title="最近报表",
         fallback_text=content,
@@ -194,7 +271,8 @@ def subscriptions_document(rows: list[Any]) -> ReportDocument:
                 f"• **{report_template_label(row.template_id)}**｜"
                 f"{describe_subscription_schedule(row.schedule)}｜"
                 f"{row.timezone}｜{'启用' if row.enabled else '停用'}\n"
-                f"  数据周期：{report_data_period(row.template_id)}"
+                f"  数据周期：{report_data_period(row.template_id)}｜"
+                f"口径版本：{row.report_params.get('calculation_version', row.template_version)}"
             )
             for row in rows
         )
@@ -224,7 +302,8 @@ def subscription_created_document(row: Any) -> ReportDocument:
         f"**报表**：{report_label}\n"
         f"**发送计划**：{schedule}\n"
         f"**时区**：{row.timezone}\n"
-        f"**数据周期**：{data_period}"
+        f"**数据周期**：{data_period}\n"
+        f"**口径版本**：{row.report_params.get('calculation_version', row.template_version)}"
     )
     return ReportDocument(
         title="订阅已创建",

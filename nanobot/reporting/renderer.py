@@ -79,12 +79,36 @@ def _format_metric_items(data: dict[str, Any]) -> str:
         value = item.get("value", "-")
         change = item.get("change")
         suffix = f" ({change})" if change not in (None, "") else ""
-        lines.append(f"- **{label}**：{value}{suffix}")
+        baseline = ""
+        if item.get("baseline_value") is not None:
+            baseline = f"；基准：{item.get('baseline') or '-'}"
+        samples = ""
+        if item.get("valid_sample_count") not in (None, ""):
+            sample_label = "有效请求" if item.get("metric") == "ai.ttft" else "时间桶"
+            samples = f"；{sample_label}：{item['valid_sample_count']}"
+        aggregation = str(item.get("aggregation") or "").strip()
+        semantics = f"；口径：{aggregation}" if aggregation else ""
+        detail = str(item.get("detail") or "").strip()
+        detail_text = f"；{detail}" if detail else ""
+        lines.append(
+            f"- **{label}**：{value}{baseline}{suffix}{samples}{semantics}{detail_text}"
+        )
     return "\n".join(lines)
 
 
 def _format_table(data: dict[str, Any]) -> str:
     headers = [str(item) for item in data.get("headers") or []]
+    columns = [
+        str(item.get("name"))
+        for item in data.get("columns") or []
+        if isinstance(item, dict) and item.get("name")
+    ]
+    if not headers and columns:
+        headers = [
+            str(item.get("display_name") or item.get("name"))
+            for item in data.get("columns") or []
+            if isinstance(item, dict) and item.get("name")
+        ]
     rows = data.get("rows") or []
     if not headers and rows and isinstance(rows[0], dict):
         headers = [str(key) for key in rows[0]]
@@ -93,13 +117,45 @@ def _format_table(data: dict[str, Any]) -> str:
     lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join("---" for _ in headers) + " |"]
     for row in rows:
         if isinstance(row, dict):
-            values = [row.get(header, "") for header in headers]
+            if columns and any(column in row for column in columns):
+                values = [row.get(column, "") for column in columns]
+            else:
+                values = [row.get(header, "") for header in headers]
         elif isinstance(row, (list, tuple)):
             values = list(row)
         else:
             continue
         lines.append("| " + " | ".join(str(value) for value in values) + " |")
     return "\n".join(lines)
+
+
+def _format_report_context(document: ReportDocument) -> str:
+    context = document.context
+    if context is None:
+        return ""
+    current = context.current_window
+    baseline = context.baseline_window
+    current_text = f"{current.start} - {current.end}" if current else "暂无"
+    baseline_text = f"{baseline.start} - {baseline.end}" if baseline else "暂无可比基准"
+    sources = "; ".join(
+        dict.fromkeys(f"{item.system} / {item.route}" for item in context.sources)
+    ) or "已配置报表数据源"
+    aggregations = ", ".join(
+        dict.fromkeys(item.aggregation for item in context.metric_definitions)
+    ) or "按指标定义聚合"
+    quality = context.quality or "未标记"
+    reasons = "；".join(context.quality_reasons[:5]) if context.quality_reasons else "无"
+    freshness = context.freshness or "未提供"
+    return (
+        "报表说明\n"
+        f"基准：前一等长窗口；当前：{current_text}；基准：{baseline_text}\n"
+        f"时区：{context.timezone}\n"
+        f"来源：{sources}\n"
+        f"口径：{aggregations}\n"
+        f"数据质量：{quality}；最近样本：{freshness}\n"
+        f"质量原因：{reasons}\n"
+        "读法：错误率、延迟和 TTFT 越低越好；RPM/TPM 表示流量，不能单独判断故障。"
+    )
 
 
 def document_to_markdown(document: ReportDocument) -> str:
@@ -126,6 +182,9 @@ def document_to_markdown(document: ReportDocument) -> str:
             content = ""
         if content:
             sections.append(content)
+    context_text = _format_report_context(document)
+    if context_text:
+        sections.append(context_text)
     if not document.blocks and document.fallback_text:
         sections.append(document.fallback_text)
     if document.quality and document.quality != "complete":

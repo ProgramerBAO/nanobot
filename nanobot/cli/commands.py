@@ -1,6 +1,7 @@
 """CLI commands for nanobot."""
 
 import asyncio
+import json
 import os
 import select
 import signal
@@ -2512,9 +2513,11 @@ reports_app = typer.Typer(help="Manage deterministic report templates")
 report_intents_app = typer.Typer(help="Review report intent candidates")
 report_plugins_app = typer.Typer(help="Inspect report connector and template plugins")
 report_policy_app = typer.Typer(help="Manage report RBAC and declarations")
+report_cube_contract_app = typer.Typer(help="Run safe, opt-in Cube staging contract checks")
 reports_app.add_typer(report_intents_app, name="intents")
 reports_app.add_typer(report_plugins_app, name="plugins")
 reports_app.add_typer(report_policy_app, name="policy")
+reports_app.add_typer(report_cube_contract_app, name="cube-contract")
 app.add_typer(reports_app, name="reports")
 
 
@@ -2529,6 +2532,26 @@ def report_plugins_list() -> None:
     registry = build_default_registry(
         magik_enabled=bool(config.tools.magik_cube.enable),
         grafana_config=getattr(config.tools.reporting, "grafana", None),
+        cube_config=config.tools.magik_cube,
+        cube_templates_enabled=bool(getattr(config.tools.reporting, "cube_template", True)),
+        cube_health_template_enabled=(
+            bool(getattr(config.tools.reporting, "cube_health_connector", False))
+            and bool(getattr(config.tools.reporting, "cube_health_template", False))
+        ),
+        cube_health_semantics_v2=bool(
+            getattr(config.tools.reporting, "cube_health_semantics_v2", False)
+        ),
+        cube_health_card_v2=bool(
+            getattr(config.tools.reporting, "cube_health_card_v2", False)
+        ),
+        cube_ttft_detail_enabled=bool(
+            getattr(config.tools.reporting, "cube_ttft_detail", False)
+        ),
+        cube_usage_semantics_v2=bool(
+            getattr(config.tools.reporting, "cube_usage_semantics_v2", False)
+        ),
+        timezone=str(getattr(config.tools.reporting, "timezone", "Asia/Shanghai")),
+        health_thresholds=getattr(config.tools.reporting, "health_thresholds", None),
     )
     table = Table(title="Report plugins")
     table.add_column("Kind")
@@ -2554,6 +2577,40 @@ def report_plugins_list() -> None:
     console.print(table)
     for name, error_type in sorted(registry.load_errors.items()):
         console.print(f"[yellow]Skipped {name}: {error_type}[/yellow]")
+
+
+@report_cube_contract_app.command("verify")
+def report_cube_contract_verify(
+    tenant_id: str = typer.Option(..., "--tenant-id", help="Staging tenant ID used only in requests"),
+    confirm_read_only: bool = typer.Option(
+        False,
+        "--confirm-read-only",
+        help="Required acknowledgement that this sends only allow-listed read requests",
+    ),
+    config_path: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit staging config path; no config is written",
+    ),
+) -> None:
+    """Validate fixed Cube response shapes against staging without printing response data."""
+
+    if not confirm_read_only:
+        console.print("Refusing Cube contract validation without --confirm-read-only.")
+        raise typer.Exit(2)
+    from nanobot.config.loader import load_config
+    from nanobot.reporting import CubeContractGate
+
+    config = load_config(config_path)
+    try:
+        result = asyncio.run(CubeContractGate(config.tools.magik_cube).run(tenant_id=tenant_id))
+    except ValueError as exc:
+        console.print(f"Cube contract gate blocked: {exc}")
+        raise typer.Exit(2) from exc
+    console.print_json(json.dumps(result.to_safe_dict(), ensure_ascii=False))
+    if result.quality != "complete":
+        raise typer.Exit(1)
 
 
 @report_policy_app.command("status")

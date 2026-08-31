@@ -71,6 +71,34 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
 - Linting: `ruff` with rules E, F, I, N, W (E501 ignored).
 - pytest with `asyncio_mode = "auto"`.
 
+## Feishu Card UX
+
+- All structured report push cards must use the shared `ReportDocument` renderer;
+  do not introduce one-off report layouts for individual templates.
+- Cards must present status and data quality first, then a compact KPI summary,
+  followed by titled detail sections and actionable controls.
+- Use restrained status colors, stable metric ordering, readable spacing, and
+  explicit empty/partial/missing states. Never turn failed or missing data into 0.
+- Keep each card within Feishu element limits, including one table per card;
+  split continuation cards with a repeated title and page marker when necessary.
+- Card actions must remain server-validated opaque callbacks and must not expose
+  credentials, raw API responses, SQL, PromQL, or unrestricted request parameters.
+- Every new renderer or fallback must preserve the same semantic order and data
+  quality warnings as the Feishu card.
+- Every structured report must expose its current window, comparison baseline,
+  logical data source, unit, aggregation, and a short reading guide. Do not label
+  a time-bucket peak as an average or hide missing baselines.
+- Health reports use request-level TTFT percentiles when available. Trend
+  `FIRST_TOKEN_DELAY` values must remain explicitly labeled as time-series data;
+  missing detail or insufficient samples must be visible and cannot produce a
+  normal health status.
+- Cube customer selectors must submit the exact `tenantId` returned by the live
+  catalog. Configured aliases are display and matching aids only after their target
+  ID is present in that catalog; aliases must never create synthetic customers.
+- A successful empty Cube response and a failed Cube query are different states.
+  Only the former may be labeled as no business data; connection, auth, rate-limit,
+  upstream, and tenant-resolution failures must remain explicit `missing`/`partial`.
+
 ## Common File Locations
 
 - Config schema: `nanobot/config/schema.py`

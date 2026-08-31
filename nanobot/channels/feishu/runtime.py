@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo
 
 from rich.console import Console
 from rich.markup import escape
@@ -1574,12 +1573,152 @@ class FeishuChannel(BaseChannel):
                 self._card_interactions.pop(key, None)
 
     @staticmethod
-    def _card_header(title: str, subtitle: str = "") -> dict[str, Any]:
+    def _card_header(
+        title: str, subtitle: str = "", *, template: str = "blue"
+    ) -> dict[str, Any]:
         content = title if not subtitle else f"{title}｜{subtitle}"
         return {
-            "template": "blue",
+            "template": template,
             "title": {"tag": "plain_text", "content": content},
         }
+
+    @staticmethod
+    def _report_status(ui: dict[str, Any]) -> tuple[str, str, str]:
+        """Extract status information without coupling the channel to a template."""
+
+        status = ""
+        reason = ""
+        for block in ui.get("blocks") or []:
+            if not isinstance(block, dict) or block.get("kind") != "metrics":
+                continue
+            data = block.get("data") if isinstance(block.get("data"), dict) else {}
+            for item in data.get("items") or []:
+                if not isinstance(item, dict) or item.get("label") != "总体状态":
+                    continue
+                status = str(item.get("value") or "").strip()
+                reason = str(item.get("change") or "").strip()
+                break
+            if status:
+                break
+        quality = str(ui.get("quality") or "").strip().casefold()
+        return status, reason, quality
+
+    @classmethod
+    def _report_header_template(cls, ui: dict[str, Any]) -> str:
+        """Use restrained status colors while keeping generic reports readable."""
+
+        status, _reason, quality = cls._report_status(ui)
+        if "异常" in status:
+            return "red"
+        if "关注" in status:
+            return "orange"
+        if "数据不足" in status or quality == "missing":
+            return "grey"
+        if quality == "partial":
+            return "orange"
+        if "正常" in status:
+            return "green"
+        return "blue"
+
+    @staticmethod
+    def _metric_grid(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Render compact KPI rows that remain readable on narrow Feishu clients."""
+
+        elements: list[dict[str, Any]] = []
+        for offset in range(0, len(items), 4):
+            columns: list[dict[str, Any]] = []
+            for item in items[offset : offset + 4]:
+                label = str(item.get("label") or "指标")
+                value = str(item.get("value") or "-")
+                change = str(item.get("change") or "").strip()
+                content = f"**{label}**\n**{value}**"
+                if item.get("baseline_value") is not None:
+                    content += f"\n基准 {item.get('baseline') or '-'}"
+                if change and item.get("label") != "总体状态":
+                    content += f"\n较基准 {change}"
+                valid_samples = item.get("valid_sample_count")
+                if valid_samples not in (None, ""):
+                    sample_label = "有效请求" if item.get("metric") == "ai.ttft" else "时间桶"
+                    content += f"\n{sample_label} {valid_samples}"
+                detail = str(item.get("detail") or "").strip()
+                if detail:
+                    content += f"\n{detail}"
+                columns.append(
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
+                            {
+                                "tag": "div",
+                                "text": {"tag": "lark_md", "content": content},
+                            }
+                        ],
+                    }
+                )
+            elements.append(
+                {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "horizontal_spacing": "small",
+                    "columns": columns,
+                }
+            )
+        return elements
+
+    @staticmethod
+    def _report_context_note(ui: dict[str, Any]) -> dict[str, Any] | None:
+        context = ui.get("context")
+        if not isinstance(context, dict):
+            return None
+
+        def window_text(value: Any) -> str:
+            if not isinstance(value, dict):
+                return "暂无"
+            start = str(value.get("start") or "").replace("T", " ")
+            end = str(value.get("end") or "").replace("T", " ")
+            return f"{start} - {end}" if start and end else "暂无"
+
+        current = window_text(context.get("current_window"))
+        baseline = window_text(context.get("baseline_window"))
+        if baseline == "暂无":
+            baseline = "暂无可比基准"
+        timezone = str(context.get("timezone") or "本地时区")
+        sources = context.get("sources") or []
+        source_names: list[str] = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            system = str(source.get("system") or "").strip()
+            route = str(source.get("route") or "").strip()
+            if system and route:
+                source_names.append(f"{system} / {route}")
+        source_text = "；".join(dict.fromkeys(source_names)) or "已配置报表数据源"
+        definitions = context.get("metric_definitions") or []
+        aggregations: list[str] = []
+        for item in definitions:
+            if isinstance(item, dict) and item.get("aggregation"):
+                aggregations.append(str(item["aggregation"]))
+        aggregation_text = "、".join(dict.fromkeys(aggregations)) or "按指标定义聚合"
+        quality = str(context.get("quality") or "未标记")
+        reasons = context.get("quality_reasons") or []
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        reason_text = "；".join(str(item) for item in reasons[:5]) if reasons else "无"
+        freshness = str(context.get("freshness") or "未提供")
+        content = (
+            f"基准：前一等长窗口\n"
+            f"当前：{current}\n"
+            f"基准：{baseline}\n"
+            f"时区：{timezone}\n"
+            f"来源：{source_text}\n"
+            f"口径：{aggregation_text}\n"
+            f"数据质量：{quality}\n"
+            f"最近样本：{freshness}\n"
+            f"质量原因：{reason_text}\n"
+            "读法：错误率、延迟和 TTFT 越低越好；RPM/TPM 表示流量，不能单独判断故障。"
+        )
+        return {"tag": "note", "elements": [{"tag": "plain_text", "content": content}]}
 
     def _register_scope_interaction(
         self, ui: dict[str, Any], msg: OutboundMessage
@@ -2027,6 +2166,11 @@ class FeishuChannel(BaseChannel):
             "header": self._card_header(
                 str(card.get("title") or "Magik Cube 报表"),
                 str(card.get("subtitle") or ""),
+                template=self._report_header_template(
+                    {
+                        "quality": "complete" if card.get("quality") == "完整" else "partial"
+                    }
+                ),
             ),
             "elements": elements,
         }
@@ -2047,15 +2191,30 @@ class FeishuChannel(BaseChannel):
             period = action_id.partition(":")[2]
             if period not in {"day", "week", "month", "recent7"}:
                 return None
-            from nanobot.agent.reporting.magik_cube_intent import ReportIntent
-
-            params = ReportIntent(report_kind=period).to_tool_params(  # type: ignore[arg-type]
-                today=datetime.now(ZoneInfo("Asia/Shanghai")).date()
-            )
             return {
-                "tool_name": "magik_cube_daily_report",
-                "params": params,
-                "content": f"生成固定{period}报",
+                "tool_name": "report_center",
+                "params": {
+                    "action": "cube_report",
+                    "period": period,
+                    "interactive": True,
+                },
+                "content": f"生成固定 Cube {period} 报",
+            }
+        if action_id == "health_report":
+            return {
+                "tool_name": "report_center",
+                "params": {"action": "health_report", "period": "recent15m"},
+                "content": "生成 Cube 健康报告",
+            }
+        if action_id == "subscription_setup:health":
+            return {
+                "tool_name": "report_center",
+                "params": {
+                    "action": "subscription_setup",
+                    "period": "day",
+                    "report_family": "health",
+                },
+                "content": "设置 Cube 健康日报订阅",
             }
         if action_id in {"examples", "recent", "subscriptions"}:
             return {
@@ -2114,9 +2273,16 @@ class FeishuChannel(BaseChannel):
                 self._card_interactions[nonce] = state
         return nonce, state, resolved
 
-    def _build_report_document(
+    def _build_report_document_cards(
         self, ui: dict[str, Any], msg: OutboundMessage
-    ) -> dict[str, Any]:
+    ) -> list[dict[str, Any]]:
+        """Build polished cards for channel-neutral documents.
+
+        A ReportDocument can contain multiple tables, while Feishu accepts only
+        one table element per card. Splitting here keeps each card valid and
+        repeats the report header so continuation cards remain self-contained.
+        """
+
         raw_actions: list[dict[str, Any]] = []
         for block in ui.get("blocks") or []:
             if isinstance(block, dict) and block.get("kind") == "actions":
@@ -2134,39 +2300,85 @@ class FeishuChannel(BaseChannel):
             kind = block.get("kind")
             data = block.get("data") if isinstance(block.get("data"), dict) else {}
             if kind == "markdown":
-                elements.append({"tag": "markdown", "content": str(data.get("content") or "")})
+                content = str(data.get("content") or "").strip()
+                if content:
+                    elements.append({"tag": "markdown", "content": content})
             elif kind == "note":
-                elements.append(
-                    {
-                        "tag": "note",
-                        "elements": [
-                            {"tag": "plain_text", "content": str(data.get("content") or "")}
-                        ],
-                    }
-                )
+                content = str(data.get("content") or "").strip()
+                if not content:
+                    continue
+                severity = str(data.get("severity") or "info").casefold()
+                if severity in {"warning", "error", "critical"}:
+                    elements.append(
+                        {
+                            "tag": "div",
+                            "text": {
+                                "tag": "lark_md",
+                                "content": f"**数据提示**\n{content}",
+                            },
+                        }
+                    )
+                else:
+                    elements.append(
+                        {
+                            "tag": "note",
+                            "elements": [{"tag": "plain_text", "content": content}],
+                        }
+                    )
             elif kind == "metrics":
-                values = data.get("items") or []
-                elements.append(
-                    {
-                        "tag": "markdown",
-                        "content": "\n".join(
-                            f"**{item.get('label', '')}**：{item.get('value', '')}"
-                            for item in values
-                            if isinstance(item, dict)
-                        ),
-                    }
-                )
+                values = [item for item in data.get("items") or [] if isinstance(item, dict)]
+                status_items = [item for item in values if item.get("label") == "总体状态"]
+                if status_items:
+                    status = status_items[0]
+                    status_value = str(status.get("value") or "数据不足")
+                    reason = str(status.get("change") or "").strip()
+                    status_content = f"**总体状态**\n**{status_value}**"
+                    if reason:
+                        status_content += f"\n{reason}"
+                    elements.append(
+                        {
+                            "tag": "div",
+                            "text": {"tag": "lark_md", "content": status_content},
+                        }
+                    )
+                    elements.append({"tag": "hr"})
+                metric_items = [item for item in values if item.get("label") != "总体状态"]
+                if metric_items:
+                    elements.append(
+                        {
+                            "tag": "div",
+                            "text": {"tag": "lark_md", "content": "**核心指标**"},
+                        }
+                    )
+                    elements.extend(self._metric_grid(metric_items))
             elif kind == "table":
-                elements.append(
-                    {
-                        "tag": "table",
-                        "page_size": int(data.get("page_size") or 8),
-                        "columns": list(data.get("columns") or []),
-                        "rows": list(data.get("rows") or []),
-                    }
-                )
+                title = str(data.get("title") or "明细").strip()
+                rows = list(data.get("rows") or [])
+                if title:
+                    elements.append(
+                        {
+                            "tag": "div",
+                            "text": {"tag": "lark_md", "content": f"**{title}**"},
+                        }
+                    )
+                if rows:
+                    elements.append(
+                        {
+                            "tag": "table",
+                            "page_size": max(1, min(int(data.get("page_size") or 8), 20)),
+                            "columns": list(data.get("columns") or []),
+                            "rows": rows,
+                        }
+                    )
+                else:
+                    elements.append(
+                        {
+                            "tag": "note",
+                            "elements": [{"tag": "plain_text", "content": "暂无可展示数据"}],
+                        }
+                    )
             elif kind == "actions":
-                buttons = []
+                buttons: list[dict[str, Any]] = []
                 for item in data.get("actions") or []:
                     if not isinstance(item, dict):
                         continue
@@ -2187,14 +2399,43 @@ class FeishuChannel(BaseChannel):
                         }
                     )
                 if buttons:
+                    elements.append({"tag": "hr"})
                     elements.append({"tag": "action", "actions": buttons})
-        return {
-            "config": {"wide_screen_mode": True},
-            "header": self._card_header(
-                str(ui.get("title") or "报表中心"), str(ui.get("subtitle") or "")
-            ),
-            "elements": elements,
-        }
+
+        groups = self._split_elements_by_table_limit(elements)
+        context_note = self._report_context_note(ui)
+        title = str(ui.get("title") or "报表中心")
+        subtitle = str(ui.get("subtitle") or "")
+        template = self._report_header_template(ui)
+        cards: list[dict[str, Any]] = []
+        for index, group in enumerate(groups, start=1):
+            card_subtitle = subtitle
+            if len(groups) > 1:
+                suffix = f"第 {index}/{len(groups)} 页"
+                card_subtitle = f"{subtitle} · {suffix}" if subtitle else suffix
+            cards.append(
+                {
+                    "config": {"wide_screen_mode": True},
+                    "header": self._card_header(
+                        title, card_subtitle, template=template
+                    ),
+                    "elements": group + ([context_note] if context_note else []),
+                }
+            )
+        return cards or [
+            {
+                "config": {"wide_screen_mode": True},
+                "header": self._card_header(title, subtitle, template=template),
+                "elements": [],
+            }
+        ]
+
+    def _build_report_document(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> dict[str, Any]:
+        """Build the first card for compatibility callers that expect one card."""
+
+        return self._build_report_document_cards(ui, msg)[0]
 
     def _build_agent_ui_cards(
         self, ui: Any, msg: OutboundMessage
@@ -2216,7 +2457,7 @@ class FeishuChannel(BaseChannel):
                 if isinstance(card, dict)
             ]
         if kind == "report_document":
-            return [self._build_report_document(ui, msg)]
+            return self._build_report_document_cards(ui, msg)
         if kind == "report_subscription_form":
             return [self._build_subscription_card(ui, msg)]
         return []
@@ -3731,6 +3972,14 @@ class FeishuChannel(BaseChannel):
     def _schedule_card_resume(
         self, state: _FeishuCardInteraction, params: dict[str, Any]
     ) -> bool:
+        if state.base_params.get("_report_center_selector"):
+            params.pop("_report_center_selector", None)
+            return self._schedule_tool_resume(
+                state,
+                "report_center",
+                params,
+                "继续生成 Cube 统一选择器报表",
+            )
         return self._schedule_tool_resume(
             state,
             "magik_cube_daily_report",
@@ -4216,13 +4465,33 @@ class FeishuChannel(BaseChannel):
         if store.onboarding_seen(self.name, user_id, version):
             return
         registry = build_default_registry(
-            magik_enabled=bool(config.tools.magik_cube.enable)
+            magik_enabled=bool(config.tools.magik_cube.enable),
+            cube_config=config.tools.magik_cube,
+            cube_health_template_enabled=(
+                bool(getattr(reporting_config, "cube_health_connector", False))
+                and bool(getattr(reporting_config, "cube_health_template", False))
+            ),
+            cube_health_semantics_v2=bool(
+                getattr(reporting_config, "cube_health_semantics_v2", False)
+            ),
+            cube_health_card_v2=bool(
+                getattr(reporting_config, "cube_health_card_v2", False)
+            ),
+            cube_ttft_detail_enabled=bool(
+                getattr(reporting_config, "cube_ttft_detail", False)
+            ),
+            cube_usage_semantics_v2=bool(
+                getattr(reporting_config, "cube_usage_semantics_v2", False)
+            ),
+            health_thresholds=getattr(reporting_config, "health_thresholds", None),
+            timezone=str(getattr(reporting_config, "timezone", "Asia/Shanghai")),
         )
         document = home_document(
             registry,
             store,
             channel=self.name,
             user_id=user_id,
+            health_enabled=bool(getattr(reporting_config, "cube_health_report", False)),
         )
         await self.send(
             OutboundMessage(

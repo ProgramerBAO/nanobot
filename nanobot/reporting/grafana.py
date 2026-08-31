@@ -106,7 +106,7 @@ class GrafanaConnectorConfig:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "GrafanaConnectorConfig":
-        enabled = value.get("enabled", True)
+        enabled = value.get("enabled", False)
         if not enabled:
             raise ValueError("Grafana connector is disabled")
         raw_queries = value.get("query_definitions") or value.get("queryDefinitions") or ()

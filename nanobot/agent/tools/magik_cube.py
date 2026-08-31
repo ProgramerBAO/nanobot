@@ -12,7 +12,7 @@ import time as time_module
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeVar
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -40,6 +40,39 @@ from nanobot.bus.events import OUTBOUND_META_AGENT_UI
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.config_base import Base
 from nanobot.utils.helpers import _write_text_atomic
+from nanobot.utils.report_failures import (
+    ReportFailureCode,
+    ReportFailureError,
+    classify_report_failure,
+    report_failure_message,
+)
+
+
+class MagikCubeTokenApiConfig(Base):
+    """Independent read-only configuration for the Cube user TokenAPI."""
+
+    # Account data never reuses the internal Admin JWT. Enable only after a
+    # Casbin-scoped TokenAPI credential has been provisioned for this deployment.
+    enable: bool = False
+    base_url: str = ""
+    api_prefix: str = "/api/v1"
+    access_token: str = Field(default="", repr=False)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = Field(default=30, ge=1, le=600)
+    verify_ssl: bool = True
+    max_pages: int = Field(default=10, ge=1, le=100)
+    max_concurrency: int = Field(default=4, ge=1, le=16)
+    max_retries: int = Field(default=2, ge=0, le=5)
+    retry_backoff_seconds: float = Field(default=0.25, ge=0, le=10)
+    # These fields preserve the small shared-client interface. TokenAPI uses
+    # only its supplied bearer credential and never performs password login.
+    account: str = ""
+    password: str = Field(default="", repr=False)
+    login_path: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.enable and self.base_url and self.access_token)
 
 
 class MagikCubeToolConfig(Base):
@@ -47,12 +80,18 @@ class MagikCubeToolConfig(Base):
 
     # Tool 默认关闭，避免未配置 Magik Cube 时向 LLM 暴露一个不可用的工具。
     enable: bool = False
+    # 仅用于显式区分部署环境。阶段 0 的契约验证器只接受 staging，防止误探测生产管理面。
+    deployment_environment: Literal["", "development", "staging", "production"] = ""
+    # 默认为关闭；即使配置被标记为 staging，也需要显式打开才能运行契约探测。
+    contract_validation_enabled: bool = False
     # 管理面 API 的 origin，例如 https://magik-cube.example.com；不要在这里重复 api_prefix。
     base_url: str = ""
     # 业务 API 的公共前缀。请求最终会拼成 {base_url}/{api_prefix}/{route}。
     api_prefix: str = "/api/v1"
     # 已有 Bearer token；repr=False 防止配置对象被日志或异常 repr 时泄露密钥。
     access_token: str = Field(default="", repr=False)
+    # 成本、账单、余额必须通过独立 TokenAPI JWT 访问，不能复用管理面 access_token。
+    token_api: MagikCubeTokenApiConfig = Field(default_factory=MagikCubeTokenApiConfig)
     # 账号密码登录的账号。只有 account 和 password 同时存在时才会触发密码登录。
     account: str = ""
     # 密码字段同样禁止出现在对象 repr 中。
@@ -77,12 +116,16 @@ class MagikCubeToolConfig(Base):
     max_pages: int = Field(default=10, ge=1, le=100)
     # 报告中最多展示多少个租户、变更或机器条目，避免单次消息过大。
     max_report_items: int = Field(default=20, ge=1, le=100)
-    # 用户可读别名到真实 tenant ID 的映射。命中后跳过 tenants API，适合 Feishu 常用简称。
+    # 用户可读别名到真实 tenant ID 的映射。仅用于已由 Cube catalog 返回的客户展示；
+    # 不能绕过 catalog 直接构造客户，也不能作为客户列表的补充来源。
     tenant_mappings: dict[str, str] = Field(default_factory=dict)
     # 模型简称到管理面真实模型名的映射；同时用于 intent 解析和最终模型清单校验。
     model_aliases: dict[str, str] = Field(default_factory=lambda: {"k3": "Kimi-K3"})
     # 所有只读业务 API 共用的并发上限，避免模型 fan-out 冲击管理面。
     max_concurrency: int = Field(default=8, ge=1, le=32)
+    # 对 429/5xx 和传输错误执行有限指数退避；认证、参数和 4xx 错误不重试。
+    max_retries: int = Field(default=2, ge=0, le=5)
+    retry_backoff_seconds: float = Field(default=0.25, ge=0, le=10)
     # 单个分析接口请求最多覆盖的自然日数；更长范围自动分片。
     max_range_days_per_request: int = Field(default=90, ge=1, le=90)
     # 主周期与对比周期的总查询天数上限。
@@ -106,16 +149,27 @@ class MagikCubeToolConfig(Base):
     # 防止候选日志无界增长。
     intent_candidate_max_entries: int = Field(default=10_000, ge=100, le=100_000)
 
-
-class MagikCubeApiError(RuntimeError):
+class MagikCubeApiError(ReportFailureError):
     """Raised when the Magik Cube API returns an unsuccessful response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: ReportFailureCode = "upstream_failed",
+    ) -> None:
+        super().__init__(message, failure_code=failure_code)
+
+
+class MagikCubeTenantResolutionError(MagikCubeApiError):
+    """Raised when a user selection cannot resolve to exactly one catalog tenant."""
 
 
 # 密码登录唯一允许的路径。登录是唯一一个非 api_prefix 下的 POST 请求。
 _PASSWORD_LOGIN_PATH = "token-api/v1/accounts/login/with-password"
 _REPORT_TIMEZONE = "Asia/Shanghai"
 # 业务 API 的最小权限边界：只允许日报所需的查询和分析接口，禁止写入、删除和任意路径访问。
-_READ_ONLY_ROUTES = frozenset(
+_ADMIN_READ_ONLY_ROUTES = frozenset(
     {
         ("GET", "clusters"),
         ("GET", "gateway/proxy-configs"),
@@ -125,6 +179,12 @@ _READ_ONLY_ROUTES = frozenset(
         ("GET", "tenants"),
         ("POST", "analysis/active-tenant-daily-usage/query"),
         ("POST", "analysis/endpoint-max-tpm/daily/query"),
+        ("POST", "analysis/token-utilization/query"),
+        ("POST", "analysis/token-utilization/daily/query"),
+        ("POST", "analysis/model-token-utilization/daily/query"),
+        ("POST", "analysis/performance-endpoints/query"),
+        ("POST", "analysis/endpoint-tpm-trend/query"),
+        ("POST", "analysis/model-performance/query"),
         ("POST", "analysis/model-machine-usage/query"),
         ("POST", "quota-changes/list"),
     }
@@ -184,7 +244,10 @@ class MagikCubeClient:
         # 兼容后端常见的 camelCase 和 snake_case 两种 token 字段命名。
         token = _pick(data, "accessToken", "access_token", default="")
         if not token:
-            raise MagikCubeApiError("password login succeeded but returned no access token")
+            raise MagikCubeApiError(
+                "password login succeeded but returned no access token",
+                failure_code="auth_failed",
+            )
         self._client.headers["Authorization"] = f"Bearer {token}"
 
     async def request(
@@ -198,29 +261,66 @@ class MagikCubeClient:
         # 所有业务请求先过 allowlist，再拼接 api prefix；因此上层 reporter 不能越权调用写接口。
         normalized_method = method.upper()
         normalized_path = path.strip("/")
-        if (normalized_method, normalized_path) not in _READ_ONLY_ROUTES:
+        allowed_routes = (
+            _TOKEN_API_READ_ONLY_ROUTES
+            if isinstance(self._config, MagikCubeTokenApiConfig)
+            else _ADMIN_READ_ONLY_ROUTES
+        )
+        if (normalized_method, normalized_path) not in allowed_routes:
             raise MagikCubeApiError(
                 f"blocked non-allowlisted Magik Cube API request: "
                 f"{normalized_method} /{normalized_path}"
             )
         api_path = "/".join(part for part in (self._api_prefix, normalized_path) if part)
         started = time_module.perf_counter()
+        response: httpx.Response | None = None
         try:
             async with self._semaphore:
-                response = await self._client.request(
-                    normalized_method,
-                    api_path,
-                    params=params,
-                    json=json_body,
-                    follow_redirects=False,
-                )
+                for attempt in range(self._config.max_retries + 1):
+                    try:
+                        response = await self._client.request(
+                            normalized_method,
+                            api_path,
+                            params=params,
+                            json=json_body,
+                            follow_redirects=False,
+                        )
+                    except httpx.HTTPError:
+                        if attempt >= self._config.max_retries:
+                            raise
+                        await asyncio.sleep(
+                            self._config.retry_backoff_seconds * (2**attempt)
+                        )
+                        continue
+                    if response.status_code == 429:
+                        self.rate_limit_errors += 1
+                    elif response.status_code >= 500:
+                        self.server_errors += 1
+                    if (
+                        response.status_code == 429 or response.status_code >= 500
+                    ) and attempt < self._config.max_retries:
+                        retry_after = response.headers.get("Retry-After")
+                        try:
+                            retry_delay = float(retry_after) if retry_after else 0.0
+                        except ValueError:
+                            retry_delay = 0.0
+                        await asyncio.sleep(
+                            max(
+                                retry_delay,
+                                self._config.retry_backoff_seconds * (2**attempt),
+                            )
+                        )
+                        await response.aclose()
+                        continue
+                    break
         finally:
             self.route_counts[normalized_path] = self.route_counts.get(normalized_path, 0) + 1
             self.request_seconds += time_module.perf_counter() - started
-        if response.status_code == 429:
-            self.rate_limit_errors += 1
-        elif response.status_code >= 500:
-            self.server_errors += 1
+        if response is None:
+            raise MagikCubeApiError(
+                f"{method} {path} returned no response",
+                failure_code="connection_failed",
+            )
         # 统一处理 HTTP 层和业务 code 层错误，让 reporter 只需处理 MagikCubeApiError。
         return self._decode_response(method, path, response)
 
@@ -232,21 +332,45 @@ class MagikCubeClient:
         try:
             payload = response.json()
         except ValueError as exc:
+            failure_code: ReportFailureCode = (
+                "auth_failed"
+                if response.status_code in {401, 403}
+                else "rate_limited"
+                if response.status_code == 429
+                else "upstream_failed"
+            )
             raise MagikCubeApiError(
-                f"{method} {path} returned non-JSON HTTP {response.status_code}"
+                f"{method} {path} returned non-JSON HTTP {response.status_code}",
+                failure_code=failure_code,
             ) from exc
         if response.is_error:
             message = payload.get("message") if isinstance(payload, dict) else None
+            if response.status_code in {401, 403}:
+                failure_code: ReportFailureCode = "auth_failed"
+            elif response.status_code == 429:
+                failure_code = "rate_limited"
+            else:
+                failure_code = "upstream_failed"
             raise MagikCubeApiError(
-                f"{method} {path} failed with HTTP {response.status_code}: {message or 'unknown error'}"
+                f"{method} {path} failed with HTTP {response.status_code}: {message or 'unknown error'}",
+                failure_code=failure_code,
             )
         if not isinstance(payload, dict):
             raise MagikCubeApiError(f"{method} {path} returned an invalid response")
         if "code" in payload:
             code = payload.get("code")
             if code not in (0, 200, "0", "200", "OK"):
+                normalized_code = str(code).strip()
+                failure_code = (
+                    "auth_failed"
+                    if normalized_code in {"401", "403"}
+                    else "rate_limited"
+                    if normalized_code == "429"
+                    else "upstream_failed"
+                )
                 raise MagikCubeApiError(
-                    f"{method} {path} failed: {payload.get('message') or payload.get('reason') or code}"
+                    f"{method} {path} failed: {payload.get('message') or payload.get('reason') or code}",
+                    failure_code=failure_code,
                 )
             data = payload.get("data")
             # data 不是 object 时按空字典处理，避免上层对 None 做大量防御；列表型结果通常包在 list 字段内。
@@ -262,6 +386,58 @@ class _Tenant:
     name: str
     # 保留后端 tags，便于租户识别和后续扩展查询匹配。
     tags: tuple[str, ...] = ()
+
+
+_TenantT = TypeVar("_TenantT")
+
+
+def _match_catalog_tenants(
+    catalog: list[_TenantT],
+    query: str,
+    tenant_mappings: dict[str, str],
+) -> list[_TenantT]:
+    """Match a catalog deterministically without constructing local tenants."""
+
+    normalized = _normalize_tenant_query(query)
+    if not normalized:
+        return []
+
+    tenant_ids = [
+        item
+        for item in catalog
+        if _normalize_tenant_query(str(getattr(item, "tenant_id", ""))) == normalized
+    ]
+    if tenant_ids:
+        return tenant_ids
+
+    alias_targets = {
+        tenant_id
+        for alias, tenant_id in tenant_mappings.items()
+        if _normalize_tenant_query(alias) == normalized
+    }
+    aliases = [
+        item
+        for item in catalog
+        if str(getattr(item, "tenant_id", "")) in alias_targets
+    ]
+    if aliases:
+        return aliases
+
+    exact: list[_TenantT] = []
+    partial: list[_TenantT] = []
+    for item in catalog:
+        values = [
+            _normalize_tenant_query(str(getattr(item, "name", ""))),
+            *(
+                _normalize_tenant_query(str(tag))
+                for tag in getattr(item, "tags", ())
+            ),
+        ]
+        if normalized in values:
+            exact.append(item)
+        elif any(normalized in value for value in values if value):
+            partial.append(item)
+    return exact or partial
 
 
 @dataclass
@@ -345,6 +521,18 @@ def _pick(obj: dict[str, Any], *names: str, default: Any = None) -> Any:
 def _as_int(value: Any) -> int:
     """把数字、数字字符串或空值归一化为 int；异常值按 0 处理以保证单租户报告可继续。"""
 
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return 0
+        try:
+            return int(value, 10)
+        except ValueError:
+            pass
     try:
         return int(float(value or 0))
     except (TypeError, ValueError):
@@ -590,7 +778,7 @@ class MagikCubeReporter:
     def __init__(
         self,
         client: Any,
-        config: MagikCubeToolConfig,
+        config: MagikCubeToolConfig | MagikCubeTokenApiConfig,
         snapshot_path: Path,
         timezone: str,
         cache: _MagikCubeCache | None = None,
@@ -685,7 +873,7 @@ class MagikCubeReporter:
         """Generate a deterministic range report without any LLM calculation."""
 
         tenants = (
-            await self._list_matching_tenants(tenant_query)
+            [await self._require_single_tenant(tenant_query)]
             if tenant_query
             else await self._list_key_accounts()
         )
@@ -731,12 +919,21 @@ class MagikCubeReporter:
             include_tpm=include_tpm,
         )
 
-    def _tenant_query_value(self, tenant: _Tenant) -> str:
-        """Prefer a configured alias so interactive callbacks never expose tenant IDs."""
+    def _tenant_display_label(self, tenant: _Tenant) -> str:
+        """Show API catalog identity, optionally with an alias bound to that same ID."""
 
-        for alias, tenant_id in self._config.tenant_mappings.items():
-            if tenant_id == tenant.tenant_id:
-                return alias
+        alias = next(
+            (
+                value
+                for value, tenant_id in self._config.tenant_mappings.items()
+                if tenant_id == tenant.tenant_id
+            ),
+            "",
+        )
+        if alias and _normalize_tenant_query(alias) != _normalize_tenant_query(tenant.name):
+            return f"{alias}（{tenant.name}）"
+        if tenant.tags:
+            return f"{tenant.name}（{'、'.join(tenant.tags[:3])}）"
         return tenant.name
 
     @staticmethod
@@ -773,7 +970,7 @@ class MagikCubeReporter:
         """Return a channel-agnostic customer/model-scope selection card."""
 
         tenants = (
-            await self._list_matching_tenants(tenant_query)
+            [await self._require_single_tenant(tenant_query)]
             if tenant_query
             else await self._list_key_accounts()
         )
@@ -781,8 +978,10 @@ class MagikCubeReporter:
             raise MagikCubeApiError(f"未找到匹配客户：{tenant_query or '大客户'}")
         options = [
             {
-                "value": self._tenant_query_value(tenant),
-                "label": tenant.name,
+                # The callback stores the API identity. Labels may use a safe
+                # alias, but every selectable customer must originate from Cube.
+                "value": tenant.tenant_id,
+                "label": self._tenant_display_label(tenant),
                 "selected": bool(tenant_query),
             }
             for tenant in tenants[: self._config.max_report_items]
@@ -826,10 +1025,7 @@ class MagikCubeReporter:
         tenant_models: list[dict[str, Any]] = []
         for selection in selections:
             query = str(selection.get("tenant_query") or "").strip()
-            tenants = await self._list_matching_tenants(query)
-            if len(tenants) != 1:
-                raise MagikCubeApiError(f"客户必须精确匹配一个租户：{query}")
-            tenant = tenants[0]
+            tenant = await self._require_single_tenant(query)
             models = await self._list_tenant_models(tenant)
             tenant_models.append(
                 {
@@ -875,10 +1071,7 @@ class MagikCubeReporter:
             async with tenant_semaphore:
                 query = str(selection.get("tenant_query") or "").strip()
                 scope = str(selection.get("model_scope") or "summary")
-                tenants = await self._list_matching_tenants(query)
-                if len(tenants) != 1:
-                    raise MagikCubeApiError(f"客户必须精确匹配一个租户：{query}")
-                tenant = tenants[0]
+                tenant = await self._require_single_tenant(query)
                 model_names: list[str] = []
                 if scope in {"all", "selected"}:
                     available = await self._list_tenant_models(tenant)
@@ -933,14 +1126,17 @@ class MagikCubeReporter:
         cards: list[dict[str, Any]] = []
         for selection, result in zip(selections, loaded, strict=True):
             if isinstance(result, BaseException):
+                failure_code = classify_report_failure(result)
                 logger.warning(
-                    "Magik Cube matrix tenant query failed: error_type={}",
+                    "Magik Cube matrix tenant query failed: error_type={} failure_code={}",
                     type(result).__name__,
+                    failure_code,
                 )
                 cards.append(
                     self._build_matrix_error_card(
                         plan,
                         str(selection.get("tenant_query") or "未命名客户").strip(),
+                        failure_code,
                     )
                 )
                 continue
@@ -994,19 +1190,29 @@ class MagikCubeReporter:
         return ToolResult(fallback, metadata={OUTBOUND_META_AGENT_UI: ui})
 
     @staticmethod
-    def _build_matrix_error_card(plan: _ComparisonPlan, tenant_query: str) -> dict[str, Any]:
+    def _build_matrix_error_card(
+        plan: _ComparisonPlan,
+        tenant_query: str,
+        failure_code: ReportFailureCode,
+    ) -> dict[str, Any]:
         """Represent one failed tenant explicitly without aborting sibling reports."""
 
         title = f"{tenant_query or '未命名客户'} 报表失败"
-        quality = "数据不完整：该客户查询失败，未将缺失数据按零处理"
+        message = report_failure_message(failure_code)
+        retry_hint = (
+            "请稍后重试"
+            if failure_code in {"connection_failed", "rate_limited", "upstream_failed"}
+            else "请重新选择 Cube 客户"
+        )
+        quality = f"数据质量：missing｜{message}；未将缺失数据按零处理"
         fallback = f"{title}｜{_window_label(plan.primary)}\n{quality}"
         return {
             "title": title,
             "subtitle": f"{_window_label(plan.primary)}｜Asia/Shanghai",
-            "overview": ["本客户未生成任何业务数值"],
-            "segments": ["查询失败"],
+            "overview": [message],
+            "segments": ["本次未生成统计结果"],
             "table": None,
-            "insights": ["请核对客户选择或稍后重试"],
+            "insights": [retry_hint],
             "quality": quality,
             "fallback_text": fallback,
         }
@@ -1080,6 +1286,14 @@ class MagikCubeReporter:
         current = self._period_stats(summary, plan.primary)
         baseline = self._period_stats(summary, plan.comparison) if plan.comparison else None
         pairs = self._segment_pairs(plan, granularity)
+        current_has_samples = any(
+            plan.primary.contains(day)
+            for values in (summary.tokens, summary.requests, summary.max_tpm)
+            for day in values
+        )
+        no_business_data = (
+            summary.token_complete and summary.tpm_complete and not current_has_samples
+        )
         period_change = (
             _format_delta(current.tokens, baseline.tokens) if baseline else "无对比周期"
         )
@@ -1181,10 +1395,13 @@ class MagikCubeReporter:
             if not self._warnings and summary.token_complete and summary.tpm_complete
             else "数据不完整：" + "；".join(self._warnings[:5] or ["部分查询失败"])
         )
+        if no_business_data:
+            overview = [report_failure_message("no_business_data")]
+            quality += "｜查询已成功，未返回当前周期业务记录"
         if model_scope == "all":
             quality += f"｜已隐藏 {hidden_zero_models} 个两期均为 0 的模型"
         table = None
-        if model_scope != "summary":
+        if model_scope != "summary" and not no_business_data:
             columns = [
                 {"name": "model", "display_name": "模型", "data_type": "text"},
                 {"name": "total", "display_name": "周期总量 / 占比", "data_type": "text"},
@@ -1200,6 +1417,10 @@ class MagikCubeReporter:
                 "rows": rows,
             }
         daily_lines = self._segment_lines(summary, pairs)
+        if no_business_data:
+            daily_lines = ["当前周期暂无业务记录"]
+            insights = ["查询成功，当前周期没有可用于统计的业务样本"]
+            rows = []
         fallback_lines = [
             f"{tenant.name} {kind}｜{_window_label(plan.primary)}",
             *overview,
@@ -1308,25 +1529,24 @@ class MagikCubeReporter:
         return tenants
 
     async def _list_matching_tenants(self, query: str) -> list[_Tenant]:
-        """先命中本地 alias 映射，再对 API 返回的租户名称做精确/部分匹配。"""
+        """只在 Cube catalog 内按 ID、名称或 tags 匹配客户。"""
 
-        normalized = _normalize_tenant_query(query)
-        # alias 命中后直接使用配置的 tenant ID，避免名称变更或 API 分页导致查询不稳定。
-        for alias, tenant_id in self._config.tenant_mappings.items():
-            if _normalize_tenant_query(alias) == normalized:
-                return [_Tenant(tenant_id=tenant_id, name=alias)]
-        exact: list[_Tenant] = []
-        partial: list[_Tenant] = []
-        # 名称和 tags 都参与匹配；精确命中优先于部分命中。
-        for tenant in await self._list_all_tenants():
-            values = [_normalize_tenant_query(tenant.name)] + [
-                _normalize_tenant_query(tag) for tag in tenant.tags
-            ]
-            if normalized in values:
-                exact.append(tenant)
-            elif any(normalized in value for value in values):
-                partial.append(tenant)
-        return (exact or partial)[: self._config.max_report_items]
+        catalog = await self._list_all_tenants()
+        return _match_catalog_tenants(catalog, query, self._config.tenant_mappings)
+
+    async def _require_single_tenant(self, query: str) -> _Tenant:
+        matches = await self._list_matching_tenants(query)
+        if not matches:
+            raise MagikCubeTenantResolutionError(
+                f"Cube tenant was not found: {query}",
+                failure_code="tenant_not_found",
+            )
+        if len(matches) > 1:
+            raise MagikCubeTenantResolutionError(
+                f"Cube tenant selection was ambiguous: {query}",
+                failure_code="tenant_ambiguous",
+            )
+        return matches[0]
 
     def _day_bounds(self, day: date) -> tuple[str, str]:
         """按配置时区生成左闭右开的一天边界，供 API 查询使用。"""
@@ -1349,7 +1569,9 @@ class MagikCubeReporter:
                 label=f"{tenant.name} 模型清单",
             )
         except Exception as exc:
-            self._warnings.append(f"{tenant.name} 模型清单获取失败：{exc}")
+            self._warnings.append(
+                f"{tenant.name} 模型清单获取失败：{report_failure_message(exc)}"
+            )
             return []
         models = sorted(
             {
@@ -1429,7 +1651,8 @@ class MagikCubeReporter:
             except Exception as exc:
                 target = f" / {model}" if model else ""
                 self._warnings.append(
-                    f"{tenant.name}{target} Token/请求数 {_window_label(window)} 获取失败：{exc}"
+                    f"{tenant.name}{target} Token/请求数 {_window_label(window)} 获取失败："
+                    f"{report_failure_message(exc)}"
                 )
                 return {}, {}, False
 
@@ -1468,7 +1691,8 @@ class MagikCubeReporter:
             except Exception as exc:
                 target = f" / {model}" if model else ""
                 self._warnings.append(
-                    f"{tenant.name}{target} TPM {_window_label(window)} 获取失败：{exc}"
+                    f"{tenant.name}{target} TPM {_window_label(window)} 获取失败："
+                    f"{report_failure_message(exc)}"
                 )
                 return {}, {}, False
 
@@ -2111,6 +2335,18 @@ _REPORT_SELECTION_SCHEMA = ObjectSchema(
     additional_properties=False,
 )
 
+# User TokenAPI routes remain separated from the internal Admin allowlist.
+_TOKEN_API_READ_ONLY_ROUTES = frozenset(
+    {
+        ("GET", "usages/token"),
+        ("GET", "monthly_bills"),
+        ("GET", "bills"),
+        ("GET", "bills/details"),
+        ("GET", "wallets/balance"),
+        ("GET", "wallets/transactions"),
+    }
+)
+
 
 # 暴露给 LLM 的参数契约。全部参数可选：默认查询 agent 时区下的昨天，并生成完整日报。
 _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
@@ -2125,7 +2361,7 @@ _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
         ),
     ),
     tenant_query=StringSchema(
-        "Optional tenant name or tenant tag, such as 佛跳墙 or tencent_token_hub."
+        "Optional Cube catalog tenant ID, tenant name, or tenant tag."
     ),
     model=StringSchema("Optional exact model filter, such as GLM-5.2."),
     start_date=StringSchema("Primary inclusive start date in YYYY-MM-DD."),
@@ -2672,7 +2908,9 @@ class MagikCubeDailyReportTool(Tool):
                     )
                 return await reporter.generate(target_date, save_snapshot=save_snapshot)
         except (MagikCubeApiError, httpx.HTTPError) as exc:
-            return ToolResult.error(f"Error: failed to generate Magik Cube report: {exc}")
+            return ToolResult.error(
+                f"Error: failed to generate Magik Cube report: {report_failure_message(exc)}"
+            )
         finally:
             elapsed_ms = (time_module.perf_counter() - started) * 1000
             logger.info(

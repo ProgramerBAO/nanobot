@@ -1538,6 +1538,24 @@ class AgentLoop:
         direct_raw = metadata.get("direct_request_text")
         if not isinstance(direct_raw, str) or not direct_raw.strip():
             direct_raw = raw
+        # Fixed Cube requests should use the unified report runner. Keep the
+        # legacy matcher available for compatibility callers and old tests.
+        if result is None and direct is None:
+            report_center = self.tools.get("report_center")
+            if report_center is not None and getattr(
+                report_center, "fixed_cube_reports_enabled", False
+            ):
+                report_params = report_center.match_direct_request(direct_raw)
+                if report_params is not None:
+                    direct = ("report_center", report_params)
+            elif report_center is not None:
+                # In minimal/legacy deployments the center has no real Cube
+                # connector; preserve an explicitly registered compatibility Tool.
+                legacy_tool = self.tools.get("magik_cube_daily_report")
+                if legacy_tool is not None:
+                    legacy_params = legacy_tool.match_direct_request(direct_raw)
+                    if legacy_params is not None:
+                        direct = ("magik_cube_daily_report", legacy_params)
         if result is None and direct is None:
             direct = await self.tools.resolve_direct_request(
                 direct_raw,

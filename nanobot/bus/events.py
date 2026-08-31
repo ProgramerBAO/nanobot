@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 # render it and other channels may ignore unknown keys.
 OUTBOUND_META_AGENT_UI = "_agent_ui"
 
+# Internal report-delivery state. Channels must never render this metadata.
+OUTBOUND_META_REPORT_DELIVERY = "_report_delivery"
+
 # Trusted in-process channels may use this to resume a validated, read-only
 # tool interaction without routing the callback payload through the LLM.
 INBOUND_META_DIRECT_TOOL = "_direct_tool_request"

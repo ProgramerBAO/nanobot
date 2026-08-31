@@ -8,12 +8,16 @@ REPORT_TEMPLATE_LABELS = {
     "usage_daily_matrix": "日报",
     "usage_weekly_matrix": "周报",
     "usage_monthly_matrix": "月报",
+    "health_sre": "Cube 健康报告",
+    "cost_account": "Cube 成本与账户报表",
 }
 
 REPORT_DATA_PERIODS = {
     "usage_daily_matrix": "前一自然日，对比前两日",
     "usage_weekly_matrix": "上周，对比上上周",
     "usage_monthly_matrix": "上月，对比前一自然月",
+    "health_sre": "发送时生成平台级健康日/周趋势",
+    "cost_account": "上月账单归属月，对比前一自然月；余额为发送时快照",
 }
 
 _WEEKDAY_LABELS = {

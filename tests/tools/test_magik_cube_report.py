@@ -21,6 +21,7 @@ from nanobot.agent.tools.magik_cube import (
     _Tenant,
 )
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI
+from nanobot.utils.report_failures import classify_report_failure
 
 
 class _FakeClient:
@@ -262,6 +263,61 @@ async def test_client_rejects_business_error() -> None:
 
 
 @pytest.mark.parametrize(
+    ("status_code", "expected_code", "expected_calls"),
+    [
+        (401, "auth_failed", 1),
+        (403, "auth_failed", 1),
+        (429, "rate_limited", 3),
+        (500, "upstream_failed", 3),
+    ],
+)
+async def test_client_classifies_http_failures_and_retries_only_transient_statuses(
+    status_code: int,
+    expected_code: str,
+    expected_calls: int,
+) -> None:
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status_code, json={"message": "fixture upstream detail"})
+
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        max_retries=2,
+        retry_backoff_seconds=0,
+    )
+    async with MagikCubeClient(config, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(MagikCubeApiError) as exc_info:
+            await client.request("GET", "tenants")
+
+    assert exc_info.value.failure_code == expected_code
+    assert calls == expected_calls
+
+
+async def test_client_retries_transport_errors_and_classifies_connection_failure() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("fixture secret detail", request=request)
+
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        max_retries=2,
+        retry_backoff_seconds=0,
+    )
+    async with MagikCubeClient(config, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.ConnectError) as exc_info:
+            await client.request("GET", "tenants")
+
+    assert classify_report_failure(exc_info.value) == "connection_failed"
+    assert calls == 3
+
+
+@pytest.mark.parametrize(
     ("method", "path"),
     [
         ("POST", "tenants"),
@@ -337,7 +393,7 @@ async def test_focused_usage_uses_tenant_mapping_and_passes_model(tmp_path: Path
     assert "客户=佛跳墙用户，模型=GLM-5.2" in report
     assert "匹配 1 个租户｜Token 合计 100｜最高峰值 TPM 20" in report
     assert "佛跳墙" in report
-    assert "tenants" not in client.paths
+    assert client.paths[0] == "tenants"
     assert all(body["tenantId"] == "prod" for body in client.bodies)
     assert all(body["model"] == "GLM-5.2" for body in client.bodies)
 
@@ -466,6 +522,8 @@ class _FilteringRangeClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if path == "tenants":
+            return {"list": [{"tenantId": "prod", "tenantName": "生产客户"}], "total": 1}
         assert params is None
         assert json_body is not None
         self.bodies.append(json_body)
@@ -526,6 +584,9 @@ class _PartialFailureClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if path == "tenants":
+            assert json_body is None
+            return {"list": [{"tenantId": "prod", "tenantName": "生产客户"}], "total": 1}
         assert params is None
         assert json_body is not None
         if path == "analysis/active-tenant-daily-usage/query":
@@ -566,6 +627,8 @@ class _DeterministicReportClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if path == "tenants":
+            return {"list": [{"tenantId": "prod", "tenantName": "生产客户"}], "total": 1}
         if path == "inference/model-configs":
             self.model_list_calls += 1
             return {
@@ -665,7 +728,7 @@ async def test_selected_model_alias_resolves_to_configured_model(tmp_path: Path)
     )
 
     card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
-    assert card["title"] == "测试租户 周报"
+    assert card["title"] == "生产客户 周报"
     assert [row["model"] for row in card["table"]["rows"]] == ["MODEL-A"]
 
 
@@ -764,11 +827,102 @@ async def test_matrix_report_isolates_one_tenant_failure(tmp_path: Path) -> None
 
     cards = result.metadata[OUTBOUND_META_AGENT_UI]["cards"]
     assert len(cards) == 2
-    assert cards[0]["title"] == "测试租户 周报"
+    assert cards[0]["title"] == "生产客户 周报"
     assert cards[1]["title"] == "不存在客户 报表失败"
+    assert cards[1]["overview"] == ["客户标识已失效，请重新选择客户"]
+    assert "本客户未生成任何业务数值" not in str(result)
     assert "未将缺失数据按零处理" in cards[1]["quality"]
     assert "不存在客户 报表失败" in result
     assert "未将缺失数据按零处理" in result
+
+
+async def test_matrix_report_resolves_selector_tenant_id_before_names_and_tags(
+    tmp_path: Path,
+) -> None:
+    reporter = MagikCubeReporter(
+        _FocusedUsageClient(),
+        MagikCubeToolConfig(
+            base_url="https://cube.example",
+            tenant_mappings={"佛跳墙生产": "prod"},
+        ),
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [{"tenant_query": "prod", "model_scope": "summary", "models": []}],
+        granularity="day",
+        include_tpm=True,
+    )
+
+    card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
+    assert card["title"] == "customer_prod 周报"
+    assert "报表失败" not in card["title"]
+
+
+async def test_matrix_report_rejects_ambiguous_tag_without_guessing_customer(
+    tmp_path: Path,
+) -> None:
+    reporter = MagikCubeReporter(
+        _FocusedUsageClient(),
+        MagikCubeToolConfig(base_url="https://cube.example"),
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [{"tenant_query": "佛跳墙", "model_scope": "summary", "models": []}],
+        granularity="day",
+        include_tpm=False,
+    )
+
+    card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
+    assert card["overview"] == ["匹配到多个客户，请从列表中精确选择"]
+    assert "本客户未生成任何业务数值" not in str(result)
+
+
+async def test_matrix_report_labels_successful_empty_response_as_no_business_data(
+    tmp_path: Path,
+) -> None:
+    class _EmptyClient:
+        async def request(self, _method, path, *, params=None, json_body=None):
+            if path == "tenants":
+                return {
+                    "list": [{"tenantId": "tenant-a", "tenantName": "客户A"}],
+                    "total": 1,
+                }
+            if path == "analysis/active-tenant-daily-usage/query":
+                return {"items": []}
+            raise AssertionError((path, params, json_body))
+
+    reporter = MagikCubeReporter(
+        _EmptyClient(),
+        MagikCubeToolConfig(base_url="https://cube.example"),
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    result = await reporter.generate_matrix_report(
+        plan,
+        [{"tenant_query": "tenant-a", "model_scope": "summary", "models": []}],
+        granularity="day",
+        include_tpm=False,
+    )
+
+    card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
+    assert card["overview"] == ["查询成功，当前周期暂无业务数据"]
+    assert "查询已成功" in card["quality"]
 
 
 async def test_interactive_forms_collect_scope_then_models(tmp_path: Path) -> None:
@@ -787,7 +941,8 @@ async def test_interactive_forms_collect_scope_then_models(tmp_path: Path) -> No
     )
     scope_ui = scope.metadata[OUTBOUND_META_AGENT_UI]
     assert scope_ui["phase"] == "scope"
-    assert scope_ui["tenant_options"][0]["value"] == "测试租户"
+    assert scope_ui["tenant_options"][0]["value"] == "prod"
+    assert scope_ui["tenant_options"][0]["label"] == "测试租户（生产客户）"
     assert scope_ui["tenant_options"][0]["selected"] is True
 
     models = await reporter.prepare_model_interaction(
@@ -817,6 +972,28 @@ def test_direct_route_supports_weekly_model_slug_and_bypasses_deep_analysis(
     assert params["comparison"] == "previous_period"
     assert date.fromisoformat(params["end_date"]) - date.fromisoformat(params["start_date"]) == timedelta(days=6)
     assert tool.match_direct_request("深度分析上周和上上周各模型用量") is None
+
+
+async def test_scope_selector_uses_only_cube_catalog_entries(tmp_path: Path) -> None:
+    reporter = MagikCubeReporter(
+        _FakeClient(),
+        MagikCubeToolConfig(
+            base_url="https://cube.example",
+            tenant_mappings={"甲方别名": "t1", "佛跳墙": "tencent_token_hub"},
+        ),
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+    )
+    plan = _plan_comparison_windows(
+        date(2026, 8, 8), date(2026, 8, 14), comparison="previous_period"
+    )
+
+    scope = await reporter.prepare_scope_interaction(
+        plan, tenant_query="", granularity="day", include_tpm=True
+    )
+    options = scope.metadata[OUTBOUND_META_AGENT_UI]["tenant_options"]
+
+    assert options == [{"value": "t1", "label": "甲方别名（甲客户）", "selected": False}]
 
 
 def test_direct_route_uses_cards_only_to_fill_missing_slots(tmp_path: Path) -> None:

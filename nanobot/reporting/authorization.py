@@ -9,6 +9,10 @@ from nanobot.reporting.store import ReportStateStore
 
 
 def template_id_for_magik_params(params: dict[str, Any]) -> str:
+    if str(params.get("report_family") or "") == "cost":
+        return "cost_account"
+    if str(params.get("report_family") or "") == "health":
+        return "health_sre"
     if str(params.get("report_template") or "full") != "matrix_card":
         return "usage_full"
     if str(params.get("granularity") or "day") == "week":
@@ -40,6 +44,8 @@ def authorize_magik_params(
     tenant = str(params.get("tenant_query") or "").strip()
     if tenant:
         checks.append(("tenant", tenant))
+    if params.get("all_tenants") is True:
+        checks.append(("tenant", "*"))
     selections = params.get("report_selections")
     if isinstance(selections, list):
         for selection in selections:

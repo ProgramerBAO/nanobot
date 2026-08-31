@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from nanobot.bus.events import OutboundMessage
+from nanobot.bus.events import OUTBOUND_META_REPORT_DELIVERY, OutboundMessage
 from nanobot.bus.outbound_events import (
     StreamDeltaEvent,
     StreamedResponseEvent,
@@ -38,6 +38,7 @@ from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import ChannelsConfig, Config
 from nanobot.providers.transcription import GroqTranscriptionProvider as _GroqProvider
 from nanobot.providers.transcription import OpenAITranscriptionProvider as _OpenAIProvider
+from nanobot.reporting.store import ReportStateStore
 from nanobot.utils.restart import RestartNotice
 
 # ---------------------------------------------------------------------------
@@ -2771,6 +2772,123 @@ async def test_send_with_retry_retries_on_failure():
 
     assert call_count == 3  # 3 total attempts (initial + 2 retries)
     assert mock_sleep.call_count == 2  # 2 sleeps between retries
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_records_report_delivery_without_changing_data_quality(
+    tmp_path: Path,
+):
+    attempts = 0
+
+    class _EventuallySuccessfulChannel(BaseChannel):
+        name = "report"
+        display_name = "Report"
+
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        async def send(self, _msg: OutboundMessage) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("simulated delivery failure")
+
+    store = ReportStateStore(tmp_path / "state.db")
+    assert store.claim_delivery("delivery-a") is True
+    fake_config = SimpleNamespace(
+        channels=ChannelsConfig(send_max_retries=3),
+        providers=SimpleNamespace(groq=SimpleNamespace(api_key="")),
+    )
+    manager = ChannelManager.__new__(ChannelManager)
+    manager.config = fake_config
+    manager.bus = MessageBus()
+    manager.channels = {"report": _EventuallySuccessfulChannel(fake_config, manager.bus)}
+    manager._dispatch_task = None
+    manager._report_state_store = store
+    message = OutboundMessage(
+        channel="report",
+        chat_id="123",
+        content="missing report remains missing",
+        metadata={
+            "quality": "missing",
+            OUTBOUND_META_REPORT_DELIVERY: {"idempotency_key": "delivery-a"},
+        },
+    )
+
+    with patch("nanobot.channels.manager.asyncio.sleep", new_callable=AsyncMock):
+        await manager._send_with_retry(manager.channels["report"], message)
+
+    with store._lock, store._connect() as db:
+        delivery = db.execute(
+            "SELECT status FROM report_deliveries WHERE idempotency_key=?",
+            ("delivery-a",),
+        ).fetchone()
+        records = db.execute(
+            "SELECT attempt, status, error_type FROM report_delivery_attempts "
+            "WHERE idempotency_key=? ORDER BY attempt",
+            ("delivery-a",),
+        ).fetchall()
+
+    assert attempts == 2
+    assert delivery["status"] == "ok"
+    assert [tuple(row) for row in records] == [
+        (1, "error", "delivery_failed"),
+        (2, "ok", ""),
+    ]
+    assert message.metadata["quality"] == "missing"
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_marks_exhausted_report_delivery_as_failed(tmp_path: Path):
+    class _FailedChannel(BaseChannel):
+        name = "report"
+        display_name = "Report"
+
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        async def send(self, _msg: OutboundMessage) -> None:
+            raise RuntimeError("simulated delivery failure")
+
+    store = ReportStateStore(tmp_path / "state.db")
+    assert store.claim_delivery("delivery-b") is True
+    fake_config = SimpleNamespace(
+        channels=ChannelsConfig(send_max_retries=1),
+        providers=SimpleNamespace(groq=SimpleNamespace(api_key="")),
+    )
+    manager = ChannelManager.__new__(ChannelManager)
+    manager.config = fake_config
+    manager.bus = MessageBus()
+    manager.channels = {"report": _FailedChannel(fake_config, manager.bus)}
+    manager._dispatch_task = None
+    manager._report_state_store = store
+    message = OutboundMessage(
+        channel="report",
+        chat_id="123",
+        content="report",
+        metadata={OUTBOUND_META_REPORT_DELIVERY: {"idempotency_key": "delivery-b"}},
+    )
+
+    await manager._send_with_retry(manager.channels["report"], message)
+
+    with store._lock, store._connect() as db:
+        delivery = db.execute(
+            "SELECT status FROM report_deliveries WHERE idempotency_key=?",
+            ("delivery-b",),
+        ).fetchone()
+        attempt = db.execute(
+            "SELECT status, error_type FROM report_delivery_attempts WHERE idempotency_key=?",
+            ("delivery-b",),
+        ).fetchone()
+
+    assert delivery["status"] == "error"
+    assert tuple(attempt) == ("error", "delivery_failed")
 
 
 @pytest.mark.asyncio

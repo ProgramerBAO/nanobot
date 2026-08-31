@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
+from nanobot.bus.events import OUTBOUND_META_REPORT_DELIVERY, OutboundMessage
 from nanobot.bus.outbound_events import (
     ProgressEvent,
     RetryWaitEvent,
@@ -115,6 +115,7 @@ class ChannelManager:
         self._channel_errors: dict[str, str] = {}
         self._channel_tasks: dict[str, asyncio.Task] = {}
         self._dispatch_task: asyncio.Task | None = None
+        self._report_state_store: Any | None = None
         self._started = False
         self._origin_reply_fingerprints: dict[tuple[str, str, str], str] = {}
 
@@ -797,6 +798,34 @@ class ChannelManager:
         elif not isinstance(event, StreamedResponseEvent):
             await channel.send(msg)
 
+    @staticmethod
+    def _record_report_delivery(
+        store: Any,
+        idempotency_key: str,
+        *,
+        attempt: int,
+        status: str,
+        completed: bool,
+    ) -> None:
+        """Persist delivery state without changing channel retry behavior."""
+
+        try:
+            store.record_delivery_attempt(
+                idempotency_key,
+                part_index=1,
+                attempt=attempt,
+                status=status,
+                error_type="delivery_failed" if status == "error" else "",
+            )
+            if completed:
+                store.complete_delivery(idempotency_key, status=status)
+        except Exception as exc:
+            logger.warning(
+                "Report delivery tracking failed: status={} error_type={}",
+                status,
+                type(exc).__name__,
+            )
+
     def _coalesce_stream_deltas(
         self, first_msg: OutboundMessage
     ) -> tuple[OutboundMessage, list[OutboundMessage]]:
@@ -877,11 +906,44 @@ class ChannelManager:
         """
         max_attempts = max(self.config.channels.send_max_retries, 1)
         attempt = 0
+        delivery = msg.metadata.get(OUTBOUND_META_REPORT_DELIVERY)
+        delivery_key = (
+            str(delivery.get("idempotency_key") or "").strip()
+            if isinstance(delivery, dict)
+            else ""
+        )
+        report_store = None
+        if delivery_key:
+            try:
+                report_store = getattr(self, "_report_state_store", None)
+                if report_store is None:
+                    from nanobot.reporting.store import get_report_state_store
+
+                    reporting = self.config.tools.reporting
+                    report_store = get_report_state_store(
+                        backend=reporting.state_backend,
+                        postgres_dsn_env=reporting.postgres_dsn_env,
+                    )
+                    self._report_state_store = report_store
+            except Exception as exc:
+                logger.warning(
+                    "Report delivery tracking unavailable: error_type={}",
+                    type(exc).__name__,
+                )
+                report_store = None
 
         while True:
             attempt += 1
             try:
                 await self._send_once(channel, msg)
+                if report_store is not None:
+                    self._record_report_delivery(
+                        report_store,
+                        delivery_key,
+                        attempt=attempt,
+                        status="ok",
+                        completed=True,
+                    )
                 return  # Send succeeded
             except asyncio.CancelledError:
                 raise  # Propagate cancellation for graceful shutdown
@@ -892,6 +954,14 @@ class ChannelManager:
                     if deadline is None
                     else loop.time() >= deadline
                 )
+                if report_store is not None:
+                    self._record_report_delivery(
+                        report_store,
+                        delivery_key,
+                        attempt=attempt,
+                        status="error",
+                        completed=exhausted,
+                    )
                 if exhausted:
                     logger.exception(
                         "Failed to send to {} after {} attempts",
@@ -929,6 +999,7 @@ class ChannelManager:
         report_registry = registry or build_default_registry(
             grafana_config=getattr(self.config.tools.reporting, "grafana", None),
             magik_enabled=bool(self.config.tools.magik_cube.enable),
+            cube_config=self.config.tools.magik_cube,
         )
         report_store = store or configured_report_state_store()
         max_attempts = int(getattr(self.config.channels, "send_max_retries", 3) or 3)

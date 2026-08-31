@@ -248,6 +248,94 @@ def test_report_card_contains_one_paginated_table() -> None:
     assert len(tables[0]["rows"]) == 27
 
 
+def test_report_document_health_cards_use_status_theme_kpi_grid_and_table_split() -> None:
+    channel = _channel()
+    ui = {
+        "kind": "report_document",
+        "title": "Cube 健康报告",
+        "subtitle": "平台级聚合 · 固定阈值",
+        "quality": "complete",
+        "context": {
+            "timezone": "Asia/Shanghai",
+            "current_window": {
+                "start": "2026-08-28T10:00:00+08:00",
+                "end": "2026-08-28T10:15:00+08:00",
+            },
+            "baseline_window": {
+                "start": "2026-08-28T09:45:00+08:00",
+                "end": "2026-08-28T10:00:00+08:00",
+            },
+            "sources": [
+                {"system": "Cube Admin", "route": "gateway/usages"},
+            ],
+            "metric_definitions": [
+                {"aggregation": "请求级 P95"},
+            ],
+        },
+        "blocks": [
+            {
+                "kind": "metrics",
+                "data": {
+                    "items": [
+                        {"label": "总体状态", "value": "异常", "change": "异常指标：错误率"},
+                        {"label": "错误率", "value": "6.0%", "change": "+500.0%"},
+                        {"label": "接口延迟", "value": "120 ms", "change": "无对比数据"},
+                    ]
+                },
+            },
+            {
+                "kind": "table",
+                "data": {
+                    "title": "异常 Endpoint TopN",
+                    "columns": [{"tag": "column", "name": "endpoint", "display_name": "Endpoint"}],
+                    "rows": [{"endpoint": "endpoint-a"}],
+                },
+            },
+            {
+                "kind": "table",
+                "data": {
+                    "title": "模型性能 TopN",
+                    "columns": [{"tag": "column", "name": "model", "display_name": "模型"}],
+                    "rows": [{"model": "model-a"}],
+                },
+            },
+            {"kind": "note", "data": {"content": "核心查询接口均返回数据。"}},
+            {
+                "kind": "actions",
+                "data": {"actions": [{"action_id": "health_report", "label": "刷新健康快照"}]},
+            },
+        ],
+    }
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+
+    cards = channel._build_agent_ui_cards(ui, msg)
+
+    assert len(cards) == 2
+    assert all(card["header"]["template"] == "red" for card in cards)
+    assert all(
+        sum(element.get("tag") == "table" for element in card["elements"]) <= 1
+        for card in cards
+    )
+    assert any(element.get("tag") == "column_set" for element in cards[0]["elements"])
+    assert any(element.get("tag") == "action" for element in cards[-1]["elements"])
+    assert all(
+        any(
+            element.get("tag") == "note"
+            and "前一等长窗口" in element["elements"][0]["content"]
+            and "Cube Admin / gateway/usages" in element["elements"][0]["content"]
+            for element in card["elements"]
+        )
+        for card in cards
+    )
+    assert "第 1/2 页" in cards[0]["header"]["title"]["content"]
+    assert "第 2/2 页" in cards[1]["header"]["title"]["content"]
+
+
 def test_report_document_actions_are_opaque_and_owner_bound() -> None:
     channel = _channel()
     ui = {
@@ -288,6 +376,72 @@ def test_report_document_actions_are_opaque_and_owner_bound() -> None:
     _, tool_name, params, _ = channel._schedule_tool_resume.call_args.args
     assert tool_name == "report_center"
     assert params == {"action": "subscriptions"}
+
+
+def test_health_document_actions_route_to_health_report_and_health_subscription() -> None:
+    channel = _channel()
+    health = channel._resolve_report_document_action({"action_id": "health_report"})
+    subscription = channel._resolve_report_document_action(
+        {"action_id": "subscription_setup:health"}
+    )
+
+    assert health == {
+        "tool_name": "report_center",
+        "params": {"action": "health_report", "period": "recent15m"},
+        "content": "生成 Cube 健康报告",
+    }
+    assert subscription == {
+        "tool_name": "report_center",
+        "params": {
+            "action": "subscription_setup",
+            "period": "day",
+            "report_family": "health",
+        },
+        "content": "设置 Cube 健康日报订阅",
+    }
+
+
+def test_period_report_action_routes_to_interactive_scope_selection() -> None:
+    channel = _channel()
+
+    for period in ("day", "week", "month", "recent7"):
+        result = channel._resolve_report_document_action({"action_id": f"generate:{period}"})
+
+        assert result == {
+            "tool_name": "report_center",
+            "params": {
+                "action": "cube_report",
+                "period": period,
+                "interactive": True,
+            },
+            "content": f"生成固定 Cube {period} 报",
+        }
+
+
+def test_health_subscription_form_preserves_report_family_on_submit() -> None:
+    channel = _channel()
+    ui = {
+        "kind": "report_subscription_form",
+        "default_period": "day",
+        "report_params": {"report_family": "health", "subscription_period": "day"},
+    }
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+    card = channel._build_agent_ui_cards(ui, msg)[0]
+    submit = next(_find_tag(card, "button"))
+    channel._schedule_tool_resume = MagicMock(return_value=True)
+
+    response = channel._on_card_action_sync(
+        _action(value=submit["value"], name=submit["name"], form_value={})
+    )
+
+    assert response.toast.type == "success"
+    params = channel._schedule_tool_resume.call_args.args[2]
+    assert params["report_params"]["report_family"] == "health"
 
 
 def test_subscription_form_maps_schedule_server_side_and_is_idempotent() -> None:

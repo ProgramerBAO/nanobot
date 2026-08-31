@@ -1,0 +1,115 @@
+{
+  "usage": {
+    "items": [
+      {
+        "model": "fixture-model",
+        "endpoint": "fixture-endpoint",
+        "points": [
+          {
+            "date": "2026-08-27",
+            "totalTokens": "9007199254740993",
+            "requestCount": "12"
+          }
+        ]
+      }
+    ]
+  },
+  "tpm": {
+    "items": [
+      {
+        "model": "fixture-model",
+        "endpoint": "fixture-endpoint",
+        "points": [
+          {
+            "date": "2026-08-27",
+            "maxTpm": "2400"
+          }
+        ]
+      }
+    ]
+  },
+  "health": {
+    "performance_endpoints": {
+      "items": [
+        {
+          "endpoint": "fixture-endpoint",
+          "model": "fixture-model",
+          "tpm": "10000"
+        }
+      ]
+    },
+    "model_performance": {
+      "series": [
+        {
+          "endpoint": "fixture-endpoint",
+          "model": "fixture-model",
+          "points": [
+            {
+              "timestamp": "2026-08-28T10:00:00+08:00",
+              "value": 0.01
+            }
+          ]
+        }
+      ]
+    },
+    "token_utilization": {
+      "items": [
+        {
+          "endpoint": "fixture-endpoint",
+          "model": "fixture-model",
+          "actualTokens": "1200",
+          "tpmLimit": "10000",
+          "utilizationRate": 0.12
+        }
+      ]
+    },
+    "daily_token_utilization": {
+      "items": [
+        {
+          "endpoint": "fixture-endpoint",
+          "model": "fixture-model",
+          "actualTokens": "1200",
+          "tpmLimit": "10000",
+          "utilizationRate": 0.12
+        }
+      ]
+    },
+    "endpoint_tpm_trend": {
+      "items": [
+        {
+          "endpoint": "fixture-endpoint",
+          "model": "fixture-model",
+          "points": [
+            {
+              "date": "2026-08-27",
+              "maxTpm": "2400"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "gateway_usages": {
+    "total": "3",
+    "list": [
+      {
+        "stream": true,
+        "streamDone": true,
+        "respCode": 200,
+        "ttft": 120
+      },
+      {
+        "stream": true,
+        "streamDone": true,
+        "respCode": 200,
+        "ttft": 180
+      },
+      {
+        "stream": false,
+        "streamDone": true,
+        "respCode": 200,
+        "ttft": 9000
+      }
+    ]
+  }
+}

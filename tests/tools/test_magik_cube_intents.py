@@ -74,6 +74,8 @@ class _ZeroFilteringClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if path == "tenants":
+            return {"list": [{"tenantId": "prod", "tenantName": "生产客户"}], "total": 1}
         if path == "inference/model-configs":
             return {
                 "list": [
@@ -185,7 +187,7 @@ async def test_single_day_card_uses_daily_title_and_compact_columns(tmp_path: Pa
     )
 
     card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
-    assert card["title"] == "测试租户 日报"
+    assert card["title"] == "生产客户 日报"
     assert [item["name"] for item in card["table"]["columns"]] == [
         "model",
         "total",
