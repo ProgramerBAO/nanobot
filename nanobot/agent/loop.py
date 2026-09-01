@@ -1566,6 +1566,7 @@ class AgentLoop:
             direct = await self.tools.resolve_direct_request(
                 direct_raw,
                 runtime=self.runtime_for_session(ctx.session),
+                history=ctx.session.messages,
             )
         if result is None and direct is not None:
             tool_name, params = direct
@@ -1647,17 +1648,22 @@ class AgentLoop:
             )
         if result is not None:
             ctx.outbound = result
-            # Shortcut commands skip BUILD and SAVE, so we must persist the
-            # turn here so WebUI history hydration after _turn_end sees the
-            # message.  Mark messages with _command so get_history can filter
-            # them out of LLM context.  /new is excluded because it
-            # intentionally clears the session.
+            # Shortcuts skip BUILD and SAVE, so persist the turn here. Real
+            # slash commands stay out of model history; natural-language direct
+            # tool results remain visible so later follow-ups can refer to them.
             if cmd_ctx.raw.lower() != "/new":
+                is_command_history = direct is None
                 ctx.input_persisted_early = self._persist_user_message_early(
-                    ctx.msg, ctx.session, _command=True
+                    ctx.msg,
+                    ctx.session,
+                    _command=is_command_history,
                 )
                 ctx.session.add_message(
-                    "assistant", result.content, _command=True
+                    "assistant",
+                    result.content,
+                    _command=is_command_history,
+                    direct_tool=tool_name if direct is not None else "",
+                    direct_params=dict(params) if direct is not None else {},
                 )
                 self.sessions.save(ctx.session)
                 self._clear_pending_user_turn(ctx.session)

@@ -8,6 +8,7 @@ import pytest
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.reporting.magik_cube_intent import IntentCandidateStore
 from nanobot.agent.tools.magik_cube import MagikCubeDailyReportTool
+from nanobot.agent.tools.magik_cube_admin import MagikCubeAdminApiTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMResponse, ToolCallRequest
@@ -32,6 +33,108 @@ def _make_loop(tmp_path: Path) -> tuple[AgentLoop, MagicMock]:
     )
     loop.tools.get_definitions = MagicMock(return_value=[])
     return loop, provider
+
+
+@pytest.mark.asyncio
+async def test_tenant_endpoint_question_routes_to_admin_without_llm(tmp_path: Path) -> None:
+    loop, provider = _make_loop(tmp_path)
+    tool = MagikCubeAdminApiTool()
+    tool.execute = AsyncMock(return_value="zhangyan endpoints")  # type: ignore[method-assign]
+    loop.tools.register(tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="user",
+            chat_id="chat",
+            content="你看一下zhangyan用户有哪些endpoint。",
+        )
+    )
+
+    assert response is not None and response.content == "zhangyan endpoints"
+    tool.execute.assert_awaited_once_with(  # type: ignore[attr-defined]
+        action="tenant_endpoints",
+        tenant_query="zhangyan",
+    )
+    provider.chat.assert_not_called()
+    provider.chat_with_retry.assert_not_awaited()
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
+async def test_contextual_tenant_usage_routes_from_previous_answer_without_llm(
+    tmp_path: Path,
+) -> None:
+    loop, provider = _make_loop(tmp_path)
+    session = loop.sessions.get_or_create("feishu:chat")
+    session.add_message(
+        "assistant",
+        (
+            "| magik_test | t-bzrrhfjneyryy | 内部测试租户 |\n"
+            "zhangyan 是通过 magik_test 租户的 API key 调这个 endpoint。"
+        ),
+    )
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+    tool.execute = AsyncMock(return_value="3.25M Token")  # type: ignore[method-assign]
+    loop.tools.register(tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="user",
+            chat_id="chat",
+            content="这个租户这两天用了多少M的token",
+        )
+    )
+
+    assert response is not None and response.content == "3.25M Token"
+    params = tool.execute.await_args.kwargs  # type: ignore[attr-defined]
+    assert params["tenant_query"] == "t-bzrrhfjneyryy"
+    assert params["report_template"] == "usage_total"
+    assert params["include_tpm"] is False
+    provider.chat.assert_not_called()
+    provider.chat_with_retry.assert_not_awaited()
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
+async def test_contextual_tenant_survives_a_previous_direct_command(tmp_path: Path) -> None:
+    loop, provider = _make_loop(tmp_path)
+    admin = MagikCubeAdminApiTool()
+    admin.execute = AsyncMock(return_value="租户 zhangyan 当前没有 endpoint")  # type: ignore[method-assign]
+    report = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+    report.execute = AsyncMock(return_value="0M Token")  # type: ignore[method-assign]
+    loop.tools.register(admin)
+    loop.tools.register(report)
+
+    await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="user",
+            chat_id="chat",
+            content="你看一下zhangyan用户有哪些endpoint。",
+        )
+    )
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="user",
+            chat_id="chat",
+            content="该租户这两天用了多少M的token",
+        )
+    )
+
+    assert response is not None and response.content == "0M Token"
+    assert report.execute.await_args.kwargs["tenant_query"] == "zhangyan"  # type: ignore[attr-defined]
+    persisted = loop.sessions.get_or_create("feishu:chat").messages
+    assert any(
+        item.get("direct_tool") == "magik_cube_admin_api"
+        and item.get("direct_params", {}).get("tenant_query") == "zhangyan"
+        for item in persisted
+    )
+    provider.chat.assert_not_called()
+    provider.chat_with_retry.assert_not_awaited()
+    await loop.close_mcp()
 
 
 @pytest.mark.asyncio

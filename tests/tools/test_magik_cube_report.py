@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -464,6 +465,114 @@ def test_direct_route_does_not_capture_unrelated_questions(tmp_path: Path) -> No
 
     assert tool.match_direct_request("GLM-5.2 支持多长上下文？") is None
     assert tool.match_direct_request("昨天机器是否正常？") is None
+
+
+def test_contextual_two_day_million_token_route_uses_recent_tenant(tmp_path: Path) -> None:
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    history = [
+        {
+            "role": "assistant",
+            "content": (
+                "| magik_test | t-bzrrhfjneyryy | 内部测试租户 |\n"
+                "zhangyan 是通过 magik_test 租户的 API key 调这个 endpoint。"
+            ),
+        }
+    ]
+
+    assert tool.match_direct_request("这个租户这两天用了多少M的token") is None
+    assert tool.match_contextual_request(
+        "这个租户这两天用了多少M的token", history
+    ) == {
+        "save_snapshot": False,
+        "start_date": (today - timedelta(days=1)).isoformat(),
+        "end_date": today.isoformat(),
+        "comparison": "none",
+        "include_tpm": False,
+        "report_template": "usage_total",
+        "tenant_query": "t-bzrrhfjneyryy",
+    }
+
+
+async def test_token_total_returns_requested_million_unit(tmp_path: Path) -> None:
+    class TokenTotalClient:
+        async def request(
+            self,
+            _method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            json_body: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            assert params is None
+            assert json_body is not None
+            assert path == "analysis/active-tenant-daily-usage/query"
+            return {
+                "items": [
+                    {
+                        "tenantId": "tenant-test",
+                        "points": [
+                            {
+                                "date": "2026-08-29",
+                                "totalTokens": 1_250_000,
+                                "requestCount": 10,
+                            },
+                            {
+                                "date": "2026-08-30",
+                                "totalTokens": 2_000_000,
+                                "requestCount": 20,
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    config = MagikCubeToolConfig(
+        base_url="https://cube.example",
+        tenant_mappings={"magik_test": "tenant-test"},
+    )
+    reporter = MagikCubeReporter(
+        TokenTotalClient(), config, tmp_path / "proxy.json", "Asia/Shanghai"
+    )
+    plan = _plan_comparison_windows(date(2026, 8, 29), date(2026, 8, 30))
+
+    report = await reporter.generate_token_total(plan, tenant_query="magik_test")
+
+    assert "共使用 3.25M Token（3,250,000 Token）" in report
+    assert "请求数 30" in report
+
+
+async def test_token_total_rejects_ambiguous_duplicate_tenant_names(tmp_path: Path) -> None:
+    class DuplicateTenantClient:
+        async def request(
+            self,
+            _method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            json_body: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            assert path == "tenants"
+            assert params is not None
+            assert json_body is None
+            return {
+                "list": [
+                    {"tenantId": "tenant-readonly", "tenantName": "magik_test"},
+                    {"tenantId": "t-billing", "tenantName": "magik_test"},
+                ],
+                "total": 2,
+            }
+
+    reporter = MagikCubeReporter(
+        DuplicateTenantClient(),
+        MagikCubeToolConfig(base_url="https://cube.example"),
+        tmp_path / "proxy.json",
+        "Asia/Shanghai",
+    )
+    plan = _plan_comparison_windows(date(2026, 8, 29), date(2026, 8, 30))
+
+    with pytest.raises(MagikCubeApiError, match="请使用 tenant ID 指定"):
+        await reporter.generate_token_total(plan, tenant_query="magik_test")
 
 
 def test_comparison_planner_merges_adjacent_periods_and_chunks_long_ranges() -> None:

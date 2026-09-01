@@ -592,6 +592,12 @@ class TestAutoCompactIdleDetection:
             tenant_query="佛跳墙",
             model="GLM-5.2",
         )
+        history = loop.sessions.get_or_create("feishu:group").get_history()
+        assert [item["content"] for item in history[-2:]] == [
+            "看看昨天佛跳墙用户 GLM-5.2 有多少用量",
+            "direct usage result",
+        ]
+        assert all(not item.get("_command") for item in history[-2:])
         loop.provider.chat_with_retry.assert_not_awaited()
         await loop.close_mcp()
 

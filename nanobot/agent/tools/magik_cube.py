@@ -148,6 +148,8 @@ class MagikCubeToolConfig(Base):
     intent_candidate_retention_days: int = Field(default=30, ge=1, le=365)
     # 防止候选日志无界增长。
     intent_candidate_max_entries: int = Field(default=10_000, ge=100, le=100_000)
+    # 通用 Admin API 工具单次返回给模型的最大 JSON 字符数，防止日志/明细撑满上下文。
+    admin_max_response_chars: int = Field(default=50_000, ge=1_000, le=200_000)
 
 class MagikCubeApiError(ReportFailureError):
     """Raised when the Magik Cube API returns an unsuccessful response."""
@@ -168,6 +170,13 @@ class MagikCubeTenantResolutionError(MagikCubeApiError):
 # 密码登录唯一允许的路径。登录是唯一一个非 api_prefix 下的 POST 请求。
 _PASSWORD_LOGIN_PATH = "token-api/v1/accounts/login/with-password"
 _REPORT_TIMEZONE = "Asia/Shanghai"
+_CONTEXT_TENANT_REFERENCE_RE = re.compile(
+    r"(?:这个|这一个|该|上述|上面(?:提到)?的|刚才(?:提到)?的|前面(?:提到)?的)"
+    r"\s*(?:租户|客户|用户)|(?<![A-Za-z0-9_])它(?![A-Za-z0-9_])"
+)
+_INVALID_TENANT_REFERENCES = frozenset(
+    {"这个", "这一个", "该", "上述", "上面的", "刚才的", "前面的", "它"}
+)
 # 业务 API 的最小权限边界：只允许日报所需的查询和分析接口，禁止写入、删除和任意路径访问。
 _ADMIN_READ_ONLY_ROUTES = frozenset(
     {
@@ -592,6 +601,102 @@ def _format_number(value: int | float) -> str:
     return f"{value:,.0f}"
 
 
+def _format_million_tokens(value: int) -> str:
+    rendered = f"{value / 1_000_000:,.6f}".rstrip("0").rstrip(".")
+    return f"{rendered or '0'}M"
+
+
+def _decoded_tool_arguments(tool_call: Any) -> tuple[str, dict[str, Any]]:
+    if not isinstance(tool_call, dict):
+        return "", {}
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        name = str(function.get("name") or "")
+        arguments = function.get("arguments")
+    else:
+        name = str(tool_call.get("name") or "")
+        arguments = tool_call.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            return name, {}
+    return name, arguments if isinstance(arguments, dict) else {}
+
+
+def _tenant_from_direct_params(params: Any) -> str:
+    if not isinstance(params, dict):
+        return ""
+    selections = params.get("report_selections")
+    if isinstance(selections, list):
+        for selection in reversed(selections):
+            if isinstance(selection, dict):
+                value = str(selection.get("tenant_query") or "").strip()
+                if value and value not in _INVALID_TENANT_REFERENCES:
+                    return value
+    value = str(params.get("tenant_query") or "").strip()
+    return value if value not in _INVALID_TENANT_REFERENCES else ""
+
+
+def _tenant_from_history_text(text: str, aliases: list[str]) -> str:
+    tenant_ids = re.findall(
+        r"(?<![A-Za-z0-9_-])(?:tenant|t)-[A-Za-z0-9]+(?![A-Za-z0-9_-])",
+        text,
+        re.IGNORECASE,
+    )
+    if tenant_ids:
+        return tenant_ids[-1]
+    candidates: list[tuple[int, str]] = []
+    folded = text.casefold()
+    for alias in aliases:
+        start = folded.rfind(alias.casefold())
+        if start >= 0:
+            candidates.append((start, alias))
+    plain = re.sub(r"[`*]", "", text)
+    patterns = (
+        re.compile(
+            r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]{1,127})\s*"
+            r"(?:租户|客户|用户)(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:租户|客户|用户)\s*[：:]?\s*"
+            r"([A-Za-z][A-Za-z0-9_.-]{1,127})(?![A-Za-z0-9_.-])",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in patterns:
+        for match in pattern.finditer(plain):
+            value = match.group(1).strip()
+            if value.casefold() not in _INVALID_TENANT_REFERENCES:
+                candidates.append((match.start(1), value))
+    return max(candidates, default=(-1, ""), key=lambda item: item[0])[1]
+
+
+def _latest_tenant_from_history(
+    history: list[dict[str, Any]],
+    aliases: list[str],
+) -> str:
+    """Return the most recent explicit tenant focus from persisted conversation state."""
+
+    for message in reversed(history[-80:]):
+        value = _tenant_from_direct_params(message.get("direct_params"))
+        if value:
+            return value
+        content = message.get("content")
+        if message.get("role") in {"assistant", "user"} and isinstance(content, str):
+            value = _tenant_from_history_text(content, aliases)
+            if value:
+                return value
+        for tool_call in reversed(message.get("tool_calls") or []):
+            name, arguments = _decoded_tool_arguments(tool_call)
+            if name in {"magik_cube_daily_report", "magik_cube_admin_api"}:
+                value = _tenant_from_direct_params(arguments)
+                if value:
+                    return value
+    return ""
+
+
 def _format_change(current: int | float, baseline: int | float) -> str:
     """只展示相对变化百分比；零基准使用业务状态，绝不伪造百分比。"""
 
@@ -992,6 +1097,50 @@ class MagikCubeReporter:
             breakdown=breakdown,
             include_tpm=include_tpm,
         )
+
+    async def generate_token_total(
+        self,
+        plan: _ComparisonPlan,
+        *,
+        tenant_query: str,
+        model: str = "",
+    ) -> str:
+        """Return one concise, exact token total for a tenant and date range."""
+
+        tenants = await self._list_matching_tenants(tenant_query)
+        if not tenants:
+            raise MagikCubeApiError(f"未找到匹配客户：{tenant_query}")
+        if len(tenants) > 1:
+            options = "、".join(f"{item.name}（{item.tenant_id}）" for item in tenants)
+            raise MagikCubeApiError(
+                f"租户名称匹配到多个记录，请使用 tenant ID 指定：{options}"
+            )
+        summaries = await asyncio.gather(
+            *(
+                self._tenant_metrics_for_windows(
+                    tenant,
+                    plan.fetch_windows,
+                    model=model,
+                    include_tpm=False,
+                )
+                for tenant in tenants
+            )
+        )
+        stats = self._period_stats(self._combine_metrics(summaries), plan.primary)
+        scope = "、".join(tenant.name for tenant in tenants)
+        if model:
+            scope += f" / {model}"
+        quality = "完整" if stats.token_complete else "数据不完整"
+        lines = [
+            f"{scope} 在 {_window_label(plan.primary)} 共使用 "
+            f"{_format_million_tokens(stats.tokens)} Token（{stats.tokens:,} Token）。",
+            f"请求数 {stats.requests:,}｜口径：租户计费用量｜数据状态：{quality}。",
+        ]
+        if plan.primary.end >= datetime.now(self._tz).date():
+            lines.append("其中今天是截至查询时刻的实时数据，尚未结束。")
+        if self._warnings:
+            lines.extend(f"数据提示：{warning}" for warning in self._warnings[:10])
+        return "\n".join(lines)
 
     def _tenant_display_label(self, tenant: _Tenant) -> str:
         """Show API catalog identity, optionally with an alias bound to that same ID."""
@@ -2776,8 +2925,8 @@ _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
     breakdown=StringSchema("Report dimension.", enum=("summary", "model")),
     include_tpm=BooleanSchema(default=True, description="Include daily peak TPM queries."),
     report_template=StringSchema(
-        "Output template. full keeps the existing text report; matrix_card returns structured UI.",
-        enum=("full", "matrix_card"),
+        "Output template. usage_total returns one concise exact Token total.",
+        enum=("full", "matrix_card", "usage_total"),
     ),
     granularity=StringSchema(
         "Matrix comparison granularity.", enum=("day", "week")
@@ -2877,6 +3026,8 @@ class MagikCubeDailyReportTool(Tool):
         """把明确的中文用量问题直接路由为结构化参数，绕过一次 LLM tool 选择。"""
 
         raw = text.strip()
+        if _CONTEXT_TENANT_REFERENCE_RE.search(raw):
+            return None
         # 原因解释和业务建议需要 LLM；让 Agent 调用一次范围 Tool 后只解释确定性摘要。
         if is_deep_analysis_request(raw):
             return None
@@ -2952,6 +3103,8 @@ class MagikCubeDailyReportTool(Tool):
                 r"([A-Za-z0-9_\-\u4e00-\u9fff]+)\s*(?:用户|客户|租户)", cleaned
             )
             tenant_query = tenant_match.group(1) if tenant_match else ""
+            if tenant_query in _INVALID_TENANT_REFERENCES:
+                tenant_query = ""
         if not tenant_query and not all_customers:
             # Magik tenant slug 通常含下划线；允许无需“租户”后缀直接识别。
             slug_match = re.search(
@@ -2965,7 +3118,8 @@ class MagikCubeDailyReportTool(Tool):
         is_daily_report = "大客户" in raw and "日报" in raw
         is_standard_period_report = bool(
             re.search(
-                r"(?:日报|周报|月报|近\s*7\s*天|最近\s*7\s*天|一周|上周|上个月|上月)",
+                r"(?:日报|周报|月报|近\s*7\s*天|最近\s*7\s*天|一周|上周|上个月|上月|"
+                r"这\s*(?:2|两)\s*天|近\s*(?:2|两)\s*天|最近\s*(?:2|两)\s*天)",
                 raw,
             )
         )
@@ -3008,6 +3162,14 @@ class MagikCubeDailyReportTool(Tool):
                         "comparison": "previous_period",
                     }
                 )
+        elif re.search(r"(?:这|近|最近)\s*(?:2|两)\s*天", raw):
+            params.update(
+                {
+                    "start_date": yesterday.isoformat(),
+                    "end_date": today.isoformat(),
+                    "comparison": "none",
+                }
+            )
         elif "上周" in raw or "周报" in raw:
             last_week_start = today - timedelta(days=today.weekday() + 7)
             last_week_end = last_week_start + timedelta(days=6)
@@ -3088,12 +3250,20 @@ class MagikCubeDailyReportTool(Tool):
             params["include_tpm"] = not bool(
                 re.search(r"(?:不含|不要|排除|无需)\s*TPM", raw, re.IGNORECASE)
             )
+        if re.search(
+            r"(?:多少|合计|总共|一共).*?(?<![A-Za-z0-9_])M(?![A-Za-z0-9_]).*?token|"
+            r"(?:多少|合计|总共|一共).*?token.*?(?<![A-Za-z0-9_])M(?![A-Za-z0-9_])",
+            raw,
+            re.IGNORECASE,
+        ):
+            params["report_template"] = "usage_total"
+            params["include_tpm"] = False
         if tenant_query:
             params["tenant_query"] = tenant_query
         if model:
             params["model"] = model
 
-        wants_card = not full_requested and bool(
+        wants_card = params.get("report_template") != "usage_total" and not full_requested and bool(
             is_standard_period_report or re.search(r"(?:卡片|矩阵|报表)", raw)
         )
         if wants_card and "start_date" in params:
@@ -3117,8 +3287,28 @@ class MagikCubeDailyReportTool(Tool):
             params["report_template"] = "full"
         return params
 
+    def match_contextual_request(
+        self,
+        text: str,
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not _CONTEXT_TENANT_REFERENCE_RE.search(text):
+            return None
+        tenant = _latest_tenant_from_history(
+            history,
+            sorted(self._config.tenant_mappings, key=len, reverse=True),
+        )
+        if not tenant:
+            return None
+        rewritten = _CONTEXT_TENANT_REFERENCE_RE.sub(f"{tenant}租户", text, count=1)
+        return self.match_direct_request(rewritten)
+
     def is_direct_intent_candidate(self, text: str) -> bool:
-        return self._config.intent_fallback_enabled and is_report_intent_candidate(text)
+        return (
+            self._config.intent_fallback_enabled
+            and not _CONTEXT_TENANT_REFERENCE_RE.search(text)
+            and is_report_intent_candidate(text)
+        )
 
     async def classify_direct_request(self, text: str, runtime: Any) -> dict[str, Any] | None:
         intent = await classify_report_intent(
@@ -3192,8 +3382,10 @@ class MagikCubeDailyReportTool(Tool):
             return ToolResult.error("Error: comparison dates require start_date and end_date")
         if breakdown not in {"summary", "model"}:
             return ToolResult.error("Error: breakdown must be summary or model")
-        if report_template not in {"full", "matrix_card"}:
-            return ToolResult.error("Error: report_template must be full or matrix_card")
+        if report_template not in {"full", "matrix_card", "usage_total"}:
+            return ToolResult.error(
+                "Error: report_template must be full, matrix_card, or usage_total"
+            )
         if granularity not in {"day", "week"}:
             return ToolResult.error("Error: granularity must be day or week")
         selections = list(report_selections or [])
@@ -3306,6 +3498,16 @@ class MagikCubeDailyReportTool(Tool):
                         granularity=granularity,
                         include_tpm=include_tpm,
                     )
+                if report_template == "usage_total":
+                    if plan is None or not (tenant_query or "").strip():
+                        return ToolResult.error(
+                            "Error: usage_total requires tenant_query plus start_date/end_date"
+                        )
+                    return await reporter.generate_token_total(
+                        plan,
+                        tenant_query=(tenant_query or "").strip(),
+                        model=(model or "").strip(),
+                    )
                 if plan is not None:
                     return await reporter.generate_range_report(
                         plan,
@@ -3331,7 +3533,13 @@ class MagikCubeDailyReportTool(Tool):
             logger.info(
                 "Magik Cube report perf: mode={} elapsed_ms={:.0f} api_calls={} "
                 "api_wait_ms={:.0f} cache_hits={} cache_misses={} http_429={} http_5xx={}",
-                "matrix" if report_template == "matrix_card" else "range" if plan is not None else "daily",
+                "matrix"
+                if report_template == "matrix_card"
+                else "usage_total"
+                if report_template == "usage_total"
+                else "range"
+                if plan is not None
+                else "daily",
                 elapsed_ms,
                 sum(client.route_counts.values()) if client else 0,
                 client.request_seconds * 1000 if client else 0,

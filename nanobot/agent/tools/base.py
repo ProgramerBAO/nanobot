@@ -243,6 +243,15 @@ class Tool(ABC):
         """
         return None
 
+    def match_contextual_request(
+        self,
+        text: str,
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Resolve an unambiguous direct request that refers to recent history."""
+
+        return None
+
     def is_direct_intent_candidate(self, text: str) -> bool:
         """Whether this tool wants one bounded semantic-classification attempt."""
 

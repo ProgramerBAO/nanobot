@@ -91,7 +91,9 @@ def test_discover_finds_concrete_tools():
     assert "ExecTool" in class_names
     assert "CliAppsTool" in class_names
     assert "MessageTool" in class_names
+    assert "MagikCubeAdminApiTool" in class_names
     assert "SpawnTool" in class_names
+    assert "TimeTool" in class_names
     assert "WriteStdinTool" in class_names
 
 
@@ -421,7 +423,7 @@ def test_loader_registers_same_tools_as_old_hardcoded():
         "read_file", "write_file", "edit_file", "list_dir",
         "find_files", "grep", "exec", "write_stdin", "list_exec_sessions",
         "web_search", "web_fetch",
-        "message", "spawn", "cron",
+        "message", "spawn", "cron", "time",
     }
     actual = set(registered)
     assert expected <= actual, f"Missing tools: {expected - actual}"

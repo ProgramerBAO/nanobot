@@ -24,6 +24,7 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | Skill | Description |
 |-------|-------------|
 | `github` | Interact with GitHub using the `gh` CLI |
+| `magik-cube-admin` | Query Magik Cube management data through the read-only Admin API |
 | `weather` | Get weather info using wttr.in and Open-Meteo |
 | `summarize` | Summarize URLs, files, and YouTube videos |
 | `tmux` | Remote-control tmux sessions |
