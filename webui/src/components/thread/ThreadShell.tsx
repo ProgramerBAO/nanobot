@@ -34,6 +34,7 @@ import {
 import { inferProviderFromModelName, providerDisplayLabel } from "@/lib/provider-brand";
 import type {
   ChatSummary,
+  ReportActionRequest,
   SettingsPayload,
   SlashCommand,
   SkillSummary,
@@ -44,26 +45,35 @@ import type {
 import { projectWebuiThreadMessages } from "@/lib/thread-display-compat";
 import { useClient } from "@/providers/ClientProvider";
 
-type MessageShape = Pick<UIMessage, "role" | "kind" | "content">;
+type MessageShape = Pick<UIMessage, "role" | "kind" | "content"> & {
+  agentUiId?: string;
+};
 
 function sameMessageShape(a: MessageShape, b: MessageShape): boolean {
   return (
     a.role === b.role
     && (a.kind ?? "") === (b.kind ?? "")
     && a.content === b.content
+    && (a.agentUiId ?? "") === (b.agentUiId ?? "")
   );
 }
 
 function durableMessageShape(message: UIMessage): MessageShape | null {
   if (message.kind === "trace") return null;
   if (message.role !== "user" && message.role !== "assistant") return null;
-  if (message.role === "assistant" && !message.content.trim() && !message.media?.length) {
+  if (
+    message.role === "assistant"
+    && !message.content.trim()
+    && !message.media?.length
+    && !message.agentUi
+  ) {
     return null;
   }
   return {
     role: message.role,
     kind: message.kind,
     content: message.content,
+    agentUiId: message.agentUi?.document_id,
   };
 }
 
@@ -487,6 +497,15 @@ export function ThreadShell({
     streamError,
     dismissStreamError,
   } = useNanobotStream(chatId, initial, hasPendingToolCalls, handleTurnEnd);
+
+  const handleReportAction = useCallback((request: ReportActionRequest) => {
+    if (!chatId) return;
+    client.sendReportAction(chatId, request);
+  }, [chatId, client]);
+  const handleReportCommand = useCallback((command: string) => {
+    if (!chatId || !command.trim()) return;
+    send(command);
+  }, [chatId, send]);
 
   useEffect(() => {
     if (chatId && historyKey) sessionKeyByChatIdRef.current.set(chatId, historyKey);
@@ -1066,6 +1085,8 @@ export function ThreadShell({
             onOpenFilePreview={historyKey ? handleOpenFilePreview : undefined}
             onForkFromMessage={onForkChat ? handleForkFromMessage : undefined}
             onQuoteSelection={session ? handleQuoteSelection : undefined}
+            onReportAction={handleReportAction}
+            onReportCommand={handleReportCommand}
           />
         </FilePreviewAvailabilityProvider>
       </div>

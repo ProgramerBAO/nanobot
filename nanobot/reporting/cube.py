@@ -19,6 +19,7 @@ from nanobot.agent.tools.magik_cube import (
     MagikCubeTenantResolutionError,
     MagikCubeToolConfig,
     _as_int,
+    _as_optional_int,
     _match_catalog_tenants,
     _pick,
 )
@@ -57,7 +58,7 @@ _CUBE_HEALTH_METRICS = frozenset(
 )
 _CUBE_ACCOUNT_METRICS = frozenset({"ai.cost", "ai.balance", "ai.unbilled_amount"})
 _CUBE_METRICS = (
-    frozenset({"ai.usage.tokens", "ai.requests"})
+    frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm.avg"})
     | _CUBE_HEALTH_METRICS
     | _CUBE_ACCOUNT_METRICS
 )
@@ -198,11 +199,23 @@ class CubeConnector(ConnectorPlugin):
                     "end": (query.comparison_end + timedelta(days=1)).isoformat() + " 00:00",
                 }
             )
+        for comparison in query.additional_comparisons:
+            query_windows.append(
+                {
+                    "period": comparison.key,
+                    "start": comparison.start_date.isoformat() + " 00:00",
+                    "end": (comparison.end_date + timedelta(days=1)).isoformat() + " 00:00",
+                }
+            )
         async with MagikCubeClient(self._config, transport=self._transport) as client:
             tenants = await self._resolve_tenants(client, query.filters)
             windows = [("current", query.start_date, query.end_date)]
             if query.comparison_start is not None and query.comparison_end is not None:
                 windows.append(("comparison", query.comparison_start, query.comparison_end))
+            windows.extend(
+                (item.key, item.start_date, item.end_date)
+                for item in query.additional_comparisons
+            )
             semaphore = asyncio.Semaphore(max(1, min(self._config.max_concurrency, 16)))
             results = await asyncio.gather(
                 *(
@@ -261,7 +274,7 @@ class CubeConnector(ConnectorPlugin):
                     {
                         "system": "Cube Admin",
                         "route": "analysis/endpoint-max-tpm/daily/query",
-                        "fields": ("maxTpm", "date"),
+                        "fields": ("maxTpm", "avgTpm", "date", "model", "endpoint"),
                     },
                 ),
                 "last_sample_at": last_sample_at,
@@ -1287,7 +1300,7 @@ class CubeConnector(ConnectorPlugin):
                         f"{classify_report_failure(exc)}:"
                         f"{tenant.name} {period} usage query failed"
                     )
-                if "ai.tpm" in query.metrics:
+                if {"ai.tpm", "ai.tpm.avg"}.intersection(query.metrics):
                     try:
                         model_values = self._selected_model_values(query.filters) or (None,)
                         for model in model_values:
@@ -1467,20 +1480,37 @@ class CubeConnector(ConnectorPlugin):
                 day = str(point.get("date") or "")[:10]
                 if not day or day < start_date.isoformat() or day > end_date.isoformat():
                     continue
-                rows.append(
-                    {
-                        "tenant": tenant.name,
-                        "model": row_model,
-                        "endpoint": endpoint,
-                        "date": day,
-                        "period": period,
-                        "metric": "ai.tpm",
-                        "value": _as_int(_pick(point, "maxTpm", "max_tpm", default=0)),
-                        "unit": "tokens/minute",
-                        "aggregation": "daily_peak",
-                        "source": "Cube Admin / analysis/endpoint-max-tpm/daily/query",
-                    }
+                common = {
+                    "tenant": tenant.name,
+                    "model": row_model,
+                    "endpoint": endpoint,
+                    "date": day,
+                    "period": period,
+                    "unit": "tokens/minute",
+                    "source": "Cube Admin / analysis/endpoint-max-tpm/daily/query",
+                }
+                peak_tpm = _as_optional_int(_pick(point, "maxTpm", "max_tpm", default=None))
+                if peak_tpm is not None and "ai.tpm" in query.metrics:
+                    rows.append(
+                        {
+                            **common,
+                            "metric": "ai.tpm",
+                            "value": peak_tpm,
+                            "aggregation": "daily_peak",
+                        }
+                    )
+                average_tpm = _as_optional_int(
+                    _pick(point, "avgTpm", "avg_tpm", default=None)
                 )
+                if average_tpm is not None and "ai.tpm.avg" in query.metrics:
+                    rows.append(
+                        {
+                            **common,
+                            "metric": "ai.tpm.avg",
+                            "value": average_tpm,
+                            "aggregation": "daily_average",
+                        }
+                    )
         return rows
 
 

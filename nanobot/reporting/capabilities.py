@@ -39,6 +39,7 @@ def capability_catalog(
     user_id: str,
     health_enabled: bool = False,
     cost_enabled: bool = False,
+    provider_quality_enabled: bool = False,
 ) -> tuple[Capability, ...]:
     has_cube = registry.connector("magik_cube") is not None and store.allowed(
         channel, user_id, "connector", "magik_cube"
@@ -67,6 +68,26 @@ def capability_catalog(
                 "Cube 健康报告",
                 "近 15 分钟健康快照及日/周趋势",
                 ReportAction("health_report", "Cube 健康报告", style="primary"),
+            )
+        )
+
+    provider_quality_template = registry.template("provider_quality")
+    has_provider_quality = registry.connector("cube_provider_quality") is not None and store.allowed(
+        channel, user_id, "connector", "cube_provider_quality"
+    )
+    if (
+        has_provider_quality
+        and provider_quality_enabled
+        and provider_quality_template is not None
+        and provider_quality_template in registry.compatible_templates("cube_provider_quality")
+        and store.allowed(channel, user_id, "template", "provider_quality")
+    ):
+        items.append(
+            Capability(
+                "provider_quality_report",
+                "Cube 供应商质量",
+                "供应商错误率、延迟、吞吐、探测和测试结果",
+                ReportAction("provider_quality_report", "供应商质量", style="primary"),
             )
         )
     cost_template = registry.template("cost_account")
@@ -159,6 +180,7 @@ def home_document(
     user_id: str,
     health_enabled: bool = False,
     cost_enabled: bool = False,
+    provider_quality_enabled: bool = False,
 ) -> ReportDocument:
     capabilities = capability_catalog(
         registry,
@@ -167,6 +189,7 @@ def home_document(
         user_id=user_id,
         health_enabled=health_enabled,
         cost_enabled=cost_enabled,
+        provider_quality_enabled=provider_quality_enabled,
     )
     if capabilities and capabilities[0].capability_id == "request_access":
         intro = "当前账号尚未获得报表数据源权限，请联系管理员授权。"
@@ -211,6 +234,7 @@ def examples_document(
     *,
     cost_enabled: bool = False,
     all_tenant_model_enabled: bool = False,
+    provider_quality_enabled: bool = False,
 ) -> ReportDocument:
     examples = ["我要周报", "我要日报", "健康报告", "查看我的订阅", "查看最近报表"]
     if authorized:
@@ -223,6 +247,9 @@ def examples_document(
             examples.insert(0, "Kimi-K3模型的日报（全部客户）")
     if cost_enabled:
         examples.insert(0, "成本报告")
+    if provider_quality_enabled:
+        examples.insert(0, "供应商质量报告")
+        examples.insert(1, "Kimi-K3 各供应商性能对比")
     return ReportDocument(
         title="报表问法示例",
         fallback_text="可直接发送：\n" + "\n".join(f"- {item}" for item in examples),

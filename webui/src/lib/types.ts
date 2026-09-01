@@ -70,6 +70,8 @@ export interface UIMessage {
   latencyMs?: number;
   /** Lightweight provenance for proactive assistant messages. */
   source?: UIMessageSource;
+  /** Channel-neutral structured report or report selector payload. */
+  agentUi?: AgentUIBlob;
   /** Stable protocol metadata for grouping all activity emitted by one user turn. */
   turnId?: string;
   turnPhase?: UITurnPhase;
@@ -189,6 +191,23 @@ export interface SkillsPayload { skills: SkillSummary[]; }
 export interface AgentUIBlob {
   kind: string;
   data?: unknown;
+  version?: number;
+  document_id?: string;
+  title?: string;
+  subtitle?: string;
+  quality?: string | null;
+  warnings?: string[];
+  context?: Record<string, unknown> | null;
+  blocks?: Array<{ kind: string; data?: Record<string, unknown> }>;
+}
+
+export interface ReportActionRequest {
+  interactionId: string;
+  submitToken: string;
+  selectedOptions: string[];
+  period: string;
+  startDate?: string;
+  endDate?: string;
 }
 
 /** WebSocket snapshot for sustained goals (`goal_state` events; keyed by ``chat_id``). */
@@ -1283,6 +1302,16 @@ export type Outbound =
   | { type: "attach"; chat_id: string }
   | { type: "set_workspace_scope"; chat_id: string; workspace_scope: WorkspaceScopePayload }
   | { type: "transcribe_audio"; request_id: string; data_url: string; duration_ms?: number }
+  | {
+      type: "report_action";
+      chat_id: string;
+      interaction_id: string;
+      submit_token: string;
+      selected_options: string[];
+      period: string;
+      start_date?: string;
+      end_date?: string;
+    }
   | {
       type: "message";
       chat_id: string;

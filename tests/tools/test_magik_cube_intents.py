@@ -155,9 +155,11 @@ async def test_matrix_hides_only_complete_double_zero_and_skips_model_tpm(
     names = [row["model"] for row in card["table"]["rows"]]
     assert names[0] == "ACTIVE"
     assert set(names) == {"ACTIVE", "STOPPED", "BROKEN"}
-    assert "停用" in next(row for row in card["table"]["rows"] if row["model"] == "STOPPED")[
-        "change"
-    ]
+    stopped_change = next(
+        row for row in card["table"]["rows"] if row["model"] == "STOPPED"
+    )["change"]
+    assert "↓100.0%" in stopped_change
+    assert "停用：STOPPED" in card["insights"]
     assert next(row for row in card["table"]["rows"] if row["model"] == "BROKEN")[
         "change"
     ] == "数据不完整"
@@ -196,7 +198,9 @@ async def test_single_day_card_uses_daily_title_and_compact_columns(tmp_path: Pa
     assert all(
         set(row) == {"model", "total", "change"} for row in card["table"]["rows"]
     )
-    assert any("平均 Token/请求" in item for item in card["overview"])
+    assert any("平均 TPM" in item for item in card["overview"])
+    assert all("平均 Token/请求" not in item for item in card["overview"])
+    assert card["segments"] == []
 
 
 def test_monthly_segments_use_fixed_day_buckets_across_leap_years(tmp_path: Path) -> None:

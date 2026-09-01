@@ -94,6 +94,71 @@ const SLASH_COMMANDS: SlashCommand[] = [
 ];
 
 describe("MessageBubble", () => {
+  it("renders named daily comparison windows and KPI baselines", () => {
+    const message: UIMessage = {
+      id: "daily-comparisons",
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      agentUi: {
+        kind: "report_document",
+        title: "Cube 日报",
+        quality: "complete",
+        context: {
+          timezone: "Asia/Shanghai",
+          current_window: { start: "2026-08-29 00:00", end: "2026-08-30 00:00" },
+          comparison_windows: [
+            {
+              key: "previous_period",
+              label: "前一日",
+              window: { start: "2026-08-28 00:00", end: "2026-08-29 00:00" },
+            },
+            {
+              key: "previous_week_same_day",
+              label: "上周同期",
+              window: { start: "2026-08-22 00:00", end: "2026-08-23 00:00" },
+            },
+          ],
+        },
+        blocks: [
+          {
+            kind: "metrics",
+            data: {
+              items: [
+                {
+                  label: "Token 消耗",
+                  value: "300",
+                  comparisons: [
+                    {
+                      key: "previous_period",
+                      label: "较前一日",
+                      baseline: "200",
+                      change: "↑50.0%",
+                    },
+                    {
+                      key: "previous_week_same_day",
+                      label: "较上周同期",
+                      baseline: "100",
+                      change: "↑200.0%",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText(/对比（前一日）：2026-08-28/)).toBeInTheDocument();
+    expect(screen.getByText(/对比（上周同期）：2026-08-22/)).toBeInTheDocument();
+    expect(screen.getByText(/较前一日：↑50.0%/)).toBeInTheDocument();
+    expect(screen.getByText(/较上周同期：↑200.0%/)).toBeInTheDocument();
+    expect(screen.queryByText(/基准 200/)).not.toBeInTheDocument();
+  });
+
   it("renders user messages as right-aligned pills", () => {
     const message: UIMessage = {
       id: "u1",

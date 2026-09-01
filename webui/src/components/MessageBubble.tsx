@@ -20,6 +20,7 @@ import { useTranslation } from "react-i18next";
 import { AttachmentTile } from "@/components/AttachmentTile";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { MarkdownText } from "@/components/MarkdownText";
+import { ReportDocumentView } from "@/components/ReportDocumentView";
 import { SlashCommandText } from "@/components/SlashCommandText";
 import { ReasoningRow } from "@/components/thread/activity/ReasoningRow";
 import { UserMessageText } from "@/components/UserMessageText";
@@ -44,6 +45,7 @@ import type {
   UIImage,
   UIMediaAttachment,
   UIMessage,
+  ReportActionRequest,
 } from "@/lib/types";
 
 interface MessageBubbleProps {
@@ -55,6 +57,8 @@ interface MessageBubbleProps {
   slashCommands?: SlashCommand[];
   onOpenFilePreview?: (path: string) => void;
   onForkFromHere?: () => void;
+  onReportAction?: (request: ReportActionRequest) => void;
+  onReportCommand?: (command: string) => void;
 }
 
 function ForkArrowIcon({ className }: { className?: string }) {
@@ -139,6 +143,8 @@ export function MessageBubble({
   slashCommands = [],
   onOpenFilePreview,
   onForkFromHere,
+  onReportAction,
+  onReportCommand,
 }: MessageBubbleProps) {
   const { t } = useTranslation();
   const baseAnim = "animate-in fade-in-0 slide-in-from-bottom-1 duration-300";
@@ -219,7 +225,7 @@ export function MessageBubble({
     );
   }
 
-  const empty = message.content.trim().length === 0;
+  const empty = message.content.trim().length === 0 && !message.agentUi;
   const media = message.media ?? [];
   const reasoning = message.role === "assistant" ? message.reasoning ?? "" : "";
   const reasoningStreaming = !!(message.role === "assistant" && message.reasoningStreaming);
@@ -265,14 +271,22 @@ export function MessageBubble({
               triggerLabel={automationTriggeredLabel}
             />
           ) : null}
-          <div data-assistant-selectable={message.isStreaming ? undefined : "true"}>
-            <MarkdownText
-              streaming={!!message.isStreaming}
-              onOpenFilePreview={onOpenFilePreview}
-            >
-              {message.content}
-            </MarkdownText>
-          </div>
+          {message.agentUi?.kind === "report_document" ? (
+            <ReportDocumentView
+              document={message.agentUi}
+              onAction={onReportAction}
+              onCommand={onReportCommand}
+            />
+          ) : (
+            <div data-assistant-selectable={message.isStreaming ? undefined : "true"}>
+              <MarkdownText
+                streaming={!!message.isStreaming}
+                onOpenFilePreview={onOpenFilePreview}
+              >
+                {message.content}
+              </MarkdownText>
+            </div>
+          )}
           {media.length > 0 ? <MessageMedia media={media} align="left" /> : null}
           {showAssistantFooterRow ? (
             <TooltipProvider delayDuration={220} skipDelayDuration={80}>

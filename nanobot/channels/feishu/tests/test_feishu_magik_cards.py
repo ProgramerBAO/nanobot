@@ -8,6 +8,8 @@ import pytest
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu.runtime import FeishuChannel, FeishuConfig
+from nanobot.reporting.interactions import report_interactions
+from nanobot.reporting.provider_quality import provider_quality_selector_document
 
 
 def _channel() -> FeishuChannel:
@@ -225,8 +227,12 @@ def test_report_card_contains_one_paginated_table() -> None:
             {
                 "title": "A客户 周报",
                 "subtitle": "2026-08-17 ~ 2026-08-23",
-                "overview": ["Token 100（+10 / ↑11.1%）"],
-                "segments": ["周一 10｜+1 / ↑11.1%"],
+                "comparison_windows": [
+                    {"label": "前一日", "window": "2026-08-22"},
+                    {"label": "上周同期", "window": "2026-08-16"},
+                ],
+                "overview": ["Token 100｜较上上周：↑11.1%"],
+                "segments": ["周一 10｜较上上周 ↑11.1%"],
                 "table": {
                     "page_size": 8,
                     "columns": [
@@ -246,6 +252,63 @@ def test_report_card_contains_one_paginated_table() -> None:
     assert len(tables) == 1
     assert tables[0]["page_size"] == 8
     assert len(tables[0]["rows"]) == 27
+    comparison = next(
+        element
+        for element in card["elements"]
+        if element.get("tag") == "markdown"
+        and "**对比周期**" in element.get("content", "")
+    )
+    assert "前一日：2026-08-22" in comparison["content"]
+    assert "上周同期：2026-08-16" in comparison["content"]
+
+
+def test_daily_report_omits_empty_segments_and_splits_tpm_detail_table() -> None:
+    channel = _channel()
+    ui = {
+        "kind": "magik_report_cards",
+        "cards": [
+            {
+                "title": "A客户 日报",
+                "subtitle": "2026-08-29",
+                "overview": ["Token 100｜较前一日（2026-08-28）：↑10.0%"],
+                "segments": [],
+                "table": {
+                    "title": "模型矩阵：按 Token 总量降序",
+                    "columns": [
+                        {"name": "model", "display_name": "模型", "data_type": "text"}
+                    ],
+                    "rows": [{"model": "Kimi-K3"}],
+                },
+                "tpm_table": {
+                    "title": "Endpoint TPM 明细：按平均 TPM 降序",
+                    "columns": [
+                        {
+                            "name": "endpoint",
+                            "display_name": "Endpoint",
+                            "data_type": "text",
+                        }
+                    ],
+                    "rows": [{"endpoint": "ep-a"}],
+                },
+                "insights": [],
+                "quality": "完整",
+            }
+        ],
+    }
+
+    cards = channel._build_agent_ui_cards(
+        ui, OutboundMessage(channel="feishu", chat_id="ou_alice", content="fallback")
+    )
+
+    assert len(cards) == 2
+    assert all(
+        len([item for item in card["elements"] if item.get("tag") == "table"]) == 1
+        for card in cards
+    )
+    assert not any(
+        "分段总量" in str(element.get("content") or "")
+        for element in cards[0]["elements"]
+    )
 
 
 def test_report_document_health_cards_use_status_theme_kpi_grid_and_table_split() -> None:
@@ -336,6 +399,85 @@ def test_report_document_health_cards_use_status_theme_kpi_grid_and_table_split(
     assert "第 2/2 页" in cards[1]["header"]["title"]["content"]
 
 
+def test_report_document_daily_metrics_name_both_comparisons() -> None:
+    channel = _channel()
+    ui = {
+        "kind": "report_document",
+        "title": "Cube 日报",
+        "quality": "complete",
+        "context": {
+            "timezone": "Asia/Shanghai",
+            "current_window": {
+                "start": "2026-08-29 00:00",
+                "end": "2026-08-30 00:00",
+            },
+            "comparison_windows": [
+                {
+                    "key": "previous_period",
+                    "label": "前一日",
+                    "window": {
+                        "start": "2026-08-28 00:00",
+                        "end": "2026-08-29 00:00",
+                    },
+                },
+                {
+                    "key": "previous_week_same_day",
+                    "label": "上周同期",
+                    "window": {
+                        "start": "2026-08-22 00:00",
+                        "end": "2026-08-23 00:00",
+                    },
+                },
+            ],
+        },
+        "blocks": [
+            {
+                "kind": "metrics",
+                "data": {
+                    "items": [
+                        {
+                            "label": "Token 消耗",
+                            "value": "300",
+                            "comparisons": [
+                                {
+                                    "label": "较前一日",
+                                    "baseline": "200",
+                                    "change": "↑50.0%",
+                                },
+                                {
+                                    "label": "较上周同期",
+                                    "baseline": "100",
+                                    "change": "↑200.0%",
+                                },
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+
+    card = channel._build_agent_ui_cards(
+        ui,
+        OutboundMessage(channel="feishu", chat_id="ou_alice", content="fallback"),
+    )[0]
+    rendered = "\n".join(
+        element.get("text", {}).get("content", "")
+        for column_set in card["elements"]
+        if column_set.get("tag") == "column_set"
+        for column in column_set.get("columns", [])
+        for element in column.get("elements", [])
+    )
+    note = next(element for element in card["elements"] if element.get("tag") == "note")
+    note_text = note["elements"][0]["content"]
+
+    assert "较前一日：↑50.0%" in rendered
+    assert "较上周同期：↑200.0%" in rendered
+    assert "基准 200" not in rendered
+    assert "对比（前一日）：2026-08-28 00:00 - 2026-08-29 00:00" in note_text
+    assert "对比（上周同期）：2026-08-22 00:00 - 2026-08-23 00:00" in note_text
+
+
 def test_report_document_actions_are_opaque_and_owner_bound() -> None:
     channel = _channel()
     ui = {
@@ -378,6 +520,49 @@ def test_report_document_actions_are_opaque_and_owner_bound() -> None:
     assert params == {"action": "subscriptions"}
 
 
+def test_provider_quality_selector_uses_opaque_options_and_resumes_report() -> None:
+    channel = _channel()
+    interaction = report_interactions().create(
+        channel="feishu",
+        chat_id="ou_alice",
+        user_id="ou_alice",
+        options={"opaque-ppio": "ppio", "opaque-other": "other"},
+    )
+    document = provider_quality_selector_document(
+        interaction,
+        [
+            {"provider": "ppio", "name": "PPIO", "model": "Kimi-K3", "enabled": True},
+            {"provider": "other", "name": "Other", "model": "Kimi-K3", "enabled": True},
+        ],
+        timezone="Asia/Shanghai",
+    ).to_agent_ui()
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+    card = channel._build_agent_ui_cards(document, msg)[0]
+    selector = next(_find_tag(card, "multi_select_static"))
+    submit = next(button for button in _find_tag(card, "button") if button["name"] == "submit_provider_quality")
+    selected = next(option["value"] for option in selector["options"] if option["value"] == "opaque-ppio")
+    channel._schedule_tool_resume = MagicMock(return_value=True)
+
+    response = channel._on_card_action_sync(
+        _action(
+            value=submit["value"],
+            name=submit["name"],
+            form_value={"provider_options": [selected], "period": ["day"]},
+        )
+    )
+
+    assert response.toast.type == "success"
+    _, tool_name, params, _ = channel._schedule_tool_resume.call_args.args
+    assert tool_name == "report_center"
+    assert params["providers"] == ["ppio"]
+    assert params["selection_confirmed"] is True
+
+
 def test_health_document_actions_route_to_health_report_and_health_subscription() -> None:
     channel = _channel()
     health = channel._resolve_report_document_action({"action_id": "health_report"})
@@ -398,6 +583,15 @@ def test_health_document_actions_route_to_health_report_and_health_subscription(
             "report_family": "health",
         },
         "content": "设置 Cube 健康日报订阅",
+    }
+
+    provider_quality = channel._resolve_report_document_action(
+        {"action_id": "provider_quality_report"}
+    )
+    assert provider_quality == {
+        "tool_name": "report_center",
+        "params": {"action": "provider_quality_report", "period": "recent15m"},
+        "content": "生成 Cube 供应商质量报告",
     }
 
 

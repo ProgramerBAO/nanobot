@@ -1632,10 +1632,21 @@ class FeishuChannel(BaseChannel):
                 value = str(item.get("value") or "-")
                 change = str(item.get("change") or "").strip()
                 content = f"**{label}**\n**{value}**"
-                if item.get("baseline_value") is not None:
-                    content += f"\n基准 {item.get('baseline') or '-'}"
-                if change and item.get("label") != "总体状态":
-                    content += f"\n较基准 {change}"
+                comparisons = [
+                    comparison
+                    for comparison in item.get("comparisons") or []
+                    if isinstance(comparison, dict)
+                ]
+                if comparisons:
+                    for comparison in comparisons:
+                        comparison_label = str(comparison.get("label") or "对比")
+                        comparison_change = str(
+                            comparison.get("change") or "暂无可比基准"
+                        )
+                        content += f"\n{comparison_label}：{comparison_change}"
+                else:
+                    if change and item.get("label") != "总体状态":
+                        content += f"\n较基准 {change}"
                 valid_samples = item.get("valid_sample_count")
                 if valid_samples not in (None, ""):
                     sample_label = "有效请求" if item.get("metric") == "ai.ttft" else "时间桶"
@@ -1706,10 +1717,27 @@ class FeishuChannel(BaseChannel):
             reasons = [reasons]
         reason_text = "；".join(str(item) for item in reasons[:5]) if reasons else "无"
         freshness = str(context.get("freshness") or "未提供")
+        comparisons = [
+            item
+            for item in context.get("comparison_windows") or []
+            if isinstance(item, dict)
+        ]
+        if comparisons:
+            comparison_lines = []
+            for item in comparisons:
+                label = str(item.get("label") or "对比周期")
+                comparison_lines.append(
+                    f"对比（{label}）：{window_text(item.get('window'))}"
+                )
+            comparison_text = "\n".join(comparison_lines)
+            baseline_rule = "已按名称列出"
+        else:
+            comparison_text = f"对比基准：{baseline}"
+            baseline_rule = "前一等长窗口"
         content = (
-            f"基准：前一等长窗口\n"
             f"当前：{current}\n"
-            f"基准：{baseline}\n"
+            f"{comparison_text}\n"
+            f"基准规则：{baseline_rule}\n"
             f"时区：{timezone}\n"
             f"来源：{source_text}\n"
             f"口径：{aggregation_text}\n"
@@ -2085,27 +2113,50 @@ class FeishuChannel(BaseChannel):
     def _build_report_card(
         self, card: dict[str, Any], msg: OutboundMessage | None = None
     ) -> dict[str, Any]:
-        elements: list[dict[str, Any]] = [
-            {
-                "tag": "markdown",
-                "content": "**周期概览**\n" + "\n".join(
-                    f"• {item}" for item in card.get("overview") or []
-                ),
-            },
-            {"tag": "hr"},
-            {
-                "tag": "markdown",
-                "content": "**分段总量**\n" + "\n".join(
-                    f"• {item}" for item in card.get("segments") or []
-                ),
-            },
+        comparison_windows = [
+            item for item in card.get("comparison_windows") or [] if isinstance(item, dict)
         ]
+        elements: list[dict[str, Any]] = []
+        if comparison_windows:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": "**对比周期**\n"
+                    + "\n".join(
+                        f"• {item.get('label') or '对比'}：{item.get('window') or '暂无'}"
+                        for item in comparison_windows
+                    ),
+                }
+            )
+        overview = [str(item) for item in card.get("overview") or [] if str(item)]
+        if overview:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": "**周期概览**\n" + "\n".join(f"• {item}" for item in overview),
+                }
+            )
+        segments = [str(item) for item in card.get("segments") or [] if str(item)]
+        if segments:
+            elements.extend(
+                [
+                    {"tag": "hr"},
+                    {
+                        "tag": "markdown",
+                        "content": "**分段总量**\n"
+                        + "\n".join(f"• {item}" for item in segments),
+                    },
+                ]
+            )
         table = card.get("table")
         if isinstance(table, dict):
             elements.extend(
                 [
                     {"tag": "hr"},
-                    {"tag": "markdown", "content": "**模型矩阵**"},
+                    {
+                        "tag": "markdown",
+                        "content": f"**{table.get('title') or '模型矩阵'}**",
+                    },
                     {
                         "tag": "table",
                         "page_size": int(table.get("page_size") or 8),
@@ -2114,26 +2165,34 @@ class FeishuChannel(BaseChannel):
                     },
                 ]
             )
-        elements.extend(
-            [
-                {"tag": "hr"},
-                {
-                    "tag": "markdown",
-                    "content": "**关键变化**\n" + "\n".join(
-                        f"• {item}" for item in card.get("insights") or []
-                    ),
-                },
+        insights = [str(item) for item in card.get("insights") or [] if str(item)]
+        if insights:
+            elements.extend(
+                [
+                    {"tag": "hr"},
+                    {
+                        "tag": "markdown",
+                        "content": "**关键变化**\n"
+                        + "\n".join(f"• {item}" for item in insights),
+                    },
+                ]
+            )
+        quality = str(card.get("quality") or "").strip()
+        if quality:
+            elements.append(
                 {
                     "tag": "note",
-                    "elements": [
-                        {
-                            "tag": "plain_text",
-                            "content": str(card.get("quality") or ""),
-                        }
-                    ],
-                },
-            ]
-        )
+                    "elements": [{"tag": "plain_text", "content": quality}],
+                }
+            )
+        footnote = str(card.get("footnote") or "").strip()
+        if footnote:
+            elements.append(
+                {
+                    "tag": "note",
+                    "elements": [{"tag": "plain_text", "content": footnote}],
+                }
+            )
         raw_actions = [
             item for item in card.get("actions") or [] if isinstance(item, dict)
         ]
@@ -2205,6 +2264,12 @@ class FeishuChannel(BaseChannel):
                 "tool_name": "report_center",
                 "params": {"action": "health_report", "period": "recent15m"},
                 "content": "生成 Cube 健康报告",
+            }
+        if action_id == "provider_quality_report":
+            return {
+                "tool_name": "report_center",
+                "params": {"action": "provider_quality_report", "period": "recent15m"},
+                "content": "生成 Cube 供应商质量报告",
             }
         if action_id == "subscription_setup:health":
             return {
@@ -2354,6 +2419,19 @@ class FeishuChannel(BaseChannel):
             elif kind == "table":
                 title = str(data.get("title") or "明细").strip()
                 rows = list(data.get("rows") or [])
+                if data.get("collapsed") is True:
+                    collapsed_label = str(
+                        data.get("collapsed_label") or f"{title}（默认收起）"
+                    )
+                    elements.append(
+                        {
+                            "tag": "note",
+                            "elements": [
+                                {"tag": "plain_text", "content": collapsed_label}
+                            ],
+                        }
+                    )
+                    continue
                 if title:
                     elements.append(
                         {
@@ -2430,6 +2508,164 @@ class FeishuChannel(BaseChannel):
             }
         ]
 
+    def _build_provider_selector_card(
+        self, ui: dict[str, Any], msg: OutboundMessage
+    ) -> dict[str, Any]:
+        """Render the provider selector with the same opaque interaction contract as other forms."""
+
+        interaction_id = str(
+            next(
+                (
+                    (block.get("data") or {}).get("interaction_id")
+                    for block in ui.get("blocks") or []
+                    if isinstance(block, dict) and block.get("kind") == "selector"
+                ),
+                "",
+            )
+            or ""
+        )
+        selector = next(
+            (
+                block.get("data") or {}
+                for block in ui.get("blocks") or []
+                if isinstance(block, dict) and block.get("kind") == "selector"
+            ),
+            {},
+        )
+        if not interaction_id or not isinstance(selector, dict):
+            return self._build_report_document(ui, msg)
+
+        # Keep only the interaction id in the channel-local state. The shared
+        # store validates the option tokens, owner, chat and one-time submit.
+        state = _FeishuCardInteraction(
+            owner_open_id=str(msg.metadata.get("sender_open_id") or ""),
+            chat_id=msg.chat_id,
+            metadata=dict(msg.metadata),
+            expires_at=time.monotonic() + 600,
+            phase="provider_selector",
+            base_params={},
+            option_values={},
+            selected_tenants=[],
+            selected_models={},
+            max_tenants=0,
+        )
+        with self._card_interaction_lock:
+            self._card_interactions[interaction_id] = state
+
+        provider_options = [
+            item for item in selector.get("options") or [] if isinstance(item, dict)
+        ]
+        all_option = selector.get("all_option") or {}
+        all_label = str(all_option.get("label") or "全部供应商")
+        all_description = str(all_option.get("description") or "")
+        options = [
+            {
+                "text": {
+                    "tag": "plain_text",
+                    "content": str(item.get("label") or "未命名供应商"),
+                },
+                "value": str(item.get("token") or ""),
+            }
+            for item in provider_options
+            if str(item.get("token") or "")
+        ]
+        all_token = str(all_option.get("token") or "")
+        if all_token:
+            options.insert(
+                0,
+                {
+                    "text": {"tag": "plain_text", "content": all_label},
+                    "value": all_token,
+                },
+            )
+        period_options = [
+            {
+                "text": {
+                    "tag": "plain_text",
+                    "content": str(item.get("label") or item.get("value") or ""),
+                },
+                "value": str(item.get("value") or ""),
+            }
+            for item in selector.get("periods") or []
+            if isinstance(item, dict) and str(item.get("value") or "")
+        ]
+        default_period = str(selector.get("default_period") or "recent15m")
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": self._card_header(
+                str(ui.get("title") or "Cube 供应商质量报告"),
+                str(ui.get("subtitle") or "选择供应商与统计周期"),
+                template="blue",
+            ),
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**范围**：{all_label}（{all_description}）\n"
+                        "可选择一个或多个供应商；全部供应商模式会折叠无用量对象。"
+                    ),
+                },
+                {
+                    "tag": "form",
+                    "name": f"provider_quality_{interaction_id[:8]}",
+                    "elements": [
+                        {
+                            "tag": "multi_select_static",
+                            "name": "provider_options",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "选择供应商（不选则为全部）",
+                            },
+                            "options": options,
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "period",
+                            "required": True,
+                            "width": "fill",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "选择统计周期",
+                            },
+                            "options": period_options,
+                            "initial_option": default_period,
+                        },
+                        {
+                            "tag": "input",
+                            "name": "start_date",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "自定义开始日期 YYYY-MM-DD（仅自定义区间填写）",
+                            },
+                        },
+                        {
+                            "tag": "input",
+                            "name": "end_date",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "自定义结束日期 YYYY-MM-DD（仅自定义区间填写）",
+                            },
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_provider_quality",
+                            "text": {"tag": "plain_text", "content": "生成报告"},
+                            "type": "primary",
+                            "complex_interaction": True,
+                            "action_type": "form_submit",
+                            "value": {
+                                "interaction_id": interaction_id,
+                                "action": "provider_selector_submit",
+                                "submit_token": str(selector.get("submit_token") or ""),
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
     def _build_report_document(
         self, ui: dict[str, Any], msg: OutboundMessage
     ) -> dict[str, Any]:
@@ -2451,12 +2687,31 @@ class FeishuChannel(BaseChannel):
             if phase == "models":
                 return [self._build_model_card(ui, msg)]
         if kind == "magik_report_cards":
-            return [
-                self._build_report_card(card, msg)
-                for card in ui.get("cards") or []
-                if isinstance(card, dict)
-            ]
+            rendered: list[dict[str, Any]] = []
+            for card in ui.get("cards") or []:
+                if not isinstance(card, dict):
+                    continue
+                rendered.append(self._build_report_card(card, msg))
+                tpm_table = card.get("tpm_table")
+                if isinstance(tpm_table, dict):
+                    continuation = {
+                        **card,
+                        "title": f"{card.get('title') or 'Magik Cube 报表'} · TPM 明细",
+                        "overview": [],
+                        "segments": [],
+                        "table": tpm_table,
+                        "tpm_table": None,
+                        "insights": [],
+                        "actions": [],
+                    }
+                    rendered.append(self._build_report_card(continuation, msg))
+            return rendered
         if kind == "report_document":
+            if any(
+                isinstance(block, dict) and block.get("kind") == "selector"
+                for block in ui.get("blocks") or []
+            ):
+                return [self._build_provider_selector_card(ui, msg)]
             return self._build_report_document_cards(ui, msg)
         if kind == "report_subscription_form":
             return [self._build_subscription_card(ui, msg)]
@@ -4028,7 +4283,37 @@ class FeishuChannel(BaseChannel):
                 if state.consumed:
                     return self._card_callback_response("info", "该操作已提交，请勿重复点击")
 
-                if state.phase == "report_document":
+                action_name = str(value.get("action") or "")
+                if state.phase == "provider_selector":
+                    if action_name != "provider_selector_submit":
+                        return self._card_callback_response("error", "未知的供应商选择操作")
+                    submitted_options = self._callback_option_values(
+                        form_value.get("provider_options")
+                    )
+                    submitted_period = self._callback_option_values(form_value.get("period"))
+                    if not submitted_period:
+                        submitted_period = [str(value.get("period") or "recent15m")]
+                    from nanobot.reporting.interactions import report_interactions
+
+                    resolved = report_interactions().resolve(
+                        interaction_id=interaction_id,
+                        channel="feishu",
+                        chat_id=state.chat_id,
+                        user_id=operator_open_id,
+                        submit_token=str(value.get("submit_token") or ""),
+                        selected_options=submitted_options,
+                        period=submitted_period[0],
+                        start_date=str(form_value.get("start_date") or ""),
+                        end_date=str(form_value.get("end_date") or ""),
+                    )
+                    if resolved is None:
+                        return self._card_callback_response("error", "选择卡已失效，请重新发起")
+                    params = dict(resolved)
+                    params["selection_confirmed"] = True
+                    resume_tool_name = "report_center"
+                    resume_content = "生成 Cube 供应商质量报告"
+                    state.consumed = True
+                elif state.phase == "report_document":
                     action_token = str(value.get("action_token") or "")
                     target = state.option_values.get(action_token)
                     if not isinstance(target, dict):
@@ -4096,8 +4381,7 @@ class FeishuChannel(BaseChannel):
                     count = sum(len(items) for items in selected_models.values())
                     return self._card_callback_response("success", f"已选择 {count} 个模型")
 
-                action_name = value.get("action")
-                if state.phase == "report_document":
+                if state.phase in {"report_document", "provider_selector"}:
                     pass
                 elif state.phase == "subscription":
                     if action_name != "submit_subscription":
@@ -4169,7 +4453,7 @@ class FeishuChannel(BaseChannel):
                 else:
                     return self._card_callback_response("error", "未知的报表操作")
 
-            if state.phase in {"report_document", "subscription"}:
+            if state.phase in {"report_document", "subscription", "provider_selector"}:
                 scheduled = self._schedule_tool_resume(
                     state, resume_tool_name, params, resume_content
                 )
@@ -4179,7 +4463,7 @@ class FeishuChannel(BaseChannel):
                 with self._card_interaction_lock:
                     state.consumed = False
                 return self._card_callback_response("error", "Gateway 当前不可用，请稍后重试")
-            if state.phase == "report_document":
+            if state.phase in {"report_document", "provider_selector"}:
                 message = "正在处理"
             elif state.phase == "subscription":
                 message = "正在创建订阅"
@@ -4483,6 +4767,16 @@ class FeishuChannel(BaseChannel):
             cube_usage_semantics_v2=bool(
                 getattr(reporting_config, "cube_usage_semantics_v2", False)
             ),
+            cube_provider_quality_connector_enabled=bool(
+                getattr(reporting_config, "cube_provider_quality_connector", False)
+            ),
+            cube_provider_quality_template_enabled=(
+                bool(getattr(reporting_config, "cube_provider_quality_connector", False))
+                and bool(getattr(reporting_config, "cube_provider_quality_template", False))
+            ),
+            cube_provider_quality_detail_enabled=bool(
+                getattr(reporting_config, "cube_provider_quality_detail", False)
+            ),
             health_thresholds=getattr(reporting_config, "health_thresholds", None),
             timezone=str(getattr(reporting_config, "timezone", "Asia/Shanghai")),
         )
@@ -4492,6 +4786,11 @@ class FeishuChannel(BaseChannel):
             channel=self.name,
             user_id=user_id,
             health_enabled=bool(getattr(reporting_config, "cube_health_report", False)),
+            provider_quality_enabled=(
+                bool(getattr(reporting_config, "cube_provider_quality_connector", False))
+                and bool(getattr(reporting_config, "cube_provider_quality_template", False))
+                and bool(getattr(reporting_config, "cube_provider_quality_report", False))
+            ),
         )
         await self.send(
             OutboundMessage(

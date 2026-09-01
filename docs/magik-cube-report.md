@@ -89,12 +89,15 @@ python -m nanobot gateway
 
 - 大客户：`GET /tenants` 返回的 `isKeyAccount=true` 租户。
 - Token：报表日全天 `totalTokens`，分别与前一天、七天前比较。
-- 请求数：Token 接口返回的 `requestCount`；范围报告同时计算平均 Token/请求。
-- 峰值 TPM：租户所有 Endpoint 在当天的最大 `maxTpm`。
+- 请求数：Token 接口返回的 `requestCount`，在窗口内求和。
+- 平均 TPM：`analysis/endpoint-max-tpm/daily/query` 返回的 `avgTpm`。单日直接展示；多日只对同一 `tenant + model + endpoint` 序列的有效日期取算术平均，不跨 Endpoint 或客户汇总。
+- 峰值 TPM：同一接口返回的 `maxTpm`。单序列取窗口最大值；多序列概览展示“最高 Endpoint 峰值 TPM”，明细保留各 Endpoint 的峰值。
 - 配额变更：只展示能够映射到当前大客户 Endpoint/ModelConfig 的 TPM、RPM、并发 old/new 记录。
 - Proxy 变更：当前快照相对上一份成功快照的净变化，包括 `maxTPM`、`maxRunningRequests`、`maxNewSessions`。
 - 机器数：平台返回的 8 卡等效机器数。
 - P/D：最近一段时间实际调用中出现过的不同 `prefillPodName` 和 `podName` 数量比，不代表完整部署拓扑。
 - 告警：管理 API 暂无告警事件接口，所以第一版只显示未接入提示。
 
-范围报表还固定计算 Token/请求数/平均 Token 每请求/TPM 的绝对变化和百分比变化、模型占比、日均、峰值日期、增长/下降排行、新增/停用。模型占比不足 1% 不进入趋势异常榜；当日 Token 高于周期中位数 50% 且模型占比至少 1% 时标记峰值异常。接口失败、分页截断或分片缺失会明确标为“数据不完整”，不会按零处理。
+日报固定比较查询日与前一日、上周同期，并省略与概览重复的“分段总量”；周报、月报和区间报表继续保留分段趋势。所有用户可见变化只展示百分比：上升 `↑x.x%`、下降 `↓x.x%`、相等 `0.0%`、零基准增长`新增`、两期均零`无变化`，基准缺失显示`暂无可比基准`。底层保留原始当前值、基准值和差值用于计算与审计，但卡片、Markdown、WebUI 和文本 fallback 不展示绝对增减值。
+
+范围报表还固定计算模型占比、日均、峰值日期、增长/下降排行和新增/停用。模型占比不足 1% 不进入趋势异常榜；当日 Token 高于周期中位数 50% 且模型占比至少 1% 时标记峰值异常。`avgTpm` 缺失、接口失败、分页截断或分片缺失会明确标为“暂不可用”或“数据不完整”，不会使用 `maxTpm` 或 0 替代。

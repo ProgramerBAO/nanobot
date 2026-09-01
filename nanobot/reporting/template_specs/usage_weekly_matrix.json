@@ -6,7 +6,7 @@
   "category": "usage",
   "period": "week",
   "comparison": "previous_period",
-  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm"],
-  "dimensions": ["tenant", "model", "date"],
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm"],
+  "dimensions": ["tenant", "model", "endpoint", "date"],
   "description": "固定周报，上周对比上上周。"
 }

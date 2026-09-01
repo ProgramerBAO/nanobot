@@ -408,6 +408,30 @@ export class NanobotClient {
     this.queueSend(frame);
   }
 
+  sendReportAction(
+    chatId: string,
+    action: {
+      interactionId: string;
+      submitToken: string;
+      selectedOptions: string[];
+      period: string;
+      startDate?: string;
+      endDate?: string;
+    },
+  ): void {
+    this.knownChats.add(chatId);
+    this.queueSend({
+      type: "report_action",
+      chat_id: chatId,
+      interaction_id: action.interactionId,
+      submit_token: action.submitToken,
+      selected_options: action.selectedOptions,
+      period: action.period,
+      ...(action.startDate ? { start_date: action.startDate } : {}),
+      ...(action.endDate ? { end_date: action.endDate } : {}),
+    });
+  }
+
   sendSystemCommand(chatId: string, command: string, timeoutMs = 5_000): Promise<void> {
     const normalized = command.trim();
     const turnId = `${SYSTEM_COMMAND_TURN_PREFIX}${crypto.randomUUID()}`;

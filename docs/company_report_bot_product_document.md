@@ -79,11 +79,21 @@ Feishu 消息/卡片
 
 | 模板 | 默认周期 | 核心内容 | 默认输出 |
 | --- | --- | --- | --- |
-| 日报 | 昨天 vs 前天 | Token、请求数、平均 Token/请求、峰值 TPM；模型总量/占比和较前日变化 | 矩阵卡 |
-| 周报 | 上周 vs 上上周 | 周期总量变化；模型周总量、占比、周变化；周一至周日同期变化 | 矩阵卡 |
-| 月报 | 上月 vs 前一自然月 | W1=1-7、W2=8-14、W3=15-21、W4=22-28、W5=月末 | 矩阵卡 |
-| 区间对比 | 自定义两段窗口 | Token、请求数、平均值、TPM、绝对变化和百分比变化 | 矩阵卡/文本 |
+| 日报 | 默认昨天；同时对比前一日和上周同期 | Token、请求数、单 Endpoint 平均 TPM、最高 Endpoint 峰值 TPM；模型总量/占比；变化标注基准名称和日期 | 矩阵卡 |
+| 周报 | 上周 vs 上上周 | 周期总量、平均 TPM、模型周总量/占比、周一至周日同期变化 | 矩阵卡 |
+| 月报 | 上月 vs 前一自然月 | 平均 TPM；W1=1-7、W2=8-14、W3=15-21、W4=22-28、W5=月末 | 矩阵卡 |
+| 区间对比 | 自定义两段窗口 | Token、请求数、平均 TPM、峰值 TPM及百分比变化 | 矩阵卡/文本 |
 | 完整报表 | 继承对应周期 | 保留原有详细文本报告和数据质量说明 | 文本 |
+
+### 日报卡片
+
+- 查询日期为 `D` 时，固定展示前一日 `D-1` 和上周同期 `D-7`；显式日期优先，未提供日期才默认昨天。
+- 变化只展示 `↑/↓百分比`、`0.0%`、`新增`、`无变化`或`暂无可比基准`，不展示绝对增减值。
+- 平均 TPM 来自 Cube Admin `analysis/endpoint-max-tpm/daily/query` 的 `avgTpm`。单日直接展示该值，多日只在同一 `tenant + model + endpoint` 序列内对有效日期取算术平均。
+- 平均 TPM 不跨 Endpoint 或客户汇总；多序列概览显示“多 Endpoint/客户，不汇总”，并在独立 Endpoint TPM 明细续卡中逐序列展示。
+- 峰值 TPM 来自同一接口的 `maxTpm`；多序列概览明确标为“最高 Endpoint 峰值 TPM”。
+- 日报不显示与周期概览重复的“分段总量”；周报、月报和区间报表继续保留分段趋势。
+- `avgTpm` 缺失或接口失败时显示“暂不可用”及数据质量，不以 `maxTpm` 或 0 代替。
 
 ### 周报卡片
 
@@ -212,15 +222,16 @@ Feishu 消息/卡片
 
 ### 已实现
 
-统一报告领域对象、插件 registry、Magik 兼容入口、日报/周报/月报矩阵模板、Feishu 首页和通用卡片 action、SQLite 状态、订阅幂等、基础 RBAC、Web 管理首版和 CLI。
+统一报告领域对象、插件 registry、Magik 兼容入口、日报/周报/月报矩阵模板、Feishu 首页和通用卡片 action、SQLite 状态、订阅幂等、基础 RBAC、Web 管理首版和 CLI。供应商质量报告已补充 WebUI/Feishu 结构化选择器、provider 多选、全部供应商无用量折叠和查询失败语义区分。
 
 ### 已验证
 
-专项测试 `56 passed`；Ruff、`compileall`、`git diff --check`、WebUI production build；本地 Gateway health、Feishu WebSocket、Tool 注册和管理 API。
+Cube 用量、Intent、Report Center、Connector、Platform 和 Feishu 目标集 `122 passed`；WebUI `49 files / 739 tests passed`；Ruff、`compileall`、`git diff --check` 和 production build 通过。本地 Gateway 已从仓库源码重启，health 与 WebUI 均返回 HTTP 200。真实 Cube `avgTpm` 数值和 Feishu 卡片仍需按下方指定问法完成人工验收。
 
 ### 当前限制
 
 - Magik 查询仍通过兼容 Tool 执行，ReportRunner 已提供抽象但第二 connector 尚未接入。
+- Cube 供应商质量报告已提供只读 Connector、Template、实时目录选择器和共享 `ReportDocument` 展示路径；生产报表 flags 仍默认关闭，需完成 staging contract 后再开放。全部供应商模式默认收起成功空数据，查询异常保持显式展示。
 - PostgreSQL 尚未实测。
 - 第二消息渠道尚未接入。
 - Plugin API 暂不冻结为 v1。
@@ -246,5 +257,7 @@ Feishu 消息/卡片
 - 需要解释原因时明确说“深度分析”，系统会在确定性摘要基础上进行一次解释。
 - 发现数据异常先看报表底部质量说明，不把 `missing` 或 `partial` 当成真实零值。
 - 新报表先作为模板候选收集，经过指标定义、样例对账、权限确认和 canary 后再发布。
+- 供应商质量报告的使用方法、指标来源和质量等级见 [`docs/cube-provider-quality.md`](cube-provider-quality.md)。
+- 供应商质量报告从帮助中心进入后先选择供应商和周期；Feishu 与 WebUI 共用同一份结构化 `ReportDocument`，使用方式和数据质量语义保持一致。
 
 > 本文件只针对公司内部报表机器人业务。新增数据源、报表模板或消息渠道时，应同步更新产品范围、权限模型、数据质量规则和验收指标。

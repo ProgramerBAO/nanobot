@@ -1523,7 +1523,13 @@ class AgentLoop:
         direct: tuple[str, dict[str, Any]] | None = None
         if (
             isinstance(trusted_direct, dict)
-            and ctx.msg.channel.split(":", 1)[0] == "feishu"
+            and (
+                ctx.msg.channel.split(":", 1)[0] == "feishu"
+                or (
+                    ctx.msg.channel.split(":", 1)[0] == "websocket"
+                    and metadata.get("report_action_validated") is True
+                )
+            )
         ):
             tool_name = trusted_direct.get("name")
             params = trusted_direct.get("params")

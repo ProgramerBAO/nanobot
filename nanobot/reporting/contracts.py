@@ -19,6 +19,7 @@ CANONICAL_METRICS = frozenset(
         "ai.requests",
         "ai.rpm",
         "ai.tpm",
+        "ai.tpm.avg",
         "ai.error_rate",
         "ai.http_4xx_rate",
         "ai.http_5xx_rate",
@@ -29,6 +30,19 @@ CANONICAL_METRICS = frozenset(
         "ai.unbilled_amount",
         "ai.gpu_hours",
         "ai.capacity_utilization",
+        "ai.provider.throughput",
+        "ai.provider.latency",
+        "ai.provider.error_rate",
+        "ai.provider.tpm",
+        "ai.provider.traffic_ratio",
+        "ai.provider.tokens",
+        "ai.provider.requests",
+        "ai.provider.actual_tpm",
+        "ai.provider.avg_latency",
+        "ai.provider.avg_ttft",
+        "ai.provider.test_score",
+        "ai.provider.input_price",
+        "ai.provider.output_price",
     }
 )
 
@@ -63,9 +77,16 @@ USAGE_METRIC_SEMANTICS: dict[str, dict[str, str]] = {
         "direction": "informational",
     },
     "ai.tpm": {
-        "label": "TPM",
+        "label": "峰值 TPM",
         "unit": "tokens/minute",
-        "aggregation": "日峰值的窗口峰值",
+        "aggregation": "单 Endpoint 日峰值的窗口最大值",
+        "source": "Cube Admin / analysis/endpoint-max-tpm/daily/query",
+        "direction": "informational",
+    },
+    "ai.tpm.avg": {
+        "label": "平均 TPM",
+        "unit": "tokens/minute",
+        "aggregation": "同一 Endpoint 有效日 avgTpm 的算术平均",
         "source": "Cube Admin / analysis/endpoint-max-tpm/daily/query",
         "direction": "informational",
     },
@@ -128,6 +149,7 @@ class ReportQuery:
     comparison_end: date | None = None
     comparison_start_time: datetime | None = None
     comparison_end_time: datetime | None = None
+    additional_comparisons: tuple[ReportQueryComparison, ...] = ()
     query_id: str = ""
     step_seconds: int | None = None
 
@@ -150,6 +172,24 @@ class ReportWindow:
     start: str
     end: str
     label: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ReportQueryComparison:
+    """An additional named date window fetched by a deterministic query plan."""
+
+    key: str
+    start_date: date
+    end_date: date
+
+
+@dataclass(frozen=True, slots=True)
+class ReportComparisonWindow:
+    """A named comparison window shown consistently by every renderer."""
+
+    key: str
+    label: str
+    window: ReportWindow
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +223,7 @@ class ReportContext:
     current_window: ReportWindow | None = None
     baseline_window: ReportWindow | None = None
     baseline_policy: BaselinePolicy = "previous_equal_window"
+    comparison_windows: tuple[ReportComparisonWindow, ...] = ()
     sources: tuple[ReportSource, ...] = ()
     metric_definitions: tuple[MetricDefinition, ...] = ()
     calculation_version: str = "1"
@@ -206,7 +247,7 @@ class ReportAction:
 class ReportBlock:
     """One channel-neutral UI block."""
 
-    kind: Literal["markdown", "metrics", "table", "note", "actions"]
+    kind: Literal["markdown", "metrics", "table", "note", "actions", "selector"]
     data: dict[str, Any]
 
 
@@ -302,6 +343,16 @@ def validate_report_query(query: ReportQuery) -> None:
         raise ValueError("report query contains a non-canonical dimension")
     if query.end_date < query.start_date:
         raise ValueError("report query end_date must not be earlier than start_date")
+    comparison_keys: set[str] = set()
+    for comparison in query.additional_comparisons:
+        key = comparison.key.strip()
+        if not key or not key.replace("_", "").isalnum():
+            raise ValueError("report query comparison key must be an identifier")
+        if key in comparison_keys:
+            raise ValueError("report query comparison keys must be unique")
+        if comparison.end_date < comparison.start_date:
+            raise ValueError("report query comparison end_date must not precede start_date")
+        comparison_keys.add(key)
     times = (query.start_time, query.end_time)
     if any(value is not None for value in times):
         if not all(value is not None for value in times):

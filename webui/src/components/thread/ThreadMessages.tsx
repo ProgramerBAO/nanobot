@@ -4,7 +4,7 @@ import { MessageBubble } from "@/components/MessageBubble";
 import { AgentActivityCluster } from "@/components/thread/AgentActivityCluster";
 import { AssistantSelectionAction } from "@/components/thread/AssistantSelectionAction";
 import { normalizeActivityTimeline, type TurnUnit } from "@/lib/activity-timeline";
-import type { CliAppInfo, McpPresetInfo, SlashCommand, UIMessage } from "@/lib/types";
+import type { CliAppInfo, McpPresetInfo, ReportActionRequest, SlashCommand, UIMessage } from "@/lib/types";
 
 interface ThreadMessagesProps {
   messages: UIMessage[];
@@ -18,6 +18,8 @@ interface ThreadMessagesProps {
   onOpenFilePreview?: (path: string) => void;
   onForkFromMessage?: (beforeUserIndex: number) => void;
   onQuoteSelection?: (text: string) => void;
+  onReportAction?: (request: ReportActionRequest) => void;
+  onReportCommand?: (command: string) => void;
 }
 
 export type DisplayUnit = TurnUnit;
@@ -59,6 +61,8 @@ export function ThreadMessages({
   onOpenFilePreview,
   onForkFromMessage,
   onQuoteSelection,
+  onReportAction,
+  onReportCommand,
 }: ThreadMessagesProps) {
   const { t } = useTranslation();
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -119,6 +123,8 @@ export function ThreadMessages({
             slashCommands={slashCommands}
             onOpenFilePreview={onOpenFilePreview}
             onForkFromMessage={onForkFromMessage}
+            onReportAction={onReportAction}
+            onReportCommand={onReportCommand}
           />
         );
       })}
@@ -140,6 +146,8 @@ interface ThreadDisplayUnitProps {
   slashCommands: SlashCommand[];
   onOpenFilePreview?: (path: string) => void;
   onForkFromMessage?: (beforeUserIndex: number) => void;
+  onReportAction?: (request: ReportActionRequest) => void;
+  onReportCommand?: (command: string) => void;
 }
 
 const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
@@ -156,6 +164,8 @@ const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
   slashCommands,
   onOpenFilePreview,
   onForkFromMessage,
+  onReportAction,
+  onReportCommand,
 }: ThreadDisplayUnitProps) {
   const onForkFromHere = useCallback(() => {
     if (forkIndex !== undefined) onForkFromMessage?.(forkIndex);
@@ -189,6 +199,8 @@ const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
             slashCommands={slashCommands}
             onOpenFilePreview={onOpenFilePreview}
             onForkFromHere={forkIndex !== undefined ? onForkFromHere : undefined}
+            onReportAction={onReportAction}
+            onReportCommand={onReportCommand}
           />
         )}
       </div>
@@ -215,6 +227,8 @@ function threadDisplayUnitPropsEqual(
     && previous.slashCommands === next.slashCommands
     && previous.onOpenFilePreview === next.onOpenFilePreview
     && previous.onForkFromMessage === next.onForkFromMessage
+    && previous.onReportAction === next.onReportAction
+    && previous.onReportCommand === next.onReportCommand
   );
 }
 

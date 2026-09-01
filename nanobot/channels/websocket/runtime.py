@@ -18,7 +18,7 @@ from websockets.asyncio.server import ServerConnection, serve, unix_serve
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as WsRequest
 
-from nanobot.bus.events import OUTBOUND_META_AGENT_UI, OutboundMessage
+from nanobot.bus.events import INBOUND_META_DIRECT_TOOL, OUTBOUND_META_AGENT_UI, OutboundMessage
 from nanobot.bus.outbound_events import (
     GoalStateSyncEvent,
     GoalStatusEvent,
@@ -33,6 +33,7 @@ from nanobot.bus.outbound_events import (
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Base
+from nanobot.reporting.interactions import report_interactions
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_INPUT_META,
     WEBUI_QUOTE_METADATA,
@@ -627,6 +628,9 @@ class WebSocketChannel(BaseChannel):
             event, payload = await webui_transcription_event(envelope)
             await self._send_event(connection, event, **payload)
             return
+        if t == "report_action":
+            await self._dispatch_report_action(connection, client_id, envelope)
+            return
         if t == "message":
             cid = envelope.get("chat_id")
             content = envelope.get("content")
@@ -727,6 +731,74 @@ class WebSocketChannel(BaseChannel):
             )
             return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")
+
+    async def _dispatch_report_action(
+        self,
+        connection: Any,
+        client_id: str,
+        envelope: dict[str, Any],
+    ) -> None:
+        """Resume a server-created structured report interaction without LLM routing."""
+
+        chat_id = envelope.get("chat_id")
+        interaction_id = envelope.get("interaction_id")
+        submit_token = envelope.get("submit_token")
+        period = envelope.get("period")
+        start_date = envelope.get("start_date", "")
+        end_date = envelope.get("end_date", "")
+        selected = envelope.get("selected_options", [])
+        if not _is_valid_chat_id(chat_id):
+            await self._send_event(connection, "error", detail="invalid chat_id")
+            return
+        if not all(isinstance(value, str) and value for value in (interaction_id, submit_token, period)):
+            await self._send_event(connection, "error", chat_id=chat_id, detail="invalid report action")
+            return
+        if not all(isinstance(value, str) for value in (start_date, end_date)):
+            await self._send_event(connection, "error", chat_id=chat_id, detail="invalid report date")
+            return
+        if not isinstance(selected, list) or len(selected) > 50 or not all(
+            isinstance(value, str) and value for value in selected
+        ):
+            await self._send_event(connection, "error", chat_id=chat_id, detail="invalid report selection")
+            return
+        params = report_interactions().resolve(
+            interaction_id=interaction_id,
+            channel="websocket",
+            chat_id=chat_id,
+            user_id=client_id,
+            submit_token=submit_token,
+            selected_options=selected,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if params is None:
+            await self._send_event(
+                connection,
+                "error",
+                chat_id=chat_id,
+                detail="invalid_or_expired_report_action",
+            )
+            return
+        self._attach(connection, chat_id)
+        await self._hydrate_after_subscribe(chat_id)
+        content = "生成 Cube 供应商质量报告"
+        metadata: dict[str, Any] = {
+            "remote": getattr(connection, "remote_address", None),
+            "webui": True,
+            "report_action_validated": True,
+            INBOUND_META_DIRECT_TOOL: {"name": "report_center", "params": params},
+            "direct_request_text": content,
+            **self._transcripts.client_turn_metadata(None),
+        }
+        self._transcripts.append_user_message(chat_id, content, metadata=metadata)
+        await self._handle_message(
+            sender_id=client_id,
+            chat_id=chat_id,
+            content=content,
+            metadata=metadata,
+            is_dm=False,
+        )
 
     async def _workspace_scope_or_error(
         self,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from nanobot.reporting.business_templates import build_business_templates
@@ -13,17 +13,20 @@ from nanobot.reporting.contracts import (
     USAGE_METRIC_SEMANTICS,
     MetricDefinition,
     ReportBlock,
+    ReportComparisonWindow,
     ReportContext,
     ReportDataset,
     ReportDocument,
     ReportIntent,
     ReportQuery,
+    ReportQueryComparison,
     ReportSource,
     ReportWindow,
 )
 from nanobot.reporting.cube import CubeConnector, CubeCostAccountTemplate, CubeHealthTemplate
 from nanobot.reporting.cube_contract_gate import compare_metric_summaries
 from nanobot.reporting.grafana import GrafanaConnector
+from nanobot.reporting.provider_quality import CubeProviderQualityConnector, ProviderQualityTemplate
 from nanobot.reporting.registry import (
     ConnectorCapabilities,
     ConnectorManifest,
@@ -44,8 +47,8 @@ from nanobot.utils.report_failures import (
     report_failure_message,
 )
 
-_USAGE_METRICS = frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm"})
-_USAGE_DIMENSIONS = frozenset({"tenant", "model", "date"})
+_USAGE_METRICS = frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm", "ai.tpm.avg"})
+_USAGE_DIMENSIONS = frozenset({"tenant", "model", "endpoint", "date"})
 
 
 class MagikCubeConnector(ConnectorPlugin):
@@ -109,6 +112,17 @@ class UsageMatrixTemplate(TemplatePlugin):
         if intent.start_date is None or intent.end_date is None:
             raise ValueError("template planning requires concrete dates")
         days = (intent.end_date - intent.start_date).days + 1
+        additional_comparisons = (
+            (
+                ReportQueryComparison(
+                    key="previous_week_same_day",
+                    start_date=intent.start_date - timedelta(days=7),
+                    end_date=intent.end_date - timedelta(days=7),
+                ),
+            )
+            if self._spec.period == "day"
+            else ()
+        )
         return (
             ReportQuery(
                 connector_id=intent.connector_id,
@@ -118,6 +132,7 @@ class UsageMatrixTemplate(TemplatePlugin):
                 end_date=intent.end_date,
                 comparison_start=intent.start_date - timedelta(days=days),
                 comparison_end=intent.start_date - timedelta(days=1),
+                additional_comparisons=additional_comparisons,
                 filters={
                     "tenant": intent.tenant,
                     "model_scope": intent.model_scope,
@@ -163,16 +178,34 @@ class UsageMatrixTemplate(TemplatePlugin):
         rows = list(dataset.rows)
         current = [row for row in rows if row.get("period", "current") == "current"]
         comparison = [row for row in rows if row.get("period") == "comparison"]
+        previous_week = [
+            row for row in rows if row.get("period") == "previous_week_same_day"
+        ]
+        comparison_labels = self._metric_comparison_labels(dataset)
         metric_items = []
         for metric in self._spec.metrics:
-            current_value = _aggregate_metric(current, metric)
-            baseline_value = _aggregate_metric(comparison, metric)
+            current_stat = _usage_metric_stat(current, metric)
+            baseline_stat = _usage_metric_stat(comparison, metric)
+            weekly_stat = _usage_metric_stat(previous_week, metric)
+            current_value = current_stat["value"]
+            comparisons = self._metric_comparisons_for_stats(
+                metric,
+                current_stat,
+                baseline_stat,
+                weekly_stat,
+                comparison_labels=comparison_labels,
+            )
             metric_items.append(
                 {
-                    "label": _metric_label(metric),
+                    "label": _usage_metric_display_label(metric, current_stat),
                     "metric": metric,
-                    "value": current_value,
-                    "change": _format_metric_change(current_value, baseline_value),
+                    "value": _usage_stat_value(metric, current_stat),
+                    "raw_value": current_value,
+                    "baseline_value": baseline_stat["value"],
+                    "change": "；".join(
+                        f"{item['label']} {item['change']}" for item in comparisons
+                    ),
+                    "comparisons": comparisons,
                 }
             )
         table = _usage_table(current)
@@ -229,6 +262,9 @@ class UsageMatrixTemplate(TemplatePlugin):
                     },
                 )
             )
+        endpoint_tpm_rows = _usage_endpoint_tpm_table(current)
+        if endpoint_tpm_rows:
+            blocks.append(_usage_endpoint_tpm_block(endpoint_tpm_rows))
         warning_text = "；".join(_display_warning(item) for item in dataset.warnings)
         if warning_text:
             blocks.append(
@@ -243,6 +279,12 @@ class UsageMatrixTemplate(TemplatePlugin):
         content = "\n".join(
             f"- {item['label']}：{item['value']}（{item['change']}）"
             for item in metric_items
+        )
+        if endpoint_tpm_rows:
+            content += "\n" + _usage_endpoint_tpm_fallback(endpoint_tpm_rows)
+        content += (
+            "\n来源：Cube Admin / analysis/endpoint-max-tpm/daily/query；"
+            "avgTpm 仅在单客户、单模型、单 Endpoint 序列内按有效日期取平均。"
         )
         if warning_text:
             content = f"{content}\n数据提示：{warning_text}"
@@ -262,30 +304,44 @@ class UsageMatrixTemplate(TemplatePlugin):
         dataset = datasets[0]
         current = [row for row in dataset.rows if row.get("period", "current") == "current"]
         comparison = [row for row in dataset.rows if row.get("period") == "comparison"]
+        previous_week = [
+            row for row in dataset.rows if row.get("period") == "previous_week_same_day"
+        ]
+        comparison_labels = self._metric_comparison_labels(dataset)
         metric_items: list[dict[str, Any]] = []
         for metric in self._spec.metrics:
             current_stat = _usage_metric_stat(current, metric)
             baseline_stat = _usage_metric_stat(comparison, metric)
+            weekly_stat = _usage_metric_stat(previous_week, metric)
             semantics = USAGE_METRIC_SEMANTICS[metric]
             current_value = current_stat["value"]
             baseline_value = baseline_stat["value"]
+            comparisons = self._metric_comparisons_for_stats(
+                metric,
+                current_stat,
+                baseline_stat,
+                weekly_stat,
+                comparison_labels=comparison_labels,
+            )
             metric_items.append(
                 {
-                    "label": "TPM 峰值" if metric == "ai.tpm" else semantics["label"],
+                    "label": _usage_metric_display_label(metric, current_stat),
                     "metric": metric,
-                    "value": _format_usage_value(metric, current_value),
+                    "value": _usage_stat_value(metric, current_stat),
                     "raw_value": current_value,
                     "baseline_value": baseline_value,
                     "baseline": _format_usage_value(metric, baseline_value),
                     "change": _format_metric_change(current_value, baseline_value),
+                    "comparisons": comparisons,
                     "unit": semantics["unit"],
                     "aggregation": semantics["aggregation"],
                     "sample_count": current_stat["sample_count"],
                     "valid_sample_count": current_stat["valid_sample_count"],
                     "source": semantics["source"],
                     "detail": (
-                        f"平均日峰值 {_format_usage_value(metric, current_stat['average'])}"
-                        if metric == "ai.tpm" and current_stat["average"] is not None
+                        f"有效样本日 {current_stat['valid_sample_count']}"
+                        if metric == "ai.tpm.avg"
+                        and current_stat["reason"] != "multiple_series"
                         else ""
                     ),
                 }
@@ -329,14 +385,17 @@ class UsageMatrixTemplate(TemplatePlugin):
                             {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
                             {"tag": "column", "name": "tokens", "display_name": "Token 总量", "data_type": "text"},
                             {"tag": "column", "name": "requests", "display_name": "请求总数", "data_type": "text"},
-                            {"tag": "column", "name": "tpm_peak", "display_name": "TPM 峰值", "data_type": "text"},
+                            {"tag": "column", "name": "tpm_peak", "display_name": "最高 Endpoint 峰值 TPM", "data_type": "text"},
                         ],
-                        "headers": ["客户", "模型", "Token 总量", "请求总数", "TPM 峰值"],
+                        "headers": ["客户", "模型", "Token 总量", "请求总数", "最高 Endpoint 峰值 TPM"],
                         "rows": table,
                         "page_size": 8,
                     },
                 )
             )
+        endpoint_tpm_rows = _usage_endpoint_tpm_table(current)
+        if endpoint_tpm_rows:
+            blocks.append(_usage_endpoint_tpm_block(endpoint_tpm_rows))
 
         context = self._usage_context(dataset, metric_items)
         warning_text = (
@@ -360,8 +419,10 @@ class UsageMatrixTemplate(TemplatePlugin):
                 "note",
                 {
                     "content": (
-                        "读法：Token 和请求数是窗口总量；TPM 展示日峰值中的窗口峰值，"
-                        "不能直接当作窗口平均流量。较基准为当前值相对前一等长窗口的变化。"
+                        "来源：Cube Admin / analysis/endpoint-max-tpm/daily/query。"
+                        "字段：avgTpm 为单 Endpoint 日平均 TPM，maxTpm 为单 Endpoint "
+                        "日峰值。聚合：平均 TPM 不跨 Endpoint 或客户汇总。"
+                        "变化：仅展示相对基准的百分比，不展示绝对增减值。"
                     )
                 },
             )
@@ -374,8 +435,13 @@ class UsageMatrixTemplate(TemplatePlugin):
             self._spec.display_name,
             summary,
             _usage_context_text(context),
-            "读法：Token 和请求数看窗口总量；TPM 看日峰值中的窗口峰值。",
+            (
+                "读法：Token 和请求数看窗口总量；平均 TPM 只比较同一 Endpoint 序列，"
+                "最高 Endpoint 峰值 TPM 只表示窗口内单 Endpoint 峰值。"
+            ),
         ]
+        if endpoint_tpm_rows:
+            fallback_lines.append(_usage_endpoint_tpm_fallback(endpoint_tpm_rows))
         if dataset.warnings:
             fallback_lines.append("数据提示：" + warning_text)
         return ReportDocument(
@@ -384,7 +450,11 @@ class UsageMatrixTemplate(TemplatePlugin):
                 if all_tenants and selected_model
                 else self._spec.display_name
             ),
-            subtitle="Magik Cube · 前一等长窗口对比",
+            subtitle=(
+                "Magik Cube · 前一日 / 上周同期对比"
+                if self._spec.period == "day"
+                else f"Magik Cube · {self._comparison_label()}对比"
+            ),
             document_id=self._spec.template_id,
             fallback_text="\n".join(fallback_lines),
             blocks=tuple(blocks),
@@ -445,7 +515,7 @@ class UsageMatrixTemplate(TemplatePlugin):
                 ReportSource(
                     "Cube Admin",
                     "analysis/endpoint-max-tpm/daily/query",
-                    ("maxTpm", "date"),
+                    ("avgTpm", "maxTpm", "date", "model", "endpoint"),
                 ),
             )
         definitions = tuple(
@@ -459,11 +529,31 @@ class UsageMatrixTemplate(TemplatePlugin):
             )
             for item in metric_items
         )
+        baseline_window = window("comparison")
+        comparison_windows: list[ReportComparisonWindow] = []
+        if baseline_window is not None:
+            comparison_windows.append(
+                ReportComparisonWindow(
+                    key="previous_period",
+                    label=self._comparison_label(),
+                    window=baseline_window,
+                )
+            )
+        previous_week_window = window("previous_week_same_day")
+        if previous_week_window is not None:
+            comparison_windows.append(
+                ReportComparisonWindow(
+                    key="previous_week_same_day",
+                    label="上周同期",
+                    window=previous_week_window,
+                )
+            )
         return ReportContext(
             timezone=self._timezone,
             current_window=window("current"),
-            baseline_window=window("comparison"),
+            baseline_window=baseline_window,
             baseline_policy="previous_equal_window",
+            comparison_windows=tuple(comparison_windows),
             sources=sources,
             metric_definitions=definitions,
             calculation_version="2",
@@ -473,12 +563,98 @@ class UsageMatrixTemplate(TemplatePlugin):
             template_version=self.manifest.version,
         )
 
+    def _comparison_label(self) -> str:
+        return {
+            "day": "前一日",
+            "week": "上上周",
+            "month": "前一月",
+        }.get(self._spec.period, "前一等长周期")
+
+    def _metric_comparisons_for_stats(
+        self,
+        metric: str,
+        current_stat: Mapping[str, Any],
+        baseline_stat: Mapping[str, Any],
+        weekly_stat: Mapping[str, Any],
+        *,
+        comparison_labels: Mapping[str, str],
+    ) -> list[dict[str, Any]]:
+        if metric == "ai.tpm.avg" and current_stat.get("reason") == "multiple_series":
+            return []
+        current_value = current_stat.get("value")
+        baseline_value = baseline_stat.get("value")
+        weekly_value = weekly_stat.get("value")
+        comparisons = [
+            {
+                "key": "previous_period",
+                "label": comparison_labels["previous_period"],
+                "baseline_value": baseline_value,
+                "baseline": _format_usage_value(metric, baseline_value),
+                "change": _format_metric_change(current_value, baseline_value),
+            }
+        ]
+        if self._spec.period == "day":
+            comparisons.append(
+                {
+                    "key": "previous_week_same_day",
+                    "label": comparison_labels["previous_week_same_day"],
+                    "baseline_value": weekly_value,
+                    "baseline": _format_usage_value(metric, weekly_value),
+                    "change": _format_metric_change(current_value, weekly_value),
+                }
+            )
+        return comparisons
+
+    def _metric_comparison_labels(self, dataset: ReportDataset) -> dict[str, str]:
+        """Attach exact dates to user-visible comparisons without changing raw windows."""
+
+        windows = {
+            str(item.get("period")): item
+            for item in dataset.metadata.get("query_windows") or ()
+            if isinstance(item, dict) and item.get("period")
+        }
+
+        def label(period: str, default: str) -> str:
+            window = windows.get(period, {})
+            start = str(window.get("start") or "")
+            end = str(window.get("end") or "")
+            if not start:
+                return default
+            try:
+                start_date = date.fromisoformat(start[:10])
+                end_date = date.fromisoformat(end[:10]) if end else start_date
+                inclusive_end = end_date - timedelta(days=1) if end_date > start_date else end_date
+                date_text = (
+                    start_date.isoformat()
+                    if inclusive_end == start_date
+                    else f"{start_date.isoformat()} - {inclusive_end.isoformat()}"
+                )
+            except ValueError:
+                date_text = start if not end or start == end else f"{start} - {end}"
+            return f"{default}（{date_text}）"
+
+        return {
+            "previous_period": label("comparison", f"较{self._comparison_label()}"),
+            "previous_week_same_day": label(
+                "previous_week_same_day", "较上周同期"
+            ),
+        }
+
+
+def _usage_metric_display_label(metric: str, stat: Mapping[str, Any]) -> str:
+    """Name peak TPM precisely when the scope contains multiple endpoint series."""
+
+    if metric == "ai.tpm" and int(stat.get("series_count") or 0) > 1:
+        return "最高 Endpoint 峰值 TPM"
+    return _metric_label(metric)
+
 
 def _metric_label(metric: str) -> str:
     return {
         "ai.usage.tokens": "Token 消耗",
         "ai.requests": "请求数",
-        "ai.tpm": "TPM 峰值",
+        "ai.tpm.avg": "平均 TPM",
+        "ai.tpm": "峰值 TPM",
     }.get(metric, metric)
 
 
@@ -488,19 +664,7 @@ def _display_warning(warning: str) -> str:
 
 
 def _aggregate_metric(rows: list[dict[str, Any]], metric: str) -> int | float | None:
-    values = []
-    for row in rows:
-        if row.get("metric") != metric:
-            continue
-        try:
-            values.append(float(row.get("value")))
-        except (TypeError, ValueError):
-            continue
-    if not values:
-        return None
-    if metric == "ai.tpm":
-        return int(max(values))
-    return int(sum(values))
+    return _usage_metric_stat(rows, metric)["value"]
 
 
 def _format_metric_change(
@@ -510,11 +674,15 @@ def _format_metric_change(
     if current is None:
         return "当前无数据"
     if baseline is None:
-        return "无对比数据"
+        return "暂无可比基准"
     if baseline == 0:
-        return "新增" if current else "持平"
-    change = (current - baseline) / abs(baseline)
-    return f"{change:+.1%}"
+        return "新增" if current else "无变化"
+    change = (current - baseline) / baseline * 100
+    if change > 0:
+        return f"↑{change:.1f}%"
+    if change < 0:
+        return f"↓{abs(change):.1f}%"
+    return "0.0%"
 
 
 def _usage_table(rows: list[dict[str, Any]]) -> list[list[Any]]:
@@ -560,19 +728,58 @@ def _usage_metric_stat(rows: list[dict[str, Any]], metric: str) -> dict[str, Any
         except (TypeError, ValueError):
             continue
     if not values:
-        return {"value": None, "average": None, "sample_count": 0, "valid_sample_count": 0}
+        return {
+            "value": None,
+            "average": None,
+            "sample_count": 0,
+            "valid_sample_count": 0,
+            "series_count": 0,
+            "reason": "no_data",
+        }
+    series = {
+        (
+            str(row.get("tenant") or ""),
+            str(row.get("model") or ""),
+            str(row.get("endpoint") or ""),
+        )
+        for row in rows
+        if row.get("metric") == metric
+    }
+    if metric == "ai.tpm.avg" and len(series) != 1:
+        return {
+            "value": None,
+            "average": None,
+            "sample_count": len(values),
+            "valid_sample_count": len(values),
+            "series_count": len(series),
+            "reason": "multiple_series",
+        }
     if metric == "ai.tpm":
         return {
             "value": max(values),
             "average": sum(values) / len(values),
             "sample_count": len(values),
             "valid_sample_count": len(values),
+            "series_count": len(series),
+            "reason": "",
+        }
+    if metric == "ai.tpm.avg":
+        average = sum(values) / len(values)
+        return {
+            "value": average,
+            "average": average,
+            "sample_count": len(values),
+            "valid_sample_count": len(values),
+            "series_count": 1,
+            "reason": "",
         }
     return {
         "value": sum(values),
         "average": sum(values) / len(values),
         "sample_count": len(values),
         "valid_sample_count": len(values),
+        "series_count": len(series),
+        "reason": "",
     }
 
 
@@ -582,6 +789,125 @@ def _format_usage_value(metric: str, value: float | None) -> str:
     if metric in {"ai.usage.tokens", "ai.requests"}:
         return f"{int(value):,}"
     return f"{value:,.0f} tokens/min"
+
+
+def _usage_stat_value(metric: str, stat: Mapping[str, Any]) -> str:
+    """Format one usage statistic while preserving the no-cross-series rule."""
+
+    if metric == "ai.tpm.avg" and stat.get("reason") == "multiple_series":
+        return "多 Endpoint/客户，不汇总"
+    return _format_usage_value(metric, stat.get("value"))
+
+
+def _usage_endpoint_tpm_table(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Aggregate avgTpm only within one tenant/model/Endpoint series."""
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = defaultdict(
+        lambda: {"avg": [], "peak": [], "dates": set()}
+    )
+    for row in rows:
+        metric = str(row.get("metric") or "")
+        if metric not in {"ai.tpm", "ai.tpm.avg"}:
+            continue
+        key = (
+            str(row.get("tenant") or "-"),
+            str(row.get("model") or "-"),
+            str(row.get("endpoint") or "-"),
+        )
+        try:
+            value = float(row.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if metric == "ai.tpm.avg":
+            grouped[key]["avg"].append(value)
+            grouped[key]["dates"].add(str(row.get("date") or ""))
+        else:
+            grouped[key]["peak"].append(value)
+
+    result: list[dict[str, str]] = []
+    sortable: list[tuple[float, str, str, str, dict[str, str]]] = []
+    for (tenant, model, endpoint), values in grouped.items():
+        average = sum(values["avg"]) / len(values["avg"]) if values["avg"] else None
+        peak = max(values["peak"]) if values["peak"] else None
+        samples = len(values["dates"])
+        row = {
+            "tenant": tenant,
+            "model": model,
+            "endpoint": endpoint,
+            "avg_tpm": _format_usage_value("ai.tpm.avg", average),
+            "peak_tpm": _format_usage_value("ai.tpm", peak),
+            "samples": str(samples),
+            "quality": "完整" if average is not None else "平均 TPM 暂不可用",
+        }
+        sort_value = average if average is not None else -1.0
+        sortable.append((-sort_value, tenant.casefold(), model.casefold(), endpoint.casefold(), row))
+    for _average, _tenant, _model, _endpoint, row in sorted(sortable):
+        result.append(row)
+    return result
+
+
+def _usage_endpoint_tpm_block(rows: list[dict[str, str]]) -> ReportBlock:
+    """Build the shared endpoint detail block without exposing raw Cube responses."""
+
+    columns = [
+        {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
+        {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
+        {
+            "tag": "column",
+            "name": "endpoint",
+            "display_name": "Endpoint",
+            "data_type": "text",
+        },
+        {
+            "tag": "column",
+            "name": "avg_tpm",
+            "display_name": "平均 TPM",
+            "data_type": "text",
+        },
+        {
+            "tag": "column",
+            "name": "peak_tpm",
+            "display_name": "峰值 TPM",
+            "data_type": "text",
+        },
+        {
+            "tag": "column",
+            "name": "samples",
+            "display_name": "有效样本日数",
+            "data_type": "text",
+        },
+        {
+            "tag": "column",
+            "name": "quality",
+            "display_name": "数据质量",
+            "data_type": "text",
+        },
+    ]
+    return ReportBlock(
+        "table",
+        {
+            "title": "Endpoint TPM 明细：按平均 TPM 降序",
+            "columns": columns,
+            "headers": [item["display_name"] for item in columns],
+            "rows": rows,
+            "page_size": 8,
+        },
+    )
+
+
+def _usage_endpoint_tpm_fallback(rows: list[dict[str, str]]) -> str:
+    """Keep text-only channels semantically aligned with structured report cards."""
+
+    lines = ["Endpoint TPM 明细：按平均 TPM 降序"]
+    lines.extend(
+        (
+            f"- {row['tenant']} / {row['model']} / {row['endpoint']}："
+            f"平均 {row['avg_tpm']}，峰值 {row['peak_tpm']}，"
+            f"有效样本日 {row['samples']}，{row['quality']}"
+        )
+        for row in rows[:20]
+    )
+    return "\n".join(lines)
 
 
 def _usage_table_v2(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -635,9 +961,18 @@ def _usage_context_text(context: ReportContext) -> str:
     aggregation = "、".join(
         dict.fromkeys(item.aggregation for item in context.metric_definitions)
     ) or "按指标定义聚合"
+    comparison_lines = (
+        [
+            f"对比（{item.label}）：{item.window.start} - {item.window.end}"
+            for item in context.comparison_windows
+        ]
+        if context.comparison_windows
+        else [f"对比基准：{baseline_text}"]
+    )
     return (
         f"当前窗口：{current_text}\n"
-        f"对比基准：{baseline_text}\n"
+        + "\n".join(comparison_lines)
+        + "\n"
         f"时区：{context.timezone}\n"
         f"来源：{sources}\n"
         f"口径：{aggregation}"
@@ -657,6 +992,9 @@ def build_default_registry(
     cube_ttft_detail_enabled: bool = False,
     cube_usage_semantics_v2: bool = False,
     cube_cost_template_enabled: bool = False,
+    cube_provider_quality_connector_enabled: bool = False,
+    cube_provider_quality_template_enabled: bool = False,
+    cube_provider_quality_detail_enabled: bool = False,
     timezone: str = "Asia/Shanghai",
     health_thresholds: Mapping[str, Any] | None = None,
     wecom_renderer_enabled: bool = True,
@@ -711,6 +1049,18 @@ def build_default_registry(
         and registry.connector("magik_cube").account_configured
     ):
         registry.register_template(CubeCostAccountTemplate(timezone=timezone))
+    if cube_provider_quality_connector_enabled and cube_config is not None:
+        try:
+            registry.register_connector(
+                CubeProviderQualityConnector(
+                    cube_config,
+                    include_details=cube_provider_quality_detail_enabled,
+                )
+            )
+        except Exception as exc:
+            registry.load_errors["builtin:cube_provider_quality"] = type(exc).__name__
+    if cube_provider_quality_template_enabled and registry.connector("cube_provider_quality") is not None:
+        registry.register_template(ProviderQualityTemplate(timezone=timezone))
     if grafana_config and bool(grafana_config.get("enabled", False)):
         try:
             registry.register_connector(GrafanaConnector.from_mapping(grafana_config))

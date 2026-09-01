@@ -27,6 +27,7 @@ from nanobot.reporting import (
 )
 from nanobot.reporting.contracts import (
     ReportBlock,
+    ReportQueryComparison,
     validate_report_intent,
     validate_report_query,
 )
@@ -62,6 +63,7 @@ def test_sanitized_cube_contract_fixture_covers_usage_health_and_ttft() -> None:
     assert set(fixture) == {"usage", "tpm", "health", "gateway_usages"}
     assert fixture["usage"]["items"][0]["points"][0]["totalTokens"] == "9007199254740993"
     assert fixture["tpm"]["items"][0]["points"][0]["maxTpm"] == "2400"
+    assert fixture["tpm"]["items"][0]["points"][0]["avgTpm"] == "1800"
     assert fixture["gateway_usages"]["list"][0]["ttft"] == 120
     assert not any(
         sensitive in json.dumps(fixture).casefold()
@@ -122,7 +124,13 @@ async def test_cube_connector_paginates_and_normalizes_contract() -> None:
                             {
                                 "model": "model-a",
                                 "endpoint": "endpoint-a",
-                                "points": [{"date": day, "maxTpm": "40"}],
+                                "points": [
+                                    {
+                                        "date": day,
+                                        "maxTpm": "40",
+                                        "avgTpm": "9007199254740995",
+                                    }
+                                ],
                             }
                         ]
                     },
@@ -131,7 +139,9 @@ async def test_cube_connector_paginates_and_normalizes_contract() -> None:
         raise AssertionError(f"unexpected request: {request.url}")
 
     connector = CubeConnector(_config(), transport=httpx.MockTransport(handler))
-    result = await connector.query(_query("ai.usage.tokens", "ai.requests", "ai.tpm"))
+    result = await connector.query(
+        _query("ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm")
+    )
 
     assert result.quality == "complete"
     assert result.source == "magik_cube"
@@ -145,6 +155,10 @@ async def test_cube_connector_paginates_and_normalizes_contract() -> None:
     )
     assert token_rows[0]["unit"] == "tokens"
     assert token_rows[0]["aggregation"] == "window_sum"
+    average_tpm_rows = [row for row in result.rows if row["metric"] == "ai.tpm.avg"]
+    assert len(average_tpm_rows) == 4
+    assert average_tpm_rows[0]["value"] == 9007199254740995
+    assert average_tpm_rows[0]["endpoint"] == "endpoint-a"
     usage_request = next(
         request
         for request in requests
@@ -156,6 +170,76 @@ async def test_cube_connector_paginates_and_normalizes_contract() -> None:
     assert usage_body["endTime"].startswith("2026-08-29T00:00:00+08:00")
     assert any(request.url.path == "/api/v1/tenants" for request in requests)
     assert any(request.url.params.get("page_num") == "2" for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_fetches_named_weekly_daily_comparison() -> None:
+    requested_days: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenants"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [{"tenantId": "tenant-a", "tenantName": "Tenant A"}],
+                        "total": 1,
+                    },
+                },
+            )
+        body = json.loads(request.content)
+        day = body["startTime"][:10]
+        requested_days.append(day)
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "model": "model-a",
+                            "points": [
+                                {"date": day, "totalTokens": "10", "requestCount": "1"}
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=("ai.usage.tokens", "ai.requests"),
+        dimensions=("tenant", "model", "date"),
+        start_date=date(2026, 8, 29),
+        end_date=date(2026, 8, 29),
+        comparison_start=date(2026, 8, 28),
+        comparison_end=date(2026, 8, 28),
+        additional_comparisons=(
+            ReportQueryComparison(
+                key="previous_week_same_day",
+                start_date=date(2026, 8, 22),
+                end_date=date(2026, 8, 22),
+            ),
+        ),
+        filters={"tenant": "tenant-a"},
+    )
+    result = await CubeConnector(
+        _config(), transport=httpx.MockTransport(handler)
+    ).query(query)
+
+    assert requested_days == ["2026-08-29", "2026-08-28", "2026-08-22"]
+    assert {row["period"] for row in result.rows} == {
+        "current",
+        "comparison",
+        "previous_week_same_day",
+    }
+    assert [item["period"] for item in result.metadata["query_windows"]] == [
+        "current",
+        "comparison",
+        "previous_week_same_day",
+    ]
 
 
 @pytest.mark.asyncio

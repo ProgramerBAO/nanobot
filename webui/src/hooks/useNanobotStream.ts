@@ -987,6 +987,21 @@ export function useNanobotStream(
           )));
           return;
         }
+        if (ev.agent_ui?.kind === "report_document") {
+          clearActivitySegment();
+          setMessages((prev) => {
+            const activeId = buffer.current?.messageId;
+            buffer.current = null;
+            activeAssistantRef.current = null;
+            const filtered = activeId ? prev.filter((m) => m.id !== activeId) : prev;
+            return absorbCompleteAssistantMessage(filtered, {
+              content: ev.text,
+              agentUi: ev.agent_ui,
+              ...turnFieldsFromEvent(ev, "answer"),
+            });
+          });
+          return;
+        }
         // Intermediate agent breadcrumbs (tool-call hints, raw progress).
         // Attach them to the last trace row if it was the last emitted item
         // so a sequence of calls collapses into one compact trace group.
@@ -1062,6 +1077,7 @@ export function useNanobotStream(
             content: ev.text,
             ...(hasMedia ? { media } : {}),
             ...(ev.source ? { source: ev.source } : {}),
+            ...(ev.agent_ui ? { agentUi: ev.agent_ui } : {}),
             ...turnFieldsFromEvent(ev, "answer"),
           }));
           if (typeof ev.turn_id === "string") sideChannelTurnIdsRef.current.delete(ev.turn_id);
@@ -1088,6 +1104,7 @@ export function useNanobotStream(
             ...(hasMedia ? { media } : {}),
             ...(lat !== undefined ? { latencyMs: lat } : {}),
             ...(ev.source ? { source: ev.source } : {}),
+            ...(ev.agent_ui ? { agentUi: ev.agent_ui } : {}),
             ...turnFieldsFromEvent(ev, "answer"),
           });
         });

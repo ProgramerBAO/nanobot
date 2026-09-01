@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
+import secrets
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -28,6 +29,7 @@ from nanobot.cron.session_turns import CRON_TRIGGER_META
 from nanobot.cron.types import CronSchedule
 from nanobot.reporting import (
     CubeConnector,
+    CubeProviderQualityConnector,
     ReportIntent,
     ReportRunContext,
     ReportRunner,
@@ -43,6 +45,8 @@ from nanobot.reporting.capabilities import (
     subscriptions_document,
 )
 from nanobot.reporting.cube import normalize_health_thresholds
+from nanobot.reporting.interactions import report_interactions
+from nanobot.reporting.provider_quality import provider_quality_selector_document
 from nanobot.reporting.schedules import build_subscription_schedule
 from nanobot.reporting.store import ReportSubscription, get_report_state_store
 from nanobot.utils.report_failures import is_transient_report_failure
@@ -57,6 +61,31 @@ _HEALTH_RE = re.compile(
 )
 _COST_RE = re.compile(
     r"^(?:请)?(?:查看|查询|生成|打开|显示)?(?:成本|费用|账单|余额|账户)(?:报告|情况|概览)?[？?。！!]*$"
+)
+_PROVIDER_QUALITY_RE = re.compile(
+    r"^(?:请)?(?:查看|查询|生成|打开|显示)?\s*"
+    r"(?:(?:过去\s*15\s*分钟|近\s*15\s*分钟|昨天)\s*)?"
+    r"(?:各\s*)?"
+    r"(?:供应商质量|供应商性能|供应商详细情况|平台供应商质量)"
+    r"(?:报告|情况|排行|对比)?[？?。！!]*$",
+    re.IGNORECASE,
+)
+_NAMED_PROVIDER_QUALITY_RE = re.compile(
+    r"^(?:请)?(?:查看|查询|生成|打开|显示)?\s*"
+    r"供应商\s*(?P<provider>[A-Za-z0-9._-]+)\s*(?:的)?\s*"
+    r"(?:质量|性能|详细情况)(?:报告|情况|排行|对比)?[？?。！!]*$",
+    re.IGNORECASE,
+)
+_MODEL_PROVIDER_QUALITY_RE = re.compile(
+    r"^(?:请)?(?:查看|查询|生成|打开|显示)?\s*"
+    r"(?P<model>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:模型)?\s*"
+    r"各供应商(?:质量|性能)(?:报告|情况|排行|对比)?[？?。！!]*$",
+    re.IGNORECASE,
+)
+_PROVIDER_QUALITY_EMPTY_RE = re.compile(
+    r"^查看(?:本次)?(?P<period>近\s*15\s*分钟|昨日|上一完整周|"
+    r"自定义区间\s+(?P<start_date>\d{4}-\d{2}-\d{2})\s+至\s+(?P<end_date>\d{4}-\d{2}-\d{2}))"
+    r"供应商无用量[？?。！!]*$"
 )
 _CUBE_PERIOD_RE = re.compile(
     r"^(?:请)?(?:我要|生成|查看|打开|显示)?\s*(日报|周报|月报)[？?。！!]*$"
@@ -85,6 +114,8 @@ _ALLOWED_REPORT_PARAM_KEYS = frozenset(
         "comparison",
         "report_family",
         "subscription_period",
+        "provider_id",
+        "providers",
     }
 )
 _PERIOD_TEMPLATES: dict[str, str] = {
@@ -118,6 +149,13 @@ class ReportCenterToolConfig(Base):
     cube_cost_template: bool = False
     cube_cost_report: bool = False
     cube_cost_subscription: bool = False
+    cube_provider_quality_connector: bool = False
+    cube_provider_quality_template: bool = False
+    cube_provider_quality_report: bool = False
+    cube_provider_quality_detail: bool = False
+    cube_provider_quality_subscription: bool = False
+    cube_provider_quality_selector: bool = True
+    cube_provider_quality_empty_collapse: bool = True
     cube_scope_selector_v2: bool = False
     cube_transient_run_retry: bool = False
     cube_transient_retry_delay_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
@@ -170,6 +208,7 @@ _REPORT_CENTER_PARAMETERS = {
                 "cube_report",
                 "health_report",
                 "cost_report",
+                "provider_quality_report",
                 "examples",
                 "recent",
                 "subscriptions",
@@ -183,7 +222,10 @@ _REPORT_CENTER_PARAMETERS = {
             ],
         },
         "period": {"type": "string", "enum": ["day", "week", "month", "recent7", "recent15m"]},
-        "report_family": {"type": "string", "enum": ["usage", "health", "cost"]},
+        "report_family": {
+            "type": "string",
+            "enum": ["usage", "health", "cost", "provider_quality"],
+        },
         "tenant_query": {"type": "string", "maxLength": 128},
         "project": {"type": "string", "maxLength": 128},
         "model": {"type": "string", "maxLength": 128},
@@ -213,6 +255,16 @@ _REPORT_CENTER_PARAMETERS = {
         "breakdown": {"type": "string", "enum": ["summary", "model"]},
         "endpoint": {"type": "string", "maxLength": 128},
         "provider": {"type": "string", "maxLength": 128},
+        "provider_id": {"type": "string", "maxLength": 64},
+        "providers": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 128},
+            "maxItems": 50,
+        },
+        "selection_confirmed": {"type": "boolean"},
+        "include_empty": {"type": "boolean"},
+        "start_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+        "end_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
         "interactive": {"type": "boolean"},
         "all_tenants": {"type": "boolean"},
         "send_time": {"type": "string", "maxLength": 5},
@@ -265,6 +317,11 @@ class ReportCenterTool(Tool):
             cube_ttft_detail_enabled=config.cube_ttft_detail,
             cube_usage_semantics_v2=config.cube_usage_semantics_v2,
             cube_cost_template_enabled=(config.cube_cost_connector and config.cube_cost_template),
+            cube_provider_quality_connector_enabled=config.cube_provider_quality_connector,
+            cube_provider_quality_template_enabled=(
+                config.cube_provider_quality_connector and config.cube_provider_quality_template
+            ),
+            cube_provider_quality_detail_enabled=config.cube_provider_quality_detail,
             timezone=config.timezone,
             health_thresholds=config.health_thresholds,
             wecom_renderer_enabled=config.wecom_renderer,
@@ -326,6 +383,46 @@ class ReportCenterTool(Tool):
             return {"action": "recent"}
         if _SUBSCRIPTIONS_RE.fullmatch(raw):
             return {"action": "subscriptions"}
+        empty_provider_match = _PROVIDER_QUALITY_EMPTY_RE.fullmatch(raw)
+        if empty_provider_match:
+            period_text = empty_provider_match.group("period").replace(" ", "")
+            period = (
+                "recent15m" if "15" in period_text else
+                "day" if period_text == "昨日" else
+                "week" if period_text == "上一完整周" else "range"
+            )
+            result = {
+                "action": "provider_quality_report",
+                "period": period,
+                "provider": "",
+                "selection_confirmed": True,
+                "include_empty": True,
+            }
+            if period == "range":
+                result["start_date"] = empty_provider_match.group("start_date")
+                result["end_date"] = empty_provider_match.group("end_date")
+            return result
+        model_provider_match = _MODEL_PROVIDER_QUALITY_RE.fullmatch(raw)
+        if model_provider_match:
+            return {
+                "action": "provider_quality_report",
+                "period": "recent15m",
+                "model": model_provider_match.group("model"),
+            }
+        named_provider_quality_match = _NAMED_PROVIDER_QUALITY_RE.fullmatch(raw)
+        provider_quality_match = _PROVIDER_QUALITY_RE.fullmatch(raw)
+        if named_provider_quality_match:
+            return {
+                "action": "provider_quality_report",
+                "period": "recent15m",
+                "provider": named_provider_quality_match.group("provider"),
+            }
+        if provider_quality_match:
+            return {
+                "action": "provider_quality_report",
+                "period": "day" if "昨天" in raw else "recent15m",
+                "provider": "",
+            }
         health_match = _HEALTH_RE.fullmatch(raw)
         if health_match:
             return {
@@ -422,6 +519,25 @@ class ReportCenterTool(Tool):
     def cost_subscriptions_enabled(self) -> bool:
         return self.cost_connector_enabled and self._config.cube_cost_subscription
 
+    @property
+    def provider_quality_connector_enabled(self) -> bool:
+        return bool(
+            self._config.cube_provider_quality_connector
+            and isinstance(
+                self._registry.connector("cube_provider_quality"),
+                CubeProviderQualityConnector,
+            )
+            and self._registry.template("provider_quality") is not None
+        )
+
+    @property
+    def provider_quality_reports_enabled(self) -> bool:
+        return self.provider_quality_connector_enabled and self._config.cube_provider_quality_report
+
+    @property
+    def provider_quality_subscriptions_enabled(self) -> bool:
+        return self.provider_quality_connector_enabled and self._config.cube_provider_quality_subscription
+
     async def _run_health_report(self, *, period: str) -> ToolResult:
         if not self.health_reports_enabled:
             return ToolResult.error("Error: Cube health report is not enabled")
@@ -474,6 +590,160 @@ class ReportCenterTool(Tool):
         except (LookupError, ValueError) as exc:
             return ToolResult.error(f"Error: Cube health report unavailable: {exc}")
         return self._result(outcome.document)
+
+    async def _run_provider_quality_report(
+        self,
+        *,
+        period: str,
+        provider: str,
+        providers: list[str] | None,
+        provider_id: str,
+        model: str,
+        endpoint: str,
+        selection_confirmed: bool = False,
+        include_empty: bool = False,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> ToolResult:
+        if not self.provider_quality_reports_enabled:
+            return ToolResult.error("Error: Cube provider quality report is not enabled")
+        if period not in {"recent15m", "day", "week", "range"}:
+            return ToolResult.error("Error: provider quality supports recent15m, day, week, or range")
+        channel, chat_id, user_id, _session_key, metadata = self._request_identity()
+        if (
+            self._config.cube_provider_quality_selector
+            and not selection_confirmed
+            and not provider.strip()
+            and not providers
+            and not provider_id.strip()
+            and not model.strip()
+            and not endpoint.strip()
+        ):
+            return await self._run_provider_quality_selector(
+                channel=channel,
+                chat_id=chat_id,
+                user_id=user_id,
+                timezone=self._config.timezone,
+            )
+        timezone_info = ZoneInfo(self._config.timezone)
+        now = datetime.now(timezone_info)
+        intent_kwargs: dict[str, Any] = {
+            "connector_id": "cube_provider_quality",
+            "template_id": "provider_quality",
+            "period": period,
+            "provider": provider.strip(),
+            "endpoint": endpoint.strip(),
+            "models": self._canonical_cube_models((model,)) if model.strip() else (),
+            "filters": {
+                "provider": provider.strip(),
+                "providers": [item.strip() for item in (providers or []) if item.strip()],
+                "provider_id": provider_id.strip(),
+                "model": model.strip(),
+                "endpoint": endpoint.strip(),
+                "include_empty": include_empty,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        }
+        if period == "recent15m":
+            end_time = now.replace(second=0, microsecond=0)
+            start_time = end_time - timedelta(minutes=15)
+            intent_kwargs.update(
+                start_date=start_time.date(),
+                end_date=end_time.date(),
+                start_time=start_time,
+                end_time=end_time,
+                comparison_start_time=start_time - timedelta(minutes=15),
+                comparison_end_time=end_time - timedelta(minutes=15),
+            )
+        else:
+            if period == "range":
+                try:
+                    period_start_date = date.fromisoformat(start_date)
+                    period_end_date = date.fromisoformat(end_date)
+                except ValueError:
+                    return ToolResult.error("自定义区间需要使用 YYYY-MM-DD 日期格式。")
+                if period_end_date < period_start_date:
+                    return ToolResult.error("自定义区间的结束日期不能早于开始日期。")
+                if (period_end_date - period_start_date).days >= 90:
+                    return ToolResult.error("自定义区间最多支持 90 天。")
+            else:
+                period_start_date, period_end_date = self._cube_period_dates(period, now.date())
+            intent_kwargs.update(
+                start_date=period_start_date,
+                end_date=period_end_date,
+                comparison_start_time=None,
+                comparison_end_time=None,
+            )
+        intent = ReportIntent(**intent_kwargs)
+        template = self._registry.template("provider_quality")
+        if template is None:
+            return ToolResult.error("Error: Cube provider quality template is unavailable")
+        context = ReportRunContext(
+            channel=channel,
+            chat_id=chat_id,
+            user_id=user_id,
+            timezone=self._config.timezone,
+            trace_id=uuid.uuid4().hex,
+            template_version=template.manifest.version,
+            metadata=metadata,
+        )
+        try:
+            outcome = await ReportRunner(
+                self._registry,
+                self._store,
+                semantic_shadow_enabled=self._config.cube_semantics_shadow,
+            ).run(intent, context)
+        except PermissionError:
+            return ToolResult.error("当前账号没有执行 Cube 供应商质量报告的权限，请联系管理员授权。")
+        except (LookupError, ValueError) as exc:
+            return ToolResult.error(f"Error: Cube provider quality report unavailable: {exc}")
+        return self._result(outcome.document)
+
+    async def _run_provider_quality_selector(
+        self,
+        *,
+        channel: str,
+        chat_id: str,
+        user_id: str,
+        timezone: str,
+    ) -> ToolResult:
+        connector = self._registry.connector("cube_provider_quality")
+        if not isinstance(connector, CubeProviderQualityConnector):
+            return ToolResult.error("Error: Cube provider quality connector is unavailable")
+        if not self._store.allowed(channel, user_id, "connector", "cube_provider_quality"):
+            return ToolResult.error("当前账号没有执行 Cube 供应商质量报告的权限，请联系管理员授权。")
+        if not self._store.allowed(channel, user_id, "template", "provider_quality"):
+            return ToolResult.error("当前账号没有执行 Cube 供应商质量报告的权限，请联系管理员授权。")
+        catalog, warnings = await connector.list_provider_catalog()
+        providers = sorted(
+            {
+                str(item.get("provider") or "").strip()
+                for item in catalog
+                if str(item.get("provider") or "").strip()
+            },
+            key=str.casefold,
+        )
+        if not providers:
+            reason = "；".join(warnings[:2]) if warnings else "Cube 未返回供应商目录"
+            return ToolResult.error(f"暂时无法加载供应商列表：{reason}")
+        interaction = report_interactions().create(
+            channel=channel,
+            chat_id=chat_id,
+            user_id=user_id,
+            options={
+                secrets.token_urlsafe(12): provider
+                for provider in providers
+            },
+        )
+        return self._result(
+            provider_quality_selector_document(
+                interaction,
+                catalog,
+                timezone=timezone,
+                warnings=warnings,
+            )
+        )
 
     async def _run_cost_report(
         self,
@@ -810,6 +1080,40 @@ class ReportCenterTool(Tool):
         params = self._dynamic_magik_params(subscription)
         family = str(subscription.report_params.get("report_family") or "usage")
         period = self._subscription_period(subscription)
+        if family == "provider_quality":
+            if not self.provider_quality_subscriptions_enabled or period not in {"day", "week"}:
+                return None
+            try:
+                start_date = date.fromisoformat(str(params["start_date"]))
+                end_date = date.fromisoformat(str(params["end_date"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+            model = str(params.get("model") or "").strip()
+            providers = tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in (params.get("providers") or [])
+                    if str(item).strip()
+                )
+            )
+            return ReportIntent(
+                connector_id=subscription.connector_id,
+                template_id="provider_quality",
+                period=period,  # type: ignore[arg-type]
+                models=self._canonical_cube_models((model,)) if model else (),
+                start_date=start_date,
+                end_date=end_date,
+                provider=str(params.get("provider") or "").strip(),
+                endpoint=str(params.get("endpoint") or "").strip(),
+                filters={
+                    "provider_quality": True,
+                    "provider": str(params.get("provider") or "").strip(),
+                    "providers": list(providers),
+                    "provider_id": str(params.get("provider_id") or "").strip(),
+                    "model": model,
+                    "endpoint": str(params.get("endpoint") or "").strip(),
+                },
+            )
         if family == "health":
             if not self.health_subscriptions_enabled:
                 return None
@@ -981,9 +1285,14 @@ class ReportCenterTool(Tool):
         if saved_family == "health" and report_family == "usage":
             report_family = saved_family
         report_family = report_family or saved_family or "usage"
-        if report_family not in {"usage", "health", "cost"}:
+        if report_family not in {"usage", "health", "cost", "provider_quality"}:
             return ToolResult.error("Error: unsupported report family")
-        if report_family == "health":
+        if report_family == "provider_quality":
+            if not self.provider_quality_subscriptions_enabled:
+                return ToolResult.error("Error: Cube provider quality subscription is not enabled")
+            if period not in {"day", "week"}:
+                return ToolResult.error("Error: provider quality subscriptions support day or week only")
+        elif report_family == "health":
             if not self.health_subscriptions_enabled:
                 return ToolResult.error("Error: Cube health subscription is not enabled")
             if period not in {"day", "week"}:
@@ -995,16 +1304,22 @@ class ReportCenterTool(Tool):
                 return ToolResult.error("Error: cost/account subscriptions support month only")
         elif period not in _PERIOD_TEMPLATES:
             return ToolResult.error("Error: subscription period must be day, week, or month")
-        if not user_id or not self._authorized_for_magik(channel, user_id):
+        if report_family == "provider_quality":
+            if not user_id or not self.provider_quality_connector_enabled:
+                return ToolResult.error("Error: no permission for the Cube provider quality connector")
+            if not self._store.allowed(channel, user_id, "connector", "cube_provider_quality"):
+                return ToolResult.error("Error: no permission for the Cube provider quality connector")
+            if not self._store.allowed(channel, user_id, "template", "provider_quality"):
+                return ToolResult.error("Error: no permission for the Cube provider quality template")
+            params["report_family"] = report_family
+            params["subscription_period"] = period
+        elif not user_id or not self._authorized_for_magik(channel, user_id):
             return ToolResult.error("Error: no permission for the Magik Cube connector")
         if report_family in {"health", "cost"}:
             params["report_family"] = report_family
             params["subscription_period"] = period
-        denial = authorize_magik_params(
-            self._store,
-            channel=channel,
-            user_id=user_id,
-            params=params,
+        denial = None if report_family == "provider_quality" else authorize_magik_params(
+            self._store, channel=channel, user_id=user_id, params=params
         )
         if denial:
             return ToolResult.error(denial)
@@ -1023,6 +1338,8 @@ class ReportCenterTool(Tool):
             if report_family == "health"
             else "cost_account"
             if report_family == "cost"
+            else "provider_quality"
+            if report_family == "provider_quality"
             else _PERIOD_TEMPLATES[period]
         )
         template = self._registry.template(template_id)
@@ -1063,7 +1380,7 @@ class ReportCenterTool(Tool):
             channel=channel,
             chat_id=chat_id,
             user_id=user_id,
-            connector_id="magik_cube",
+            connector_id=("cube_provider_quality" if report_family == "provider_quality" else "magik_cube"),
             template_id=template_id,
             template_version=template.manifest.version if template is not None else "1.0",
             schedule=cron_expr,
@@ -1090,7 +1407,12 @@ class ReportCenterTool(Tool):
     ) -> ToolResult:
         if self._cron is None:
             return ToolResult.error("Error: report subscriptions require the Gateway Cron service")
-        if report_family == "health":
+        if report_family == "provider_quality":
+            if not self.provider_quality_subscriptions_enabled:
+                return ToolResult.error("Error: Cube provider quality subscription is not enabled")
+            if period not in {"day", "week"}:
+                return ToolResult.error("Error: provider quality subscriptions support day or week only")
+        elif report_family == "health":
             if not self.health_subscriptions_enabled:
                 return ToolResult.error("Error: Cube health subscription is not enabled")
             if period not in {"day", "week"}:
@@ -1102,17 +1424,27 @@ class ReportCenterTool(Tool):
                 return ToolResult.error("Error: cost/account subscriptions support month only")
         elif report_family != "usage" or period not in _PERIOD_TEMPLATES:
             return ToolResult.error("Error: subscription period must be day, week, or month")
-        if not user_id or not self._authorized_for_magik(channel, user_id):
-            return ToolResult.error("Error: no permission for the Magik Cube connector")
+        if report_family == "provider_quality":
+            authorized = bool(
+                user_id
+                and self.provider_quality_connector_enabled
+                and self._store.allowed(channel, user_id, "connector", "cube_provider_quality")
+                and self._store.allowed(channel, user_id, "template", "provider_quality")
+            )
+        else:
+            authorized = bool(user_id and self._authorized_for_magik(channel, user_id))
+        if not authorized:
+            return ToolResult.error(
+                "Error: no permission for the Cube provider quality connector"
+                if report_family == "provider_quality"
+                else "Error: no permission for the Magik Cube connector"
+            )
         params = self._safe_report_params(report_params)
-        if report_family in {"health", "cost"}:
+        if report_family in {"health", "cost", "provider_quality"}:
             params["report_family"] = report_family
             params["subscription_period"] = period
-        denial = authorize_magik_params(
-            self._store,
-            channel=channel,
-            user_id=user_id,
-            params=params,
+        denial = None if report_family == "provider_quality" else authorize_magik_params(
+            self._store, channel=channel, user_id=user_id, params=params
         )
         if denial:
             return ToolResult.error(denial)
@@ -1139,7 +1471,8 @@ class ReportCenterTool(Tool):
         subscription = self._store.subscription(subscription_id)
         if subscription is None or not subscription.enabled:
             return ToolResult.error("Error: report subscription is missing or disabled")
-        if self._magik_tool is None:
+        family = str(subscription.report_params.get("report_family") or "usage")
+        if self._magik_tool is None and family != "provider_quality":
             return ToolResult.error("Error: Magik Cube connector is unavailable")
         scheduled_at = trigger.get("scheduled_at_ms")
         if not isinstance(scheduled_at, int):
@@ -1151,19 +1484,15 @@ class ReportCenterTool(Tool):
             return ToolResult("该计划周期的报表已经处理，已跳过重复发送。")
         run_id = str(trigger.get("run_id") or uuid.uuid4().hex)
         connector = self._registry.connector(subscription.connector_id)
+        cube_family_enabled = (
+            (family == "usage" and self._config.cube_subscription)
+            or (family == "health" and self._config.cube_health_subscription)
+            or (family == "cost" and self._config.cube_cost_subscription)
+            or (family == "provider_quality" and self._config.cube_provider_quality_subscription)
+        )
         if (
-            (
-                self._config.cube_subscription
-                or (
-                    subscription.report_params.get("report_family") == "health"
-                    and self._config.cube_health_subscription
-                    or (
-                        subscription.report_params.get("report_family") == "cost"
-                        and self._config.cube_cost_subscription
-                    )
-                )
-            )
-            and isinstance(connector, CubeConnector)
+            cube_family_enabled
+            and isinstance(connector, (CubeConnector, CubeProviderQualityConnector))
             and self._subscription_cube_intent(subscription) is not None
         ):
             try:
@@ -1226,6 +1555,12 @@ class ReportCenterTool(Tool):
         project: str = "",
         endpoint: str = "",
         provider: str = "",
+        provider_id: str = "",
+        providers: list[str] | None = None,
+        selection_confirmed: bool = False,
+        include_empty: bool = False,
+        start_date: str = "",
+        end_date: str = "",
         interactive: bool = False,
         all_tenants: bool = False,
         report_selections: list[dict[str, Any]] | None = None,
@@ -1242,6 +1577,7 @@ class ReportCenterTool(Tool):
                     user_id=user_id,
                     health_enabled=self._config.cube_health_report,
                     cost_enabled=self.cost_reports_enabled,
+                    provider_quality_enabled=self.provider_quality_reports_enabled,
                 )
             )
         if action == "examples":
@@ -1250,6 +1586,7 @@ class ReportCenterTool(Tool):
                     self._authorized_for_magik(channel, user_id),
                     cost_enabled=self.cost_reports_enabled,
                     all_tenant_model_enabled=self._config.cube_model_all_tenant_report,
+                    provider_quality_enabled=self.provider_quality_reports_enabled,
                 )
             )
         if action == "recent":
@@ -1272,6 +1609,19 @@ class ReportCenterTool(Tool):
             )
         if action == "health_report":
             return await self._run_health_report(period=period)
+        if action == "provider_quality_report":
+            return await self._run_provider_quality_report(
+                period=period,
+                provider=provider,
+                providers=providers,
+                provider_id=provider_id,
+                model=model,
+                endpoint=endpoint,
+                selection_confirmed=selection_confirmed,
+                include_empty=include_empty,
+                start_date=start_date,
+                end_date=end_date,
+            )
         if action == "cost_report":
             selection = next(
                 (item for item in report_selections or [] if isinstance(item, dict)),

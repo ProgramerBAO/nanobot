@@ -6,7 +6,7 @@
   "category": "usage",
   "period": "day",
   "comparison": "previous_period",
-  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm"],
-  "dimensions": ["tenant", "model", "date"],
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm"],
+  "dimensions": ["tenant", "model", "endpoint", "date"],
   "description": "固定日报，昨天对比前天。"
 }

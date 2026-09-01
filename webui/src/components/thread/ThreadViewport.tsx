@@ -22,7 +22,7 @@ import {
   promptTop,
 } from "@/components/thread/promptNavigation";
 import { cn } from "@/lib/utils";
-import type { CliAppInfo, McpPresetInfo, SlashCommand, UIMessage } from "@/lib/types";
+import type { CliAppInfo, McpPresetInfo, ReportActionRequest, SlashCommand, UIMessage } from "@/lib/types";
 
 export interface ThreadViewportHandle {
   jumpToUserPrompt: (promptId: string) => void;
@@ -49,6 +49,8 @@ interface ThreadViewportProps {
   onOpenFilePreview?: (path: string) => void;
   onForkFromMessage?: (beforeUserIndex: number) => void;
   onQuoteSelection?: (text: string) => void;
+  onReportAction?: (request: ReportActionRequest) => void;
+  onReportCommand?: (command: string) => void;
 }
 
 const NEAR_BOTTOM_PX = 48;
@@ -122,6 +124,8 @@ export const ThreadViewport = forwardRef<ThreadViewportHandle, ThreadViewportPro
   onOpenFilePreview,
   onForkFromMessage,
   onQuoteSelection,
+  onReportAction,
+  onReportCommand,
 }, ref) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -557,10 +561,12 @@ export const ThreadViewport = forwardRef<ThreadViewportHandle, ThreadViewportPro
                   mcpPresets={mcpPresets}
                   slashCommands={slashCommands}
                   forkBoundaryMessageCount={visibleForkBoundaryMessageCount}
-                  onOpenFilePreview={onOpenFilePreview}
-                  onForkFromMessage={onForkFromMessage}
-                  onQuoteSelection={onQuoteSelection}
-                />
+        onOpenFilePreview={onOpenFilePreview}
+        onForkFromMessage={onForkFromMessage}
+        onQuoteSelection={onQuoteSelection}
+        onReportAction={onReportAction}
+        onReportCommand={onReportCommand}
+      />
               </div>
             </div>
 

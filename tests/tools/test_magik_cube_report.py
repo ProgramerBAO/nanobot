@@ -17,6 +17,7 @@ from nanobot.agent.tools.magik_cube import (
     MagikCubeToolConfig,
     _DateWindow,
     _diff_proxy_snapshots,
+    _format_change,
     _plan_comparison_windows,
     _Tenant,
 )
@@ -470,7 +471,22 @@ def test_comparison_planner_merges_adjacent_periods_and_chunks_long_ranges() -> 
         date(2026, 1, 1), date(2026, 1, 1), comparison="previous_period"
     )
     assert single.comparison == _DateWindow(date(2025, 12, 31), date(2025, 12, 31))
-    assert single.fetch_windows == (_DateWindow(date(2025, 12, 31), date(2026, 1, 1)),)
+    assert single.same_weekday_comparison == _DateWindow(
+        date(2025, 12, 25), date(2025, 12, 25)
+    )
+    assert single.fetch_windows == (_DateWindow(date(2025, 12, 25), date(2026, 1, 1)),)
+
+    selector_daily = _plan_comparison_windows(
+        date(2026, 8, 29),
+        date(2026, 8, 29),
+        compare_start=date(2026, 8, 28),
+        compare_end=date(2026, 8, 28),
+        comparison="none",
+    )
+    assert selector_daily.comparison == _DateWindow(date(2026, 8, 28), date(2026, 8, 28))
+    assert selector_daily.same_weekday_comparison == _DateWindow(
+        date(2026, 8, 22), date(2026, 8, 22)
+    )
 
     weekly = _plan_comparison_windows(
         date(2026, 8, 18),
@@ -493,6 +509,22 @@ def test_comparison_planner_merges_adjacent_periods_and_chunks_long_ranges() -> 
     )
     assert [window.days for window in long_range.fetch_windows] == [90, 90, 2]
     assert long_range.fetch_windows[0].end + timedelta(days=1) == long_range.fetch_windows[1].start
+
+
+@pytest.mark.parametrize(
+    ("current", "baseline", "expected"),
+    [
+        (162.3, 100, "↑62.3%"),
+        (87.5, 100, "↓12.5%"),
+        (100, 100, "0.0%"),
+        (1, 0, "新增"),
+        (0, 0, "无变化"),
+    ],
+)
+def test_usage_change_is_percentage_only(
+    current: int | float, baseline: int | float, expected: str
+) -> None:
+    assert _format_change(current, baseline) == expected
 
 
 def test_comparison_planner_keeps_far_windows_exact_and_enforces_total_limit() -> None:
@@ -670,9 +702,14 @@ class _DeterministicReportClient:
             return {
                 "items": [
                     {
+                        "model": model,
                         "endpoint": "ep-a",
                         "points": [
-                            {"date": f"2026-08-{day:02d}", "maxTpm": day * 10}
+                            {
+                                "date": f"2026-08-{day:02d}",
+                                "maxTpm": day * 10,
+                                "avgTpm": day * 5,
+                            }
                             for day in range(1, 16)
                         ],
                     }
@@ -738,7 +775,7 @@ async def test_selected_model_alias_resolves_to_configured_model(tmp_path: Path)
     assert client.requested_models == ["MODEL-A", "MODEL-A"]
 
 
-async def test_selected_model_daily_card_uses_model_for_overview_and_segments(
+async def test_selected_model_daily_card_uses_both_baselines_and_omits_segments(
     tmp_path: Path,
 ) -> None:
     client = _DeterministicReportClient()
@@ -765,11 +802,22 @@ async def test_selected_model_daily_card_uses_model_for_overview_and_segments(
 
     card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
     assert "Token **700**" in card["overview"][0]
-    assert card["segments"] == ["08-14 700｜+600 / ↑600.0%"]
+    assert card["comparison_windows"] == [
+        {"label": "前一日", "window": "2026-08-13"},
+        {"label": "上周同期", "window": "2026-08-07"},
+    ]
+    assert "较前一日（2026-08-13）：↑600.0%" in card["overview"][0]
+    assert "较上周同期（2026-08-07）：新增" in card["overview"][0]
+    assert "+600" not in card["overview"][0]
+    assert "平均 TPM **70**" in card["overview"][2]
+    assert card["segments"] == []
+    assert card["tpm_table"]["rows"][0]["avg_tpm"] == "70"
+    assert "较前一日" in card["table"]["rows"][0]["change"]
+    assert "较上周同期" in card["table"]["rows"][0]["change"]
     assert client.requested_models == ["MODEL-A", "MODEL-A"]
 
 
-async def test_matrix_report_returns_single_table_payload_with_absolute_daily_deltas(
+async def test_weekly_matrix_keeps_segments_with_percentage_only_changes(
     tmp_path: Path,
 ) -> None:
     config = MagikCubeToolConfig(
@@ -808,7 +856,8 @@ async def test_matrix_report_returns_single_table_payload_with_absolute_daily_de
     assert [row["model"] for row in table["rows"]] == ["MODEL-A", "LOW", "MODEL-B"]
     assert "新增" in table["rows"][0]["change"]
     assert "周五" in table["rows"][0]["segments"]
-    assert "+" in table["rows"][0]["segments"]
+    assert "+" not in table["rows"][0]["segments"]
+    assert "↑" in table["rows"][0]["segments"] or "新增" in table["rows"][0]["segments"]
 
 
 async def test_matrix_report_hides_subscription_action_when_reporting_is_disabled(

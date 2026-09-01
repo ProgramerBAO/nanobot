@@ -102,6 +102,13 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   authoritative, including Chinese suffixes such as `2026-08-29日`; only an omitted
   date may default to yesterday. Model parsing must preserve common names such as
   `Kimi-K3` and `vLLM` before applying exact catalog/model validation.
+- Cube usage daily reports must retain two named baselines: the previous day and the
+  same weekday one week earlier. User-visible change text is percentage-only; raw
+  absolute deltas may remain internal but must not be rendered.
+- Cube usage reports source average TPM only from `avgTpm`. Average TPM may be
+  averaged across valid dates within one tenant/model/Endpoint series, but must never
+  be aggregated across Endpoint or customer boundaries; missing `avgTpm` stays
+  unavailable and must not fall back to `maxTpm` or zero.
 
 ## Common File Locations
 

@@ -1913,6 +1913,9 @@ def replay_transcript_to_ui_messages(
             if not media and (not media_paths or augment_assistant_media is None):
                 media = _media_from_signed_urls(rec.get("media_urls"))
             extra: dict[str, Any] = {"content": content_s}
+            agent_ui = rec.get("agent_ui")
+            if isinstance(agent_ui, dict) and agent_ui.get("kind"):
+                extra["agentUi"] = agent_ui
             if media:
                 extra["media"] = media
             lat = rec.get("latency_ms")

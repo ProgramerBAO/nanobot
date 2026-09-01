@@ -77,11 +77,21 @@ def _format_metric_items(data: dict[str, Any]) -> str:
             continue
         label = str(item.get("label") or item.get("metric") or "指标")
         value = item.get("value", "-")
-        change = item.get("change")
-        suffix = f" ({change})" if change not in (None, "") else ""
-        baseline = ""
-        if item.get("baseline_value") is not None:
-            baseline = f"；基准：{item.get('baseline') or '-'}"
+        comparisons = [
+            value for value in item.get("comparisons") or [] if isinstance(value, dict)
+        ]
+        if comparisons:
+            comparison_text = "".join(
+                f"；{value.get('label') or '对比'}："
+                f"{value.get('change') or '暂无可比基准'}"
+                for value in comparisons
+            )
+            suffix = ""
+            baseline = comparison_text
+        else:
+            change = item.get("change")
+            suffix = f" ({change})" if change not in (None, "") else ""
+            baseline = ""
         samples = ""
         if item.get("valid_sample_count") not in (None, ""):
             sample_label = "有效请求" if item.get("metric") == "ai.ttft" else "时间桶"
@@ -146,9 +156,20 @@ def _format_report_context(document: ReportDocument) -> str:
     quality = context.quality or "未标记"
     reasons = "；".join(context.quality_reasons[:5]) if context.quality_reasons else "无"
     freshness = context.freshness or "未提供"
+    if context.comparison_windows:
+        comparison_text = "\n".join(
+            f"对比（{item.label}）：{item.window.start} - {item.window.end}"
+            for item in context.comparison_windows
+        )
+        baseline_policy_text = "对比周期已按名称列出"
+    else:
+        comparison_text = f"对比基准：{baseline_text}"
+        baseline_policy_text = "前一等长窗口"
     return (
         "报表说明\n"
-        f"基准：前一等长窗口；当前：{current_text}；基准：{baseline_text}\n"
+        f"当前：{current_text}\n"
+        f"{comparison_text}\n"
+        f"基准规则：{baseline_policy_text}\n"
         f"时区：{context.timezone}\n"
         f"来源：{sources}\n"
         f"口径：{aggregations}\n"
@@ -177,6 +198,20 @@ def document_to_markdown(document: ReportDocument) -> str:
                 f"- {item.get('label', item.get('action_id', '操作'))}"
                 for item in actions
                 if isinstance(item, dict)
+            )
+        elif block.kind == "selector":
+            options = [
+                item
+                for item in block.data.get("options") or []
+                if isinstance(item, dict)
+            ]
+            labels = [str(item.get("label") or "未命名供应商") for item in options]
+            content = "\n".join(
+                [
+                    "请选择供应商和统计周期后生成报告。",
+                    "可选供应商：" + ("、".join(labels) if labels else "暂无可用供应商"),
+                    "默认范围：全部供应商。",
+                ]
             )
         else:
             content = ""

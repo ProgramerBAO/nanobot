@@ -7,11 +7,13 @@ from nanobot.reporting.contracts import (
     DataQuality,
     MetricDefinition,
     ReportAction,
+    ReportComparisonWindow,
     ReportContext,
     ReportDataset,
     ReportDocument,
     ReportIntent,
     ReportQuery,
+    ReportQueryComparison,
     ReportRunContext,
     ReportSource,
     ReportWindow,
@@ -39,6 +41,7 @@ from nanobot.reporting.grafana import (
     GrafanaQueryDefinition,
 )
 from nanobot.reporting.intents import IntentRouter, build_default_intent_router
+from nanobot.reporting.provider_quality import CubeProviderQualityConnector, ProviderQualityTemplate
 from nanobot.reporting.registry import ReportPluginRegistry
 from nanobot.reporting.renderer import (
     ChannelRenderer,
@@ -69,16 +72,20 @@ __all__ = [
     "CubeConnector",
     "CubeCostAccountTemplate",
     "CubeHealthTemplate",
+    "CubeProviderQualityConnector",
+    "ProviderQualityTemplate",
     "CubeContractGate",
     "CubeContractGateResult",
     "CubeContractProbeResult",
     "ReportAction",
+    "ReportComparisonWindow",
     "ReportContext",
     "ReportDataset",
     "ReportDocument",
     "ReportIntent",
     "ReportPluginRegistry",
     "ReportQuery",
+    "ReportQueryComparison",
     "ReportRunContext",
     "ReportSource",
     "ReportRunOutcome",

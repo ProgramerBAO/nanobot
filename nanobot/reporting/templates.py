@@ -10,8 +10,8 @@ from typing import Any
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 _ALLOWED_PERIODS = frozenset({"day", "week", "month", "recent7", "range"})
-_ALLOWED_METRICS = frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm"})
-_ALLOWED_DIMENSIONS = frozenset({"tenant", "model", "date"})
+_ALLOWED_METRICS = frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm", "ai.tpm.avg"})
+_ALLOWED_DIMENSIONS = frozenset({"tenant", "model", "endpoint", "date"})
 _ALLOWED_KEYS = frozenset(
     {
         "schema_version",

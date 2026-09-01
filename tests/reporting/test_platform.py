@@ -26,6 +26,7 @@ from nanobot.reporting.registry import (
     TemplateManifest,
     TemplatePlugin,
 )
+from nanobot.reporting.renderer import document_to_markdown
 from nanobot.reporting.templates import (
     load_builtin_template_specs,
     parse_template_spec,
@@ -142,13 +143,16 @@ def test_usage_semantics_v2_exposes_baseline_source_and_correct_tpm_meaning() ->
                 rows=(
                     {"period": "current", "date": "2026-08-27", "tenant": "a", "model": "m", "metric": "ai.usage.tokens", "value": 100},
                     {"period": "current", "date": "2026-08-27", "tenant": "a", "model": "m", "metric": "ai.requests", "value": 2},
-                    {"period": "current", "date": "2026-08-27", "tenant": "a", "model": "m", "metric": "ai.tpm", "value": 20},
+                    {"period": "current", "date": "2026-08-27", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm.avg", "value": 10},
+                    {"period": "current", "date": "2026-08-27", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm", "value": 20},
                     {"period": "current", "date": "2026-08-28", "tenant": "a", "model": "m", "metric": "ai.usage.tokens", "value": 300},
                     {"period": "current", "date": "2026-08-28", "tenant": "a", "model": "m", "metric": "ai.requests", "value": 3},
-                    {"period": "current", "date": "2026-08-28", "tenant": "a", "model": "m", "metric": "ai.tpm", "value": 80},
+                    {"period": "current", "date": "2026-08-28", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm.avg", "value": 30},
+                    {"period": "current", "date": "2026-08-28", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm", "value": 80},
                     {"period": "comparison", "date": "2026-08-26", "tenant": "a", "model": "m", "metric": "ai.usage.tokens", "value": 200},
                     {"period": "comparison", "date": "2026-08-26", "tenant": "a", "model": "m", "metric": "ai.requests", "value": 2},
-                    {"period": "comparison", "date": "2026-08-26", "tenant": "a", "model": "m", "metric": "ai.tpm", "value": 40},
+                    {"period": "comparison", "date": "2026-08-26", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm.avg", "value": 10},
+                    {"period": "comparison", "date": "2026-08-26", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm", "value": 40},
                 ),
                 metadata={
                     "query_windows": [
@@ -167,10 +171,12 @@ def test_usage_semantics_v2_exposes_baseline_source_and_correct_tpm_meaning() ->
     items = {item["metric"]: item for item in document.blocks[0].data["items"]}
     assert items["ai.usage.tokens"]["value"] == "400"
     assert items["ai.requests"]["value"] == "5"
+    assert items["ai.tpm.avg"]["value"] == "20 tokens/min"
+    assert items["ai.tpm.avg"]["detail"] == "有效样本日 2"
     assert items["ai.tpm"]["value"] == "80 tokens/min"
-    assert items["ai.tpm"]["detail"] == "平均日峰值 50 tokens/min"
-    assert items["ai.tpm"]["aggregation"] == "日峰值的窗口峰值"
-    assert items["ai.usage.tokens"]["change"] == "+100.0%"
+    assert items["ai.tpm"]["detail"] == ""
+    assert items["ai.tpm"]["aggregation"] == "单 Endpoint 日峰值的窗口最大值"
+    assert items["ai.usage.tokens"]["change"] == "↑100.0%"
     assert document.context is not None
     assert document.context.baseline_window == ReportWindow(
         "2026-08-25 00:00", "2026-08-27 00:00", "comparison"
@@ -178,6 +184,108 @@ def test_usage_semantics_v2_exposes_baseline_source_and_correct_tpm_meaning() ->
     assert document.context.sources[0] == ReportSource(
         "Cube Admin", "analysis/active-tenant-daily-usage/query", ("totalTokens",)
     )
+
+
+def test_daily_usage_names_previous_day_and_weekly_comparisons() -> None:
+    spec = next(
+        item
+        for item in load_builtin_template_specs()
+        if item.template_id == "usage_daily_matrix"
+    )
+    template = UsageMatrixTemplate(spec, semantics_v2=True)
+    query = template.plan(
+        ReportIntent(
+            connector_id="magik_cube",
+            template_id="usage_daily_matrix",
+            period="day",
+            tenant="tenant-a",
+            start_date=date(2026, 8, 29),
+            end_date=date(2026, 8, 29),
+        )
+    )[0]
+
+    assert query.comparison_start == date(2026, 8, 28)
+    assert query.comparison_end == date(2026, 8, 28)
+    assert len(query.additional_comparisons) == 1
+    assert query.additional_comparisons[0].key == "previous_week_same_day"
+    assert query.additional_comparisons[0].start_date == date(2026, 8, 22)
+
+    document = template.analyze(
+        (
+            ReportDataset(
+                rows=(
+                    {"period": "current", "date": "2026-08-29", "tenant": "a", "model": "m", "metric": "ai.usage.tokens", "value": 300},
+                    {"period": "comparison", "date": "2026-08-28", "tenant": "a", "model": "m", "metric": "ai.usage.tokens", "value": 200},
+                    {"period": "previous_week_same_day", "date": "2026-08-22", "tenant": "a", "model": "m", "metric": "ai.usage.tokens", "value": 100},
+                ),
+                metadata={
+                    "query_windows": [
+                        {"period": "current", "start": "2026-08-29 00:00", "end": "2026-08-30 00:00"},
+                        {"period": "comparison", "start": "2026-08-28 00:00", "end": "2026-08-29 00:00"},
+                        {"period": "previous_week_same_day", "start": "2026-08-22 00:00", "end": "2026-08-23 00:00"},
+                    ]
+                },
+            ),
+        )
+    )
+
+    token = document.blocks[0].data["items"][0]
+    assert token["comparisons"] == [
+        {
+            "key": "previous_period",
+            "label": "较前一日（2026-08-28）",
+            "baseline_value": 200.0,
+            "baseline": "200",
+            "change": "↑50.0%",
+        },
+        {
+            "key": "previous_week_same_day",
+            "label": "较上周同期（2026-08-22）",
+            "baseline_value": 100.0,
+            "baseline": "100",
+            "change": "↑200.0%",
+        },
+    ]
+    assert document.context is not None
+    assert [item.label for item in document.context.comparison_windows] == [
+        "前一日",
+        "上周同期",
+    ]
+    markdown = document_to_markdown(document)
+    assert "较前一日（2026-08-28）：↑50.0%" in markdown
+    assert "较上周同期（2026-08-22）：↑200.0%" in markdown
+    assert "基准 200" not in markdown
+
+
+def test_average_tpm_is_not_aggregated_across_endpoints() -> None:
+    spec = next(
+        item
+        for item in load_builtin_template_specs()
+        if item.template_id == "usage_daily_matrix"
+    )
+    document = UsageMatrixTemplate(spec, semantics_v2=True).analyze(
+        (
+            ReportDataset(
+                rows=(
+                    {"period": "current", "date": "2026-08-29", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm.avg", "value": 10},
+                    {"period": "current", "date": "2026-08-29", "tenant": "a", "model": "m", "endpoint": "ep-a", "metric": "ai.tpm", "value": 20},
+                    {"period": "current", "date": "2026-08-29", "tenant": "a", "model": "m", "endpoint": "ep-b", "metric": "ai.tpm.avg", "value": 30},
+                    {"period": "current", "date": "2026-08-29", "tenant": "a", "model": "m", "endpoint": "ep-b", "metric": "ai.tpm", "value": 40},
+                )
+            ),
+        )
+    )
+
+    metrics = {item["metric"]: item for item in document.blocks[0].data["items"]}
+    assert metrics["ai.tpm.avg"]["value"] == "多 Endpoint/客户，不汇总"
+    assert metrics["ai.tpm.avg"]["comparisons"] == []
+    endpoint_table = next(
+        block for block in document.blocks if block.data.get("title", "").startswith("Endpoint TPM")
+    )
+    assert [row["avg_tpm"] for row in endpoint_table.data["rows"]] == [
+        "30 tokens/min",
+        "10 tokens/min",
+    ]
 
 
 class _Connector(ConnectorPlugin):

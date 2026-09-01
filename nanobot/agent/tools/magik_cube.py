@@ -9,7 +9,7 @@ import math
 import re
 import statistics
 import time as time_module
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -177,6 +177,7 @@ _ADMIN_READ_ONLY_ROUTES = frozenset(
         ("GET", "inference/endpoints"),
         ("GET", "inference/model-configs"),
         ("GET", "tenants"),
+        ("GET", "billing/provider-prices"),
         ("POST", "analysis/active-tenant-daily-usage/query"),
         ("POST", "analysis/endpoint-max-tpm/daily/query"),
         ("POST", "analysis/token-utilization/query"),
@@ -185,7 +186,11 @@ _ADMIN_READ_ONLY_ROUTES = frozenset(
         ("POST", "analysis/performance-endpoints/query"),
         ("POST", "analysis/endpoint-tpm-trend/query"),
         ("POST", "analysis/model-performance/query"),
+        ("POST", "analysis/provider-performance/query"),
+        ("POST", "analysis/provider-daily-traffic/query"),
         ("POST", "analysis/model-machine-usage/query"),
+        ("POST", "providers/list"),
+        ("POST", "providers/detail"),
         ("POST", "quota-changes/list"),
     }
 )
@@ -442,7 +447,7 @@ def _match_catalog_tenants(
 
 @dataclass
 class _TenantMetrics:
-    """一个租户按日期聚合后的 Token、峰值 TPM 及峰值 endpoint。"""
+    """一个租户的用量汇总，以及不可跨 Endpoint 聚合的 TPM 原始日点。"""
 
     # key 为 YYYY-MM-DD，value 为该日 Token 总量。
     tokens: dict[str, int]
@@ -452,9 +457,25 @@ class _TenantMetrics:
     max_tpm: dict[str, int]
     # 记录 max_tpm 对应的 endpoint，便于日报定位峰值来源。
     max_tpm_endpoint: dict[str, str]
+    # key=(model, endpoint, date)。avgTpm 只能在同一序列内跨日平均，
+    # 不能跨 Endpoint 或客户求和，否则会改变 Cube 接口的统计语义。
+    endpoint_tpm: dict[tuple[str, str, str], "_EndpointTpmPoint"] = field(
+        default_factory=dict
+    )
     # 分片或接口失败时标记为 False；渲染层必须显示“不完整”，不能把缺失当零。
     token_complete: bool = True
     tpm_complete: bool = True
+
+
+@dataclass(frozen=True)
+class _EndpointTpmPoint:
+    """Cube 单个 Endpoint 的单日 TPM 点；缺失字段保持 None，不伪装成零。"""
+
+    model: str
+    endpoint: str
+    date: str
+    max_tpm: int | None
+    avg_tpm: int | None
 
 
 @dataclass(frozen=True)
@@ -479,6 +500,7 @@ class _ComparisonPlan:
     primary: _DateWindow
     comparison: _DateWindow | None
     fetch_windows: tuple[_DateWindow, ...]
+    same_weekday_comparison: _DateWindow | None = None
 
 
 @dataclass
@@ -539,6 +561,26 @@ def _as_int(value: Any) -> int:
         return 0
 
 
+def _as_optional_int(value: Any) -> int | None:
+    """精确解析可选 int64；空值和非法值返回 None 以保留缺失语义。"""
+
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return int(value, 10)
+        except ValueError:
+            return None
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def _format_number(value: int | float) -> str:
     """把大数转换为日报易读格式：超过 1 万用“万”，超过 1 亿用“亿”。"""
 
@@ -550,35 +592,22 @@ def _format_number(value: int | float) -> str:
     return f"{value:,.0f}"
 
 
-def _format_change(current: int, baseline: int) -> str:
-    """计算当前值相对基线的变化；基线为 0 时避免除零并区分“持平/新增”。"""
+def _format_change(current: int | float, baseline: int | float) -> str:
+    """只展示相对变化百分比；零基准使用业务状态，绝不伪造百分比。"""
 
     if baseline == 0:
         if current == 0:
-            return "持平"
+            return "无变化"
         return "新增"
     change = (current - baseline) / baseline * 100
     arrow = "↑" if change > 0 else "↓" if change < 0 else ""
-    return f"{arrow}{abs(change):.1f}%" if arrow else "持平"
+    return f"{arrow}{abs(change):.1f}%" if arrow else "0.0%"
 
 
-def _format_signed_number(value: int | float) -> str:
-    """Render an absolute delta with an explicit sign."""
+def _format_delta(current: int | float, baseline: int | float) -> str:
+    """Compatibility wrapper for percentage-only user-visible changes."""
 
-    if value > 0:
-        return f"+{_format_number(value)}"
-    return _format_number(value)
-
-
-def _format_delta(current: int, baseline: int) -> str:
-    """Render absolute and percentage change without hiding zero baselines."""
-
-    delta = current - baseline
-    if baseline == 0 and current > 0:
-        return f"新增 {_format_signed_number(delta)}"
-    if baseline > 0 and current == 0:
-        return f"停用 {_format_signed_number(delta)}"
-    return f"{_format_signed_number(delta)} / {_format_change(current, baseline)}"
+    return _format_change(current, baseline)
 
 
 def _format_quota_field(label: str, change: Any) -> str | None:
@@ -623,11 +652,14 @@ def _diff_proxy_snapshots(
             changes.append(f"{key}：已删除")
             continue
         fields = []
-        for field in sorted(old[key].keys() | new[key].keys()):
-            before = old[key].get(field)
-            after = new[key].get(field)
+        for field_name in sorted(old[key].keys() | new[key].keys()):
+            before = old[key].get(field_name)
+            after = new[key].get(field_name)
             if before != after:
-                fields.append(f"{field} {before if before is not None else '无'} → {after if after is not None else '无'}")
+                fields.append(
+                    f"{field_name} {before if before is not None else '无'} → "
+                    f"{after if after is not None else '无'}"
+                )
         if fields:
             changes.append(f"{key}：" + "；".join(fields))
     return changes
@@ -726,7 +758,29 @@ def _plan_comparison_windows(
             "comparison must be one of none, previous_period, previous_week, previous_month"
         )
 
-    total_days = primary.days + (baseline.days if baseline else 0)
+    previous_day = _DateWindow(primary.start - timedelta(days=1), primary.end - timedelta(days=1))
+    # Feishu opaque callbacks serialize the explicit D-1 window and set
+    # comparison=none. Treat the daily window itself as the invariant so direct,
+    # interactive and scheduled reports all retain the D-7 comparison.
+    is_standard_daily = primary.days == 1 and (
+        comparison == "previous_period" or baseline == previous_day
+    )
+    same_weekday_comparison = (
+        _DateWindow(primary.start - timedelta(days=7), primary.end - timedelta(days=7))
+        if is_standard_daily
+        else None
+    )
+    logical_windows = [
+        window
+        for window in (baseline, same_weekday_comparison, primary)
+        if window is not None
+    ]
+    unique_logical_days = {
+        (window.start + timedelta(days=offset)).isoformat()
+        for window in logical_windows
+        for offset in range(window.days)
+    }
+    total_days = len(unique_logical_days)
     if total_days > max_query_days:
         raise ValueError(f"total query window exceeds {max_query_days} days")
 
@@ -744,12 +798,29 @@ def _plan_comparison_windows(
         else:
             request_windows = [baseline, primary]
 
+    if same_weekday_comparison is not None:
+        all_windows = [same_weekday_comparison, *request_windows]
+        bounding = _DateWindow(
+            min(window.start for window in all_windows),
+            max(window.end for window in all_windows),
+        )
+        request_windows = (
+            [bounding]
+            if bounding.days <= max_request_days
+            else sorted(all_windows, key=lambda window: (window.start, window.end))
+        )
+
     chunks = [
         chunk
         for window in request_windows
         for chunk in _chunk_window(window, max_request_days)
     ]
-    return _ComparisonPlan(primary, baseline, tuple(chunks))
+    return _ComparisonPlan(
+        primary,
+        baseline,
+        tuple(chunks),
+        same_weekday_comparison=same_weekday_comparison,
+    )
 
 
 def _window_label(window: _DateWindow) -> str:
@@ -765,7 +836,10 @@ class _PeriodStats:
     tokens: int
     requests: int
     peak_tpm: int
-    average_tokens_per_request: float
+    average_tpm: float | None
+    tpm_series_count: int
+    average_tpm_sample_count: int
+    token_sample_count: int
     daily_average_tokens: float
     peak_date: str
     token_complete: bool
@@ -1275,6 +1349,9 @@ class MagikCubeReporter:
         self,
         metrics: _TenantMetrics,
         pairs: list[tuple[str, _DateWindow, _DateWindow | None]],
+        *,
+        comparison_label: str,
+        include_same_weekday: bool = False,
     ) -> list[str]:
         if not metrics.token_complete:
             return ["数据不完整"]
@@ -1283,11 +1360,38 @@ class MagikCubeReporter:
             current = self._window_tokens(metrics, current_window)
             if baseline_window is None:
                 change = "无同期数据"
+            elif not any(
+                baseline_window.contains(day) for day in metrics.tokens
+            ):
+                change = f"{comparison_label} 暂无可比基准"
             else:
                 baseline = self._window_tokens(metrics, baseline_window)
-                change = _format_delta(current, baseline)
+                change = f"{comparison_label} {_format_delta(current, baseline)}"
+            if include_same_weekday:
+                same_weekday_window = _DateWindow(
+                    current_window.start - timedelta(days=7),
+                    current_window.end - timedelta(days=7),
+                )
+                if any(same_weekday_window.contains(day) for day in metrics.tokens):
+                    same_weekday = self._window_tokens(metrics, same_weekday_window)
+                    change += f"｜较上周同期 {_format_delta(current, same_weekday)}"
+                else:
+                    change += "｜较上周同期 暂无可比基准"
             lines.append(f"{label} {_format_number(current)}｜{change}")
         return lines
+
+    @staticmethod
+    def _comparison_label(plan: _ComparisonPlan) -> str:
+        baseline = plan.comparison
+        if baseline is None:
+            return "无对比周期"
+        if plan.primary.days == 1 and baseline.end == plan.primary.start - timedelta(days=1):
+            return "较前一日"
+        if plan.primary.days == 7 and baseline.end == plan.primary.start - timedelta(days=1):
+            return "较上上周"
+        if plan.primary.start.day == 1 and baseline.end == plan.primary.start - timedelta(days=1):
+            return "较前一月"
+        return "较对比周期"
 
     def _build_matrix_card(
         self,
@@ -1302,6 +1406,12 @@ class MagikCubeReporter:
     ) -> dict[str, Any]:
         current = self._period_stats(summary, plan.primary)
         baseline = self._period_stats(summary, plan.comparison) if plan.comparison else None
+        same_weekday = (
+            self._period_stats(summary, plan.same_weekday_comparison)
+            if plan.same_weekday_comparison
+            else None
+        )
+        comparison_label = self._comparison_label(plan)
         pairs = self._segment_pairs(plan, granularity)
         current_has_samples = any(
             plan.primary.contains(day)
@@ -1311,28 +1421,83 @@ class MagikCubeReporter:
         no_business_data = (
             summary.token_complete and summary.tpm_complete and not current_has_samples
         )
-        period_change = (
-            _format_delta(current.tokens, baseline.tokens) if baseline else "无对比周期"
-        )
-        overview = [
-            f"Token **{self._value_with_quality(current.tokens, current.token_complete)}**（{period_change}）",
-            f"请求数 **{self._value_with_quality(current.requests, current.token_complete)}**"
+        token_comparisons = [
+            f"{comparison_label}（{_window_label(plan.comparison)}）："
             + (
-                f"（{_format_delta(current.requests, baseline.requests)}）"
-                if baseline
-                else ""
-            ),
-            "平均 Token/请求 **"
-            + (
-                f"{current.average_tokens_per_request:,.0f}"
-                if current.token_complete
-                else "数据不完整"
+                _format_delta(current.tokens, baseline.tokens)
+                if baseline.token_sample_count
+                else "暂无可比基准"
             )
-            + "**",
+            if baseline and plan.comparison
+            else "无对比周期"
+        ]
+        request_comparisons = [
+            f"{comparison_label}（{_window_label(plan.comparison)}）："
+            + (
+                _format_delta(current.requests, baseline.requests)
+                if baseline.token_sample_count
+                else "暂无可比基准"
+            )
+            if baseline and plan.comparison
+            else "无对比周期"
+        ]
+        if same_weekday and plan.same_weekday_comparison:
+            same_weekday_label = _window_label(plan.same_weekday_comparison)
+            token_comparisons.append(
+                f"较上周同期（{same_weekday_label}）："
+                + (
+                    _format_delta(current.tokens, same_weekday.tokens)
+                    if same_weekday.token_sample_count
+                    else "暂无可比基准"
+                )
+            )
+            request_comparisons.append(
+                f"较上周同期（{same_weekday_label}）："
+                + (
+                    _format_delta(current.requests, same_weekday.requests)
+                    if same_weekday.token_sample_count
+                    else "暂无可比基准"
+                )
+            )
+        overview = [
+            f"Token **{self._value_with_quality(current.tokens, current.token_complete)}**｜"
+            + "｜".join(token_comparisons),
+            f"请求数 **{self._value_with_quality(current.requests, current.token_complete)}**"
+            + "｜"
+            + "｜".join(request_comparisons),
         ]
         if include_tpm:
+            average_tpm_text = self._average_tpm_text(current)
+            average_tpm_comparisons: list[str] = []
+            if current.average_tpm is not None and baseline and plan.comparison:
+                average_tpm_comparisons.append(
+                    f"{comparison_label}（{_window_label(plan.comparison)}）："
+                    + (
+                        _format_delta(current.average_tpm, baseline.average_tpm)
+                        if baseline.average_tpm is not None
+                        else "暂无可比基准"
+                    )
+                )
+            if (
+                current.average_tpm is not None
+                and same_weekday
+                and plan.same_weekday_comparison
+            ):
+                average_tpm_comparisons.append(
+                    f"较上周同期（{_window_label(plan.same_weekday_comparison)}）："
+                    + (
+                        _format_delta(current.average_tpm, same_weekday.average_tpm)
+                        if same_weekday.average_tpm is not None
+                        else "暂无可比基准"
+                    )
+                )
             overview.append(
-                f"峰值 TPM **{self._value_with_quality(current.peak_tpm, current.tpm_complete)}**"
+                f"平均 TPM **{average_tpm_text}**"
+                + ("｜" + "｜".join(average_tpm_comparisons) if average_tpm_comparisons else "")
+            )
+            overview.append(
+                f"{'最高 Endpoint 峰值 TPM' if current.tpm_series_count > 1 else '峰值 TPM'} "
+                f"**{self._value_with_quality(current.peak_tpm, current.tpm_complete)}**"
             )
 
         tenant_total = current.tokens
@@ -1348,6 +1513,11 @@ class MagikCubeReporter:
         for model_name, metrics in ranked_all:
             stats = self._period_stats(metrics, plan.primary)
             prior = self._period_stats(metrics, plan.comparison) if plan.comparison else None
+            same_weekday_stats = (
+                self._period_stats(metrics, plan.same_weekday_comparison)
+                if plan.same_weekday_comparison
+                else None
+            )
             hide_as_irrelevant = (
                 model_scope == "all"
                 and prior is not None
@@ -1355,23 +1525,44 @@ class MagikCubeReporter:
                 and prior.token_complete
                 and stats.tokens == 0
                 and prior.tokens == 0
+                and (same_weekday_stats is None or same_weekday_stats.tokens == 0)
             )
             if hide_as_irrelevant:
                 hidden_zero_models += 1
             else:
                 ranked.append((model_name, metrics))
         rows: list[dict[str, str]] = []
-        changes: list[tuple[int, str]] = []
+        changes: list[tuple[int, str, int, int]] = []
         new_models: list[str] = []
         stopped_models: list[str] = []
         for model_name, metrics in ranked:
             stats = self._period_stats(metrics, plan.primary)
             prior = self._period_stats(metrics, plan.comparison) if plan.comparison else None
+            same_weekday_stats = (
+                self._period_stats(metrics, plan.same_weekday_comparison)
+                if plan.same_weekday_comparison
+                else None
+            )
             share = stats.tokens / tenant_total if tenant_total else 0.0
-            change = _format_delta(stats.tokens, prior.tokens) if prior else "无对比周期"
+            change = "无对比周期"
+            if prior:
+                change = (
+                    f"{comparison_label} {_format_delta(stats.tokens, prior.tokens)}"
+                    if prior.token_sample_count
+                    else f"{comparison_label} 暂无可比基准"
+                )
+            if same_weekday_stats is not None:
+                change += (
+                    "\n较上周同期 "
+                    + (
+                        _format_delta(stats.tokens, same_weekday_stats.tokens)
+                        if same_weekday_stats.token_sample_count
+                        else "暂无可比基准"
+                    )
+                )
             if prior:
                 delta = stats.tokens - prior.tokens
-                changes.append((delta, model_name))
+                changes.append((delta, model_name, stats.tokens, prior.tokens))
                 if prior.tokens == 0 and stats.tokens > 0:
                     new_models.append(model_name)
                 elif prior.tokens > 0 and stats.tokens == 0:
@@ -1382,16 +1573,28 @@ class MagikCubeReporter:
                 "change": change if stats.token_complete else "数据不完整",
             }
             if plan.primary.days > 1:
-                row["segments"] = "\n".join(self._segment_lines(metrics, pairs))
+                row["segments"] = "\n".join(
+                    self._segment_lines(
+                        metrics,
+                        pairs,
+                        comparison_label=comparison_label,
+                    )
+                )
             rows.append(row)
 
         growth = sorted((item for item in changes if item[0] > 0), reverse=True)[:1]
         decline = sorted(item for item in changes if item[0] < 0)[:1]
         insights: list[str] = []
         if growth:
-            insights.append(f"增长贡献最大：{growth[0][1]} {_format_signed_number(growth[0][0])}")
+            insights.append(
+                f"{comparison_label}增长贡献最大：{growth[0][1]} "
+                f"{_format_change(growth[0][2], growth[0][3])}"
+            )
         if decline:
-            insights.append(f"下降贡献最大：{decline[0][1]} {_format_signed_number(decline[0][0])}")
+            insights.append(
+                f"{comparison_label}下降贡献最大：{decline[0][1]} "
+                f"{_format_change(decline[0][2], decline[0][3])}"
+            )
         if new_models:
             insights.append(f"新增：{'、'.join(sorted(new_models))}")
         if stopped_models:
@@ -1422,27 +1625,40 @@ class MagikCubeReporter:
             columns = [
                 {"name": "model", "display_name": "模型", "data_type": "text"},
                 {"name": "total", "display_name": "周期总量 / 占比", "data_type": "text"},
-                {"name": "change", "display_name": "周期变化", "data_type": "text"},
+                {"name": "change", "display_name": "对比变化", "data_type": "text"},
             ]
             if plan.primary.days > 1:
                 columns.append(
                     {"name": "segments", "display_name": "分段变化", "data_type": "text"}
                 )
             table = {
+                "title": "模型矩阵：按 Token 总量降序",
                 "page_size": self._config.matrix_page_size,
                 "columns": columns,
                 "rows": rows,
             }
-        daily_lines = self._segment_lines(summary, pairs)
+        daily_lines = (
+            []
+            if plan.primary.days == 1
+            else self._segment_lines(
+                summary,
+                pairs,
+                comparison_label=comparison_label,
+                include_same_weekday=False,
+            )
+        )
         if no_business_data:
-            daily_lines = ["当前周期暂无业务记录"]
+            daily_lines = [] if plan.primary.days == 1 else ["当前周期暂无业务记录"]
             insights = ["查询成功，当前周期没有可用于统计的业务样本"]
             rows = []
-        fallback_lines = [
-            f"{tenant.name} {kind}｜{_window_label(plan.primary)}",
-            *overview,
-            "分段变化：" + "；".join(daily_lines),
-        ]
+        tpm_table = (
+            self._endpoint_tpm_table(tenant, summary, plan.primary)
+            if include_tpm and not no_business_data
+            else None
+        )
+        fallback_lines = [f"{tenant.name} {kind}｜{_window_label(plan.primary)}", *overview]
+        if daily_lines:
+            fallback_lines.append("分段变化：" + "；".join(daily_lines))
         for row in rows:
             fallback_row = (
                 f"{row['model']}｜{row['total'].replace(chr(10), '｜')}｜{row['change']}"
@@ -1450,15 +1666,42 @@ class MagikCubeReporter:
             if row.get("segments"):
                 fallback_row += f"｜{row['segments'].replace(chr(10), '；')}"
             fallback_lines.append(fallback_row)
+        if tpm_table:
+            fallback_lines.append(str(tpm_table["title"]))
+            for tpm_row in tpm_table["rows"]:
+                fallback_lines.append(
+                    f"{tpm_row['tenant']} / {tpm_row['model']} / {tpm_row['endpoint']}｜"
+                    f"平均 TPM {tpm_row['avg_tpm']}｜峰值 TPM {tpm_row['peak_tpm']}｜"
+                    f"有效样本 {tpm_row['samples']}｜{tpm_row['quality']}"
+                )
         fallback_lines.extend(["关键变化：" + "；".join(insights), quality])
+        footnote = (
+            "来源：Cube Admin / analysis/endpoint-max-tpm/daily/query\n"
+            "字段：avgTpm 为单 Endpoint 日平均 TPM，maxTpm 为单 Endpoint 日峰值 TPM\n"
+            "聚合：不跨 Endpoint 或客户汇总\n"
+            "变化：仅展示相对基准的百分比，不展示绝对增减值"
+        )
+        fallback_lines.append(footnote)
+        comparison_windows = []
+        if plan.comparison is not None:
+            comparison_windows.append(
+                {"label": comparison_label.removeprefix("较"), "window": _window_label(plan.comparison)}
+            )
+        if plan.same_weekday_comparison is not None:
+            comparison_windows.append(
+                {"label": "上周同期", "window": _window_label(plan.same_weekday_comparison)}
+            )
         return {
             "title": f"{tenant.name} {kind}",
             "subtitle": f"{_window_label(plan.primary)}｜Asia/Shanghai",
+            "comparison_windows": comparison_windows,
             "overview": overview,
             "segments": daily_lines,
             "table": table,
+            "tpm_table": tpm_table,
             "insights": insights,
             "quality": quality,
+            "footnote": footnote,
             "fallback_text": "\n".join(fallback_lines),
         }
 
@@ -1615,6 +1858,7 @@ class MagikCubeReporter:
         requests: dict[str, int] = {}
         max_tpm: dict[str, int] = {}
         endpoints: dict[str, str] = {}
+        endpoint_tpm: dict[tuple[str, str, str], _EndpointTpmPoint] = {}
         token_complete = True
         tpm_complete = True
         chunk_semaphore = asyncio.Semaphore(2)
@@ -1675,9 +1919,14 @@ class MagikCubeReporter:
 
         async def query_tpm(
             window: _DateWindow,
-        ) -> tuple[dict[str, int], dict[str, str], bool]:
+        ) -> tuple[
+            dict[str, int],
+            dict[str, str],
+            dict[tuple[str, str, str], _EndpointTpmPoint],
+            bool,
+        ]:
             if not include_tpm:
-                return {}, {}, True
+                return {}, {}, {}, True
             try:
                 async with chunk_semaphore:
                     body: dict[str, Any] = {
@@ -1694,24 +1943,36 @@ class MagikCubeReporter:
                     )
                 chunk_tpm: dict[str, int] = {}
                 chunk_endpoints: dict[str, str] = {}
+                chunk_points: dict[tuple[str, str, str], _EndpointTpmPoint] = {}
                 for item in data.get("items") or []:
                     endpoint = str(item.get("endpoint") or "")
+                    item_model = str(item.get("model") or model or "")
                     for point in item.get("points") or []:
                         day = str(point.get("date") or "")[:10]
                         if not window.contains(day):
                             continue
-                        value = _as_int(_pick(point, "maxTpm", "max_tpm"))
-                        if value >= chunk_tpm.get(day, -1):
-                            chunk_tpm[day] = value
+                        peak_value = _as_optional_int(_pick(point, "maxTpm", "max_tpm"))
+                        average_value = _as_optional_int(_pick(point, "avgTpm", "avg_tpm"))
+                        if peak_value is not None and peak_value >= chunk_tpm.get(day, -1):
+                            chunk_tpm[day] = peak_value
                             chunk_endpoints[day] = endpoint
-                return chunk_tpm, chunk_endpoints, True
+                        if peak_value is not None or average_value is not None:
+                            key = (item_model, endpoint, day)
+                            chunk_points[key] = _EndpointTpmPoint(
+                                model=item_model,
+                                endpoint=endpoint,
+                                date=day,
+                                max_tpm=peak_value,
+                                avg_tpm=average_value,
+                            )
+                return chunk_tpm, chunk_endpoints, chunk_points, True
             except Exception as exc:
                 target = f" / {model}" if model else ""
                 self._warnings.append(
                     f"{tenant.name}{target} TPM {_window_label(window)} 获取失败："
                     f"{report_failure_message(exc)}"
                 )
-                return {}, {}, False
+                return {}, {}, {}, False
 
         token_results, tpm_results = await asyncio.gather(
             asyncio.gather(*(query_token(window) for window in windows)),
@@ -1723,17 +1984,19 @@ class MagikCubeReporter:
                 tokens[day] = tokens.get(day, 0) + value
             for day, value in chunk_requests.items():
                 requests[day] = requests.get(day, 0) + value
-        for chunk_tpm, chunk_endpoints, complete in tpm_results:
+        for chunk_tpm, chunk_endpoints, chunk_points, complete in tpm_results:
             tpm_complete = tpm_complete and complete
             for day, value in chunk_tpm.items():
                 if value >= max_tpm.get(day, -1):
                     max_tpm[day] = value
                     endpoints[day] = chunk_endpoints.get(day, "")
+            endpoint_tpm.update(chunk_points)
         return _TenantMetrics(
             tokens=tokens,
             requests=requests,
             max_tpm=max_tpm,
             max_tpm_endpoint=endpoints,
+            endpoint_tpm=endpoint_tpm,
             token_complete=token_complete,
             tpm_complete=tpm_complete,
         )
@@ -1809,12 +2072,27 @@ class MagikCubeReporter:
         tokens = sum(daily_tokens.values())
         requests = sum(metrics.requests.get(day, 0) for day in days)
         peak_tpm = max((metrics.max_tpm.get(day, 0) for day in days), default=0)
+        tpm_points = [
+            point
+            for point in metrics.endpoint_tpm.values()
+            if window.contains(point.date)
+        ]
+        tpm_series = {(point.model, point.endpoint) for point in tpm_points}
+        average_values = [point.avg_tpm for point in tpm_points if point.avg_tpm is not None]
+        average_tpm = (
+            sum(average_values) / len(average_values)
+            if len(tpm_series) == 1 and average_values
+            else None
+        )
         peak_date = max(days, key=lambda day: daily_tokens[day]) if days else ""
         return _PeriodStats(
             tokens=tokens,
             requests=requests,
             peak_tpm=peak_tpm,
-            average_tokens_per_request=(tokens / requests if requests else 0.0),
+            average_tpm=average_tpm,
+            tpm_series_count=len(tpm_series),
+            average_tpm_sample_count=len(average_values),
+            token_sample_count=sum(day in metrics.tokens for day in days),
             daily_average_tokens=(tokens / window.days if window.days else 0.0),
             peak_date=peak_date,
             token_complete=metrics.token_complete,
@@ -1835,12 +2113,86 @@ class MagikCubeReporter:
                 if value >= combined.max_tpm.get(day, -1):
                     combined.max_tpm[day] = value
                     combined.max_tpm_endpoint[day] = item.max_tpm_endpoint.get(day, "")
+            combined.endpoint_tpm.update(item.endpoint_tpm)
         return combined
 
     @staticmethod
     def _value_with_quality(value: int | float, complete: bool) -> str:
         rendered = _format_number(value)
         return rendered if complete else f"{rendered}（数据不完整）"
+
+    @staticmethod
+    def _average_tpm_text(stats: _PeriodStats) -> str:
+        """Render avgTpm without inventing a cross-Endpoint aggregate."""
+
+        if stats.tpm_series_count > 1:
+            return "多 Endpoint/客户，不汇总"
+        if stats.average_tpm is None:
+            return "暂不可用"
+        value = _format_number(stats.average_tpm)
+        return value if stats.tpm_complete else f"{value}（数据不完整）"
+
+    def _endpoint_tpm_table(
+        self,
+        tenant: _Tenant,
+        metrics: _TenantMetrics,
+        window: _DateWindow,
+    ) -> dict[str, Any] | None:
+        """Build per-series TPM details; no value is summed across endpoints."""
+
+        grouped: dict[tuple[str, str], list[_EndpointTpmPoint]] = {}
+        for point in metrics.endpoint_tpm.values():
+            if window.contains(point.date):
+                grouped.setdefault((point.model or "-", point.endpoint or "-"), []).append(
+                    point
+                )
+        if not grouped:
+            return None
+
+        rows: list[dict[str, str]] = []
+        sortable: list[tuple[float, str, str, dict[str, str]]] = []
+        for (model, endpoint), points in grouped.items():
+            average_values = [point.avg_tpm for point in points if point.avg_tpm is not None]
+            peak_values = [point.max_tpm for point in points if point.max_tpm is not None]
+            average_tpm = (
+                sum(average_values) / len(average_values) if average_values else None
+            )
+            valid_days = len({point.date for point in points if point.avg_tpm is not None})
+            if not metrics.tpm_complete:
+                quality = "数据不完整"
+            elif average_tpm is None:
+                quality = "平均 TPM 暂不可用"
+            elif valid_days < window.days:
+                quality = f"样本 {valid_days}/{window.days} 天"
+            else:
+                quality = "完整"
+            row = {
+                "tenant": tenant.name,
+                "model": model,
+                "endpoint": endpoint,
+                "avg_tpm": _format_number(average_tpm) if average_tpm is not None else "暂不可用",
+                "peak_tpm": _format_number(max(peak_values)) if peak_values else "暂不可用",
+                "samples": f"{valid_days}/{window.days} 天",
+                "quality": quality,
+            }
+            sort_value = average_tpm if average_tpm is not None else -1
+            sortable.append((-sort_value, model.casefold(), endpoint.casefold(), row))
+        for _average, _model, _endpoint, row in sorted(sortable):
+            rows.append(row)
+        return {
+            "title": "Endpoint TPM 明细：按平均 TPM 降序",
+            "page_size": self._config.matrix_page_size,
+            "columns": [
+                {"name": "tenant", "display_name": "客户", "data_type": "text"},
+                {"name": "model", "display_name": "模型", "data_type": "text"},
+                {"name": "endpoint", "display_name": "Endpoint", "data_type": "text"},
+                {"name": "avg_tpm", "display_name": "平均 TPM", "data_type": "text"},
+                {"name": "peak_tpm", "display_name": "峰值 TPM", "data_type": "text"},
+                {"name": "samples", "display_name": "有效样本", "data_type": "text"},
+                {"name": "quality", "display_name": "数据质量", "data_type": "text"},
+            ],
+            "rows": rows,
+        }
 
     def _period_summary_line(
         self,
@@ -1852,12 +2204,17 @@ class MagikCubeReporter:
         values = [
             f"Token {self._value_with_quality(stats.tokens, stats.token_complete)}",
             f"请求数 {self._value_with_quality(stats.requests, stats.token_complete)}",
-            f"平均Token/请求 {_format_number(stats.average_tokens_per_request)}",
+            f"平均 TPM {self._average_tpm_text(stats)}",
             f"日均Token {_format_number(stats.daily_average_tokens)}",
             f"峰值日 {stats.peak_date or '无'}",
         ]
         if include_tpm:
-            values.append(f"峰值TPM {self._value_with_quality(stats.peak_tpm, stats.tpm_complete)}")
+            peak_label = (
+                "最高 Endpoint 峰值 TPM" if stats.tpm_series_count > 1 else "峰值 TPM"
+            )
+            values.append(
+                f"{peak_label} {self._value_with_quality(stats.peak_tpm, stats.tpm_complete)}"
+            )
         return f"• {label}：" + "｜".join(values)
 
     def _render_range_report(
@@ -1890,19 +2247,33 @@ class MagikCubeReporter:
             self._period_summary_line("本期", current, include_tpm=include_tpm),
         ]
         if baseline and plan.comparison:
-            lines.append(
-                self._period_summary_line(
-                    f"对比期（{_window_label(plan.comparison)}）",
-                    baseline,
-                    include_tpm=include_tpm,
-                )
+            average_change = (
+                _format_change(current.average_tpm, baseline.average_tpm)
+                if current.average_tpm is not None and baseline.average_tpm is not None
+                else "暂无可比基准"
             )
             lines.append(
-                f"• 变化：Token {_format_number(current.tokens - baseline.tokens)}"
-                f"（{_format_change(current.tokens, baseline.tokens)}）｜请求数 "
-                f"{_format_number(current.requests - baseline.requests)}"
-                f"（{_format_change(current.requests, baseline.requests)}）｜平均Token/请求 "
-                f"{_format_change(round(current.average_tokens_per_request), round(baseline.average_tokens_per_request))}"
+                f"• 较对比期（{_window_label(plan.comparison)}）："
+                f"Token {_format_change(current.tokens, baseline.tokens)}｜"
+                f"请求数 {_format_change(current.requests, baseline.requests)}｜"
+                f"平均 TPM {average_change}"
+            )
+        if plan.same_weekday_comparison:
+            same_weekday = self._period_stats(combined, plan.same_weekday_comparison)
+            average_change = (
+                _format_change(current.average_tpm, same_weekday.average_tpm)
+                if current.average_tpm is not None and same_weekday.average_tpm is not None
+                else "暂无可比基准"
+            )
+            lines.append(
+                f"• 较上周同期（{_window_label(plan.same_weekday_comparison)}）："
+                + (
+                    f"Token {_format_change(current.tokens, same_weekday.tokens)}｜"
+                    f"请求数 {_format_change(current.requests, same_weekday.requests)}｜"
+                    f"平均 TPM {average_change}"
+                    if same_weekday.token_sample_count
+                    else "暂无可比基准"
+                )
             )
 
         if breakdown != "model" or model:
@@ -1936,7 +2307,7 @@ class MagikCubeReporter:
                         f"Token {self._value_with_quality(stats.tokens, stats.token_complete)}",
                         f"占比 {share:.1%}",
                         f"请求 {_format_number(stats.requests)}",
-                        f"平均Token/请求 {_format_number(stats.average_tokens_per_request)}",
+                        f"平均 TPM {self._average_tpm_text(stats)}",
                     ]
                     if include_tpm:
                         fields.append(
@@ -1946,19 +2317,20 @@ class MagikCubeReporter:
                         prior = self._period_stats(metrics, plan.comparison)
                         fields.extend(
                             [
-                                f"对比Token {_format_number(prior.tokens)}",
-                                f"Token变化 {_format_number(stats.tokens - prior.tokens)}"
-                                f"（{_format_change(stats.tokens, prior.tokens)}）",
-                                f"请求变化 {_format_number(stats.requests - prior.requests)}"
-                                f"（{_format_change(stats.requests, prior.requests)}）",
-                                f"平均Token/请求变化 "
-                                f"{_format_change(round(stats.average_tokens_per_request), round(prior.average_tokens_per_request))}",
+                                f"Token变化 {_format_change(stats.tokens, prior.tokens)}",
+                                f"请求变化 {_format_change(stats.requests, prior.requests)}",
+                                "平均 TPM 变化 "
+                                + (
+                                    _format_change(stats.average_tpm, prior.average_tpm)
+                                    if stats.average_tpm is not None
+                                    and prior.average_tpm is not None
+                                    else "暂无可比基准"
+                                ),
                             ]
                         )
                         if include_tpm:
                             fields.append(
-                                f"对比TPM {_format_number(prior.peak_tpm)}｜TPM变化 "
-                                f"{_format_change(stats.peak_tpm, prior.peak_tpm)}"
+                                f"峰值 TPM 变化 {_format_change(stats.peak_tpm, prior.peak_tpm)}"
                             )
                     lines.append(f"• {model_name}｜" + "｜".join(fields))
                 if not ranked:
@@ -1981,7 +2353,7 @@ class MagikCubeReporter:
                     f"{tenant.name}/{model_name}" if len(tenants) > 1 else model_name
                 )
                 delta = now_stats.tokens - old_stats.tokens
-                changes.append((delta, display_name))
+                changes.append((delta, display_name, now_stats.tokens, old_stats.tokens))
                 if old_stats.tokens == 0 and now_stats.tokens > 0:
                     new_models.append(display_name)
                 if old_stats.tokens > 0 and now_stats.tokens == 0:
@@ -1990,11 +2362,23 @@ class MagikCubeReporter:
             decline = sorted((item for item in changes if item[0] < 0))[:5]
             lines.append(
                 "• 增长排行："
-                + ("；".join(f"{name} +{_format_number(delta)}" for delta, name in growth) or "无")
+                + (
+                    "；".join(
+                        f"{name} {_format_change(current_value, baseline_value)}"
+                        for _delta, name, current_value, baseline_value in growth
+                    )
+                    or "无"
+                )
             )
             lines.append(
                 "• 下降排行："
-                + ("；".join(f"{name} {_format_number(delta)}" for delta, name in decline) or "无")
+                + (
+                    "；".join(
+                        f"{name} {_format_change(current_value, baseline_value)}"
+                        for _delta, name, current_value, baseline_value in decline
+                    )
+                    or "无"
+                )
             )
             lines.append(f"• 新增：{'、'.join(sorted(new_models)) or '无'}")
             lines.append(f"• 停用：{'、'.join(sorted(stopped_models)) or '无'}")
