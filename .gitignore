@@ -102,7 +102,6 @@ exp/
 bridge/node_modules/
 run/
 
-webui/
 config.json
 
 # Local authorization state and internal Codex handoff artifacts
