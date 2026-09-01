@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "template_id": "usage_daily_brief",
+  "display_name": "日报简报",
+  "version": "1.0",
+  "category": "usage",
+  "period": "day",
+  "comparison": "previous_period",
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm"],
+  "dimensions": ["tenant", "model", "endpoint", "date"],
+  "description": "固定日报简报，环比前一日、同比上周同期。"
+}

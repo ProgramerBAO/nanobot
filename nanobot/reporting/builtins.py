@@ -79,6 +79,8 @@ class MagikCubeConnector(ConnectorPlugin):
 
 
 class UsageMatrixTemplate(TemplatePlugin):
+    """Build Cube usage reports with shared calculations and selectable presentation depth."""
+
     def __init__(
         self,
         spec: DeclarativeTemplateSpec,
@@ -86,10 +88,14 @@ class UsageMatrixTemplate(TemplatePlugin):
         connector_ids: frozenset[str] = frozenset({"magik_cube"}),
         semantics_v2: bool = False,
         timezone: str = "Asia/Shanghai",
+        presentation: str = "matrix",
     ) -> None:
+        if presentation not in {"matrix", "brief"}:
+            raise ValueError("usage presentation must be matrix or brief")
         self._spec = spec
         self._semantics_v2 = semantics_v2
         self._timezone = timezone
+        self._presentation = presentation
         self.manifest = TemplateManifest(
             template_id=spec.template_id,
             display_name=spec.display_name,
@@ -146,9 +152,223 @@ class UsageMatrixTemplate(TemplatePlugin):
         )
 
     def analyze(self, datasets: tuple[ReportDataset, ...]) -> ReportDocument:
+        if self._presentation == "brief":
+            return self._analyze_brief(datasets)
         if self._semantics_v2:
             return self._analyze_v2(datasets)
         return self._analyze_legacy(datasets)
+
+    def _analyze_brief(self, datasets: tuple[ReportDataset, ...]) -> ReportDocument:
+        """Render only period KPIs while retaining full comparison provenance in context."""
+
+        if len(datasets) != 1:
+            raise ValueError("usage brief expects one normalized dataset")
+        dataset = datasets[0]
+        current = [row for row in dataset.rows if row.get("period", "current") == "current"]
+        previous_period = [row for row in dataset.rows if row.get("period") == "comparison"]
+        previous_week = [
+            row for row in dataset.rows if row.get("period") == "previous_week_same_day"
+        ]
+        metric_items: list[dict[str, Any]] = []
+        for metric in self._spec.metrics:
+            current_stat = _usage_metric_stat(current, metric)
+            previous_stat = _usage_metric_stat(previous_period, metric)
+            weekly_stat = _usage_metric_stat(previous_week, metric)
+            semantics = USAGE_METRIC_SEMANTICS[metric]
+            comparisons = self._brief_comparisons(
+                metric,
+                current_stat,
+                previous_stat,
+                weekly_stat,
+            )
+            metric_items.append(
+                {
+                    "label": _usage_metric_display_label(metric, current_stat),
+                    "metric": metric,
+                    "value": _usage_stat_value(metric, current_stat),
+                    "raw_value": current_stat["value"],
+                    "baseline_value": previous_stat["value"],
+                    "change": comparisons[0]["change"] if comparisons else "",
+                    "comparisons": comparisons,
+                    "unit": semantics["unit"],
+                    "aggregation": semantics["aggregation"],
+                    "sample_count": current_stat["sample_count"],
+                    "valid_sample_count": current_stat["valid_sample_count"],
+                    "source": semantics["source"],
+                }
+            )
+        context = self._usage_context(dataset, metric_items)
+        scope = dataset.metadata.get("scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        selected_models = [str(item) for item in scope.get("models", ()) if str(item).strip()]
+        selected_model = selected_models[0] if len(selected_models) == 1 else ""
+        all_tenants = bool(scope.get("all_tenants"))
+        title = (
+            f"{selected_model} 全部客户{self._spec.display_name}"
+            if all_tenants and selected_model
+            else self._spec.display_name
+        )
+        warning_text = "；".join(_display_warning(item) for item in dataset.warnings[:5])
+        quality_text = f"数据质量：{dataset.quality}"
+        if warning_text:
+            quality_text += f"；{warning_text}"
+        blocks: list[ReportBlock] = [ReportBlock("metrics", {"items": metric_items})]
+        blocks.append(
+            ReportBlock(
+                "note",
+                {
+                    "content": quality_text,
+                    "severity": "warning" if dataset.quality != "complete" else "info",
+                },
+            )
+        )
+        blocks.append(
+            ReportBlock(
+                "note",
+                {
+                    "content": (
+                        "来源：Cube Admin。Token 和请求数为周期求和；平均 TPM 仅在同一"
+                        "客户、模型、Endpoint 序列内计算；峰值 TPM 为最高 Endpoint 峰值。"
+                    )
+                },
+            )
+        )
+        blocks.append(
+            ReportBlock(
+                "actions",
+                {
+                    "actions": [
+                        {
+                            "action_id": "usage_further_analysis",
+                            "label": "进一步分析",
+                            "style": "primary",
+                            "tool_name": "report_center",
+                            "params": self._further_analysis_params(dataset),
+                            "command": self._further_analysis_command(dataset),
+                        }
+                    ]
+                },
+            )
+        )
+        summary = "\n".join(
+            f"- {item['label']}：{item['value']}"
+            + "".join(
+                f"｜{comparison['label']}：{comparison['change']}"
+                for comparison in item["comparisons"]
+            )
+            for item in metric_items
+        )
+        return ReportDocument(
+            title=title,
+            subtitle="Magik Cube · 简报",
+            document_id=self._spec.template_id,
+            fallback_text=f"{title}\n{summary}\n{quality_text}\n{_brief_context_text(context)}",
+            blocks=tuple(blocks),
+            quality=dataset.quality,
+            warnings=dataset.warnings,
+            context=context,
+            version=2,
+        )
+
+    def _brief_comparisons(
+        self,
+        metric: str,
+        current_stat: Mapping[str, Any],
+        previous_stat: Mapping[str, Any],
+        weekly_stat: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Apply business labels without changing the underlying comparison windows."""
+
+        if metric == "ai.tpm.avg" and current_stat.get("reason") == "multiple_series":
+            return []
+        current_value = current_stat.get("value")
+        if self._spec.period == "day":
+            return [
+                {
+                    "key": "previous_week_same_day",
+                    "label": "同比",
+                    "baseline_value": weekly_stat.get("value"),
+                    "change": _format_metric_change(current_value, weekly_stat.get("value")),
+                },
+                {
+                    "key": "previous_period",
+                    "label": "环比",
+                    "baseline_value": previous_stat.get("value"),
+                    "change": _format_metric_change(current_value, previous_stat.get("value")),
+                },
+            ]
+        return [
+            {
+                "key": "previous_period",
+                "label": "环比",
+                "baseline_value": previous_stat.get("value"),
+                "change": _format_metric_change(current_value, previous_stat.get("value")),
+            }
+        ]
+
+    def _further_analysis_params(self, dataset: ReportDataset) -> dict[str, Any]:
+        """Carry only validated scope and window values into the opaque detail action."""
+
+        scope = dataset.metadata.get("scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        windows = [
+            item
+            for item in dataset.metadata.get("query_windows") or ()
+            if isinstance(item, dict) and item.get("period") == "current"
+        ]
+        start = min((str(item.get("start") or "")[:10] for item in windows), default="")
+        end_exclusive = max((str(item.get("end") or "")[:10] for item in windows), default="")
+        try:
+            inclusive_end = (date.fromisoformat(end_exclusive) - timedelta(days=1)).isoformat()
+        except ValueError:
+            inclusive_end = start
+        models = [str(item) for item in scope.get("models", ()) if str(item).strip()]
+        tenant = str(scope.get("tenant") or "")
+        model_scope = str(scope.get("model_scope") or "summary")
+        params: dict[str, Any] = {
+            "action": "cube_report",
+            "period": self._spec.period,
+            "report_template": "matrix_card",
+            "tenant_query": tenant,
+            "models": models,
+            "all_tenants": bool(scope.get("all_tenants")),
+            "breakdown": "model" if model_scope in {"all", "selected"} else "summary",
+            "start_date": start,
+            "end_date": inclusive_end,
+            "interactive": False,
+        }
+        if tenant:
+            params["report_selections"] = [
+                {
+                    "tenant_query": tenant,
+                    "model_scope": model_scope,
+                    "models": models,
+                }
+            ]
+        return params
+
+    def _further_analysis_command(self, dataset: ReportDataset) -> str:
+        """Build a deterministic WebUI command that preserves the visible report scope."""
+
+        params = self._further_analysis_params(dataset)
+        tenant = (
+            "全部客户"
+            if params.get("all_tenants")
+            else str(params.get("tenant_query") or "").strip() or "默认客户范围"
+        )
+        selections = params.get("report_selections") or ()
+        model_scope = str(selections[0].get("model_scope") or "") if selections else ""
+        models = [str(model) for model in params.get("models") or ()]
+        model_text = "全部模型" if model_scope == "all" else "、".join(models) or "汇总"
+        start = str(params.get("start_date") or "")
+        end = str(params.get("end_date") or "")
+        period_name = {"day": "日报", "week": "周报", "month": "月报"}.get(
+            self._spec.period, "区间报表"
+        )
+        return (
+            f"进一步分析（{period_name}）：客户 {tenant}，模型 {model_text}，"
+            f"日期 {start} 至 {end}"
+        )
 
     def shadow_summary(self, datasets: tuple[ReportDataset, ...]) -> dict[str, Any]:
         """Compare legacy and v2 aggregates on one fetched dataset without exposing values."""
@@ -979,6 +1199,26 @@ def _usage_context_text(context: ReportContext) -> str:
     )
 
 
+def _brief_context_text(context: ReportContext) -> str:
+    """Keep named brief baselines traceable without restoring a comparison section."""
+
+    named = {item.key: item for item in context.comparison_windows}
+    previous = named.get("previous_period")
+    weekly = named.get("previous_week_same_day")
+    lines: list[str] = []
+    if weekly is not None:
+        lines.append(f"同比基准：上周同期 {weekly.window.start} - {weekly.window.end}")
+    if previous is not None:
+        prefix = "前一日" if weekly is not None else "前一等长周期"
+        lines.append(f"环比基准：{prefix} {previous.window.start} - {previous.window.end}")
+    if not lines:
+        lines.append("环比基准：暂无可比基准")
+    lines.append(f"时区：{context.timezone}")
+    sources = "；".join(dict.fromkeys(item.system for item in context.sources)) or "Cube Admin"
+    lines.append(f"来源：{sources}")
+    return "\n".join(lines)
+
+
 def build_default_registry(
     *,
     discover_external: bool = True,
@@ -991,6 +1231,7 @@ def build_default_registry(
     cube_health_card_v2: bool = False,
     cube_ttft_detail_enabled: bool = False,
     cube_usage_semantics_v2: bool = False,
+    cube_usage_brief_template_enabled: bool = True,
     cube_cost_template_enabled: bool = False,
     cube_provider_quality_connector_enabled: bool = False,
     cube_provider_quality_template_enabled: bool = False,
@@ -1025,12 +1266,16 @@ def build_default_registry(
         registry.register_template(template)
     if cube_templates_enabled:
         for spec in load_builtin_template_specs():
+            is_brief = spec.template_id.endswith("_brief")
+            if is_brief and not cube_usage_brief_template_enabled:
+                continue
             registry.register_template(
                 UsageMatrixTemplate(
                     spec,
                     connector_ids=frozenset({"magik_cube"}),
-                    semantics_v2=cube_usage_semantics_v2,
+                    semantics_v2=(cube_usage_semantics_v2 or is_brief),
                     timezone=timezone,
+                    presentation="brief" if is_brief else "matrix",
                 )
             )
     if cube_health_active:

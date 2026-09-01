@@ -88,13 +88,20 @@ _PROVIDER_QUALITY_EMPTY_RE = re.compile(
     r"供应商无用量[？?。！!]*$"
 )
 _CUBE_PERIOD_RE = re.compile(
-    r"^(?:请)?(?:我要|生成|查看|打开|显示)?\s*(日报|周报|月报)[？?。！!]*$"
+    r"^(?:请)?(?:我要|生成|查看|打开|显示)?\s*"
+    r"(?P<template>简报|详细|完整)?(?P<period>日报|周报|月报)[？?。！!]*$"
 )
 _MODEL_CUBE_PERIOD_RE = re.compile(
     r"^(?:请)?(?:我要|我需要|给我|生成|查看|打开|显示)?\s*"
     r"(?P<model>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:模型)?\s*(?:的)?\s*"
-    r"(?P<period>日报|周报|月报)\s*(?:全部|所有|全体)?\s*(?:客户|用户|租户)?[？?。！!]*$",
+    r"(?P<template>简报|详细|完整)?(?P<period>日报|周报|月报)\s*"
+    r"(?:全部|所有|全体)?\s*(?:客户|用户|租户)?[？?。！!]*$",
     re.IGNORECASE,
+)
+_FURTHER_ANALYSIS_RE = re.compile(
+    r"^进一步分析（(?P<period>日报|周报|月报|区间报表)）："
+    r"客户 (?P<tenant>[^，]{1,128})，模型 (?P<models>[^，]{1,512})，"
+    r"日期 (?P<start>\d{4}-\d{2}-\d{2}) 至 (?P<end>\d{4}-\d{2}-\d{2})$"
 )
 
 _ALLOWED_REPORT_PARAM_KEYS = frozenset(
@@ -122,6 +129,15 @@ _PERIOD_TEMPLATES: dict[str, str] = {
     "day": "usage_daily_matrix",
     "week": "usage_weekly_matrix",
     "month": "usage_monthly_matrix",
+    "recent7": "usage_custom_matrix",
+    "range": "usage_custom_matrix",
+}
+_BRIEF_PERIOD_TEMPLATES: dict[str, str] = {
+    "day": "usage_daily_brief",
+    "week": "usage_weekly_brief",
+    "month": "usage_monthly_brief",
+    "recent7": "usage_custom_brief",
+    "range": "usage_custom_brief",
 }
 
 
@@ -143,6 +159,11 @@ class ReportCenterToolConfig(Base):
     cube_health_card_v2: bool = False
     cube_ttft_detail: bool = False
     cube_usage_semantics_v2: bool = False
+    # Brief templates share the v2 metric semantics. The default route can be
+    # disabled independently to restore existing matrix cards immediately.
+    cube_usage_brief_template: bool = True
+    cube_usage_brief_default: bool = True
+    cube_admin_skill_help: bool = True
     # Cost/account reports need both an enabled template and an independently
     # configured TokenAPI credential. The Admin JWT is never used as fallback.
     cube_cost_connector: bool = False
@@ -225,6 +246,10 @@ _REPORT_CENTER_PARAMETERS = {
         "report_family": {
             "type": "string",
             "enum": ["usage", "health", "cost", "provider_quality"],
+        },
+        "report_template": {
+            "type": "string",
+            "enum": ["brief", "matrix_card", "full"],
         },
         "tenant_query": {"type": "string", "maxLength": 128},
         "project": {"type": "string", "maxLength": 128},
@@ -316,6 +341,7 @@ class ReportCenterTool(Tool):
             cube_health_card_v2=config.cube_health_card_v2,
             cube_ttft_detail_enabled=config.cube_ttft_detail,
             cube_usage_semantics_v2=config.cube_usage_semantics_v2,
+            cube_usage_brief_template_enabled=config.cube_usage_brief_template,
             cube_cost_template_enabled=(config.cube_cost_connector and config.cube_cost_template),
             cube_provider_quality_connector_enabled=config.cube_provider_quality_connector,
             cube_provider_quality_template_enabled=(
@@ -377,6 +403,41 @@ class ReportCenterTool(Tool):
 
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
         raw = text.strip()
+        detail_match = _FURTHER_ANALYSIS_RE.fullmatch(raw)
+        if detail_match:
+            period = {
+                "日报": "day",
+                "周报": "week",
+                "月报": "month",
+                "区间报表": "range",
+            }[detail_match.group("period")]
+            tenant_text = detail_match.group("tenant").strip()
+            models_text = detail_match.group("models").strip()
+            all_tenants = tenant_text == "全部客户"
+            tenant = "" if tenant_text in {"全部客户", "默认客户范围"} else tenant_text
+            models = [] if models_text in {"汇总", "全部模型"} else models_text.split("、")
+            model_scope = (
+                "all" if models_text == "全部模型" else "selected" if models else "summary"
+            )
+            report_selections = (
+                []
+                if all_tenants or not tenant
+                else [{"tenant_query": tenant, "model_scope": model_scope, "models": models}]
+            )
+            return {
+                "action": "cube_report",
+                "period": period,
+                "report_template": "matrix_card",
+                "tenant_query": tenant,
+                "model": models[0] if len(models) == 1 else "",
+                "models": models,
+                "all_tenants": all_tenants,
+                "breakdown": "model" if model_scope in {"all", "selected"} else "summary",
+                "start_date": detail_match.group("start"),
+                "end_date": detail_match.group("end"),
+                "interactive": False,
+                "report_selections": report_selections,
+            }
         if _HOME_RE.fullmatch(raw):
             return {"action": "home"}
         if _RECENT_RE.fullmatch(raw):
@@ -441,12 +502,89 @@ class ReportCenterTool(Tool):
                 "period": period,
                 "model": model_period_match.group("model"),
                 "all_tenants": True,
+                "report_template": self._requested_usage_template(
+                    model_period_match.group("template")
+                ),
             }
         period_match = _CUBE_PERIOD_RE.fullmatch(raw)
         if period_match:
-            period = {"日报": "day", "周报": "week", "月报": "month"}[period_match.group(1)]
-            return {"action": "cube_report", "period": period, "interactive": True}
+            period = {"日报": "day", "周报": "week", "月报": "month"}[
+                period_match.group("period")
+            ]
+            return {
+                "action": "cube_report",
+                "period": period,
+                "interactive": True,
+                "report_template": self._requested_usage_template(
+                    period_match.group("template")
+                ),
+            }
+        translated = self._translate_legacy_usage_request(raw)
+        if translated is not None:
+            return translated
         return None
+
+    def _requested_usage_template(self, requested: str | None) -> str:
+        """Map user-facing depth words to stable compatibility template names."""
+
+        if requested == "完整":
+            return "full"
+        if requested == "详细":
+            return "matrix_card"
+        if requested == "简报" and self._config.cube_usage_brief_template:
+            return "brief"
+        if self._usage_brief_default_enabled:
+            return "brief"
+        return "matrix_card"
+
+    @property
+    def _usage_brief_default_enabled(self) -> bool:
+        """Require template registration and routing flags to enable the default safely."""
+
+        return (
+            self._config.cube_usage_brief_template
+            and self._config.cube_usage_brief_default
+        )
+
+    def _translate_legacy_usage_request(self, raw: str) -> dict[str, Any] | None:
+        """Reuse the mature Cube parser, then execute standard reports through ReportRunner."""
+
+        if self._magik_tool is None:
+            return None
+        params = self._magik_tool.match_direct_request(raw)
+        if not isinstance(params, dict):
+            return None
+        legacy_template = str(params.get("report_template") or "")
+        if legacy_template in {"full", "usage_total"}:
+            return None
+        start_date = str(params.get("start_date") or "")
+        end_date = str(params.get("end_date") or "")
+        if not start_date or not end_date:
+            return None
+        if "月报" in raw or "上月" in raw or "上个月" in raw:
+            period = "month"
+        elif "周报" in raw or "上周" in raw:
+            period = "week"
+        elif start_date == end_date:
+            period = "day"
+        else:
+            period = "range"
+        result = {
+            "action": "cube_report",
+            "period": period,
+            "report_template": self._requested_usage_template(
+                "详细" if re.search(r"(?:详细|明细)", raw) else None
+            ),
+            "tenant_query": str(params.get("tenant_query") or ""),
+            "model": str(params.get("model") or ""),
+            "models": list(params.get("models") or []),
+            "breakdown": str(params.get("breakdown") or "summary"),
+            "start_date": start_date,
+            "end_date": end_date,
+            "interactive": bool(params.get("interactive", False)),
+            "report_selections": list(params.get("report_selections") or []),
+        }
+        return result
 
     def _cube_period_dates(self, period: str, today: date) -> tuple[date, date]:
         yesterday = today - timedelta(days=1)
@@ -822,6 +960,9 @@ class ReportCenterTool(Tool):
         provider: str,
         interactive: bool,
         all_tenants: bool,
+        report_template: str,
+        start_date: str = "",
+        end_date: str = "",
         report_selections: list[dict[str, Any]] | None = None,
     ) -> ToolResult:
         if (
@@ -830,8 +971,10 @@ class ReportCenterTool(Tool):
             or self._registry.connector("magik_cube") is None
         ):
             return ToolResult.error("Error: Magik Cube connector is unavailable")
-        if period not in {"day", "week", "month", "recent7"}:
+        if period not in {"day", "week", "month", "recent7", "range"}:
             return ToolResult.error("Error: unsupported Cube report period")
+        if report_template not in {"brief", "matrix_card", "full"}:
+            return ToolResult.error("Error: unsupported Cube report template")
         if breakdown not in {"summary", "model"}:
             return ToolResult.error("Error: breakdown must be summary or model")
         channel, chat_id, user_id, _session_key, metadata = self._request_identity()
@@ -861,17 +1004,48 @@ class ReportCenterTool(Tool):
             if len(selected_models) != 1:
                 return ToolResult.error("请选择一个模型后再生成全部客户报表。")
         if interactive and not selected_tenant and not selected_models:
-            return await self._run_scope_selector(period=period, report_family="usage")
+            return await self._run_scope_selector(
+                period=period,
+                report_family="usage",
+                report_template=report_template,
+            )
         if interactive and selected_scope == "selected" and not selected_models:
-            return await self._run_selector_model_stage(period=period, tenant_query=selected_tenant)
+            return await self._run_selector_model_stage(
+                period=period,
+                tenant_query=selected_tenant,
+                report_template=report_template,
+            )
         today = datetime.now(ZoneInfo(self._config.timezone)).date()
-        start_date, end_date = self._cube_period_dates(period, today)
-        template_id = {
-            "day": "usage_daily_matrix",
-            "week": "usage_weekly_matrix",
-            "month": "usage_monthly_matrix",
-            "recent7": "usage_weekly_matrix",
-        }[period]
+        if start_date or end_date:
+            try:
+                period_start = date.fromisoformat(start_date)
+                period_end = date.fromisoformat(end_date)
+            except ValueError:
+                return ToolResult.error("报表日期需要使用 YYYY-MM-DD 格式。")
+            if period_end < period_start or (period_end - period_start).days >= 365:
+                return ToolResult.error("报表日期范围无效或超过 365 天。")
+        else:
+            if period == "range":
+                return ToolResult.error("自定义区间必须提供开始和结束日期。")
+            period_start, period_end = self._cube_period_dates(period, today)
+        if report_template == "full":
+            legacy_params: dict[str, Any] = {
+                "start_date": period_start.isoformat(),
+                "end_date": period_end.isoformat(),
+                "comparison": "previous_period",
+                "report_template": "full",
+                "tenant_query": selected_tenant,
+                "model": selected_models[0] if len(selected_models) == 1 else "",
+                "breakdown": "model" if selected_scope in {"all", "selected"} else breakdown,
+                "include_tpm": True,
+                "save_snapshot": False,
+            }
+            return await self._magik_tool.execute(**legacy_params)
+        template_id = (
+            _BRIEF_PERIOD_TEMPLATES[period]
+            if report_template == "brief"
+            else _PERIOD_TEMPLATES[period]
+        )
         intent = ReportIntent(
             connector_id="magik_cube",
             template_id=template_id,
@@ -882,8 +1056,8 @@ class ReportCenterTool(Tool):
             provider=provider.strip(),
             model_scope=(selected_scope if selected_scope in {"summary", "all", "selected"} else "selected" if selected_models else "summary"),
             models=selected_models,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=period_start,
+            end_date=period_end,
             filters={
                 "tenant": selected_tenant,
                 "project": project.strip(),
@@ -922,7 +1096,13 @@ class ReportCenterTool(Tool):
             return ToolResult.error(f"Error: Cube report unavailable: {exc}")
         return self._result(outcome.document)
 
-    async def _run_scope_selector(self, *, period: str, report_family: str) -> ToolResult:
+    async def _run_scope_selector(
+        self,
+        *,
+        period: str,
+        report_family: str,
+        report_template: str = "matrix_card",
+    ) -> ToolResult:
         """Reuse the proven catalog card while returning to ReportRunner for execution."""
 
         if self._magik_tool is None:
@@ -940,7 +1120,11 @@ class ReportCenterTool(Tool):
             interactive=True,
             save_snapshot=False,
         )
-        if report_family == "usage" and not self._config.cube_scope_selector_v2:
+        if (
+            report_family == "usage"
+            and report_template != "brief"
+            and not self._config.cube_scope_selector_v2
+        ):
             return result
         ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
         if not isinstance(ui, dict) or ui.get("kind") != "magik_report_form":
@@ -950,14 +1134,23 @@ class ReportCenterTool(Tool):
             "action": "cost_report" if report_family == "cost" else "cube_report",
             "period": period,
             "report_family": report_family,
+            "report_template": report_template,
             "_report_center_selector": True,
         }
         ui["max_tenants"] = 1
         if report_family == "cost":
             ui["scope_options"] = [{"value": "summary", "label": "账务汇总"}]
+        elif report_family == "usage":
+            ui["report_template_options"] = [
+                {"value": "brief", "label": "简报（默认）"},
+                {"value": "matrix_card", "label": "详细分析"},
+                {"value": "full", "label": "完整报表"},
+            ]
         return result
 
-    async def _run_selector_model_stage(self, *, period: str, tenant_query: str) -> ToolResult:
+    async def _run_selector_model_stage(
+        self, *, period: str, tenant_query: str, report_template: str
+    ) -> ToolResult:
         """Load one authorized tenant's model catalog, then resume ReportRunner."""
 
         if not tenant_query or self._magik_tool is None:
@@ -983,6 +1176,7 @@ class ReportCenterTool(Tool):
                 "action": "cube_report",
                 "period": period,
                 "report_family": "usage",
+                "report_template": report_template,
                 "_report_center_selector": True,
             }
             ui["max_tenants"] = 1
@@ -1035,7 +1229,10 @@ class ReportCenterTool(Tool):
         if unknown:
             raise ValueError("unsupported report subscription parameters")
         params = {key: value[key] for key in value if key in _ALLOWED_REPORT_PARAM_KEYS}
-        params["report_template"] = "matrix_card"
+        params.setdefault(
+            "report_template",
+            "brief" if self._usage_brief_default_enabled else "matrix_card",
+        )
         params["save_snapshot"] = False
         params.pop("start_date", None)
         params.pop("end_date", None)
@@ -1064,7 +1261,10 @@ class ReportCenterTool(Tool):
         )
         saved = dict(subscription.report_params)
         params.update(saved)
-        params["report_template"] = "matrix_card"
+        params.setdefault(
+            "report_template",
+            "brief" if self._usage_brief_default_enabled else "matrix_card",
+        )
         params["save_snapshot"] = False
         params.pop("report_family", None)
         params.pop("subscription_period", None)
@@ -1340,6 +1540,8 @@ class ReportCenterTool(Tool):
             if report_family == "cost"
             else "provider_quality"
             if report_family == "provider_quality"
+            else _BRIEF_PERIOD_TEMPLATES[period]
+            if params.get("report_template") == "brief"
             else _PERIOD_TEMPLATES[period]
         )
         template = self._registry.template(template_id)
@@ -1547,6 +1749,7 @@ class ReportCenterTool(Tool):
         month_day: int = 1,
         report_params: dict[str, Any] | None = None,
         report_family: str = "usage",
+        report_template: str = "",
         subscription_id: str = "",
         tenant_query: str = "",
         model: str = "",
@@ -1578,6 +1781,10 @@ class ReportCenterTool(Tool):
                     health_enabled=self._config.cube_health_report,
                     cost_enabled=self.cost_reports_enabled,
                     provider_quality_enabled=self.provider_quality_reports_enabled,
+                    brief_default=self._usage_brief_default_enabled,
+                    admin_skill_enabled=(
+                        self._config.cube_admin_skill_help and self._magik_tool is not None
+                    ),
                 )
             )
         if action == "examples":
@@ -1587,6 +1794,9 @@ class ReportCenterTool(Tool):
                     cost_enabled=self.cost_reports_enabled,
                     all_tenant_model_enabled=self._config.cube_model_all_tenant_report,
                     provider_quality_enabled=self.provider_quality_reports_enabled,
+                    admin_skill_enabled=(
+                        self._config.cube_admin_skill_help and self._magik_tool is not None
+                    ),
                 )
             )
         if action == "recent":
@@ -1594,6 +1804,9 @@ class ReportCenterTool(Tool):
                 recent_document(self._store.recent_runs(channel, user_id))
             )
         if action == "cube_report":
+            selected_template = report_template or (
+                "brief" if self._usage_brief_default_enabled else "matrix_card"
+            )
             return await self._run_cube_report(
                 period=period,
                 tenant_query=tenant_query,
@@ -1605,6 +1818,9 @@ class ReportCenterTool(Tool):
                 provider=provider,
                 interactive=interactive,
                 all_tenants=all_tenants,
+                report_template=selected_template,
+                start_date=start_date,
+                end_date=end_date,
                 report_selections=report_selections,
             )
         if action == "health_report":

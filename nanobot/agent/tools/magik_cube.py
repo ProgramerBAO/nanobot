@@ -9,6 +9,7 @@ import math
 import re
 import statistics
 import time as time_module
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -1189,6 +1190,7 @@ class MagikCubeReporter:
         tenant_query: str,
         granularity: str,
         include_tpm: bool,
+        report_template: str = "matrix_card",
     ) -> ToolResult:
         """Return a channel-agnostic customer/model-scope selection card."""
 
@@ -1212,6 +1214,7 @@ class MagikCubeReporter:
         base_params = self._interaction_base_params(
             plan, granularity=granularity, include_tpm=include_tpm
         )
+        base_params["report_template"] = report_template
         ui = {
             "kind": "magik_report_form",
             "version": 1,
@@ -1242,6 +1245,7 @@ class MagikCubeReporter:
         *,
         granularity: str,
         include_tpm: bool,
+        report_template: str = "matrix_card",
     ) -> ToolResult:
         """Return a second-round model selector for the chosen tenants."""
 
@@ -1263,9 +1267,12 @@ class MagikCubeReporter:
             "phase": "models",
             "title": "选择模型",
             "period": _window_label(plan.primary),
-            "base_params": self._interaction_base_params(
-                plan, granularity=granularity, include_tpm=include_tpm
-            ),
+            "base_params": {
+                **self._interaction_base_params(
+                    plan, granularity=granularity, include_tpm=include_tpm
+                ),
+                "report_template": report_template,
+            },
             "tenant_models": tenant_models,
             "max_tenants": self._config.interactive_max_tenants,
         }
@@ -2926,7 +2933,7 @@ _MAGIK_CUBE_PARAMETERS = tool_parameters_schema(
     include_tpm=BooleanSchema(default=True, description="Include daily peak TPM queries."),
     report_template=StringSchema(
         "Output template. usage_total returns one concise exact Token total.",
-        enum=("full", "matrix_card", "usage_total"),
+        enum=("full", "brief", "matrix_card", "usage_total"),
     ),
     granularity=StringSchema(
         "Matrix comparison granularity.", enum=("day", "week")
@@ -3382,9 +3389,9 @@ class MagikCubeDailyReportTool(Tool):
             return ToolResult.error("Error: comparison dates require start_date and end_date")
         if breakdown not in {"summary", "model"}:
             return ToolResult.error("Error: breakdown must be summary or model")
-        if report_template not in {"full", "matrix_card", "usage_total"}:
+        if report_template not in {"full", "brief", "matrix_card", "usage_total"}:
             return ToolResult.error(
-                "Error: report_template must be full, matrix_card, or usage_total"
+                "Error: report_template must be full, brief, matrix_card, or usage_total"
             )
         if granularity not in {"day", "week"}:
             return ToolResult.error("Error: granularity must be day or week")
@@ -3430,7 +3437,7 @@ class MagikCubeDailyReportTool(Tool):
                 )
             except ValueError as exc:
                 return ToolResult.error(f"Error: invalid report range: {exc}")
-        elif report_template == "matrix_card":
+        elif report_template in {"brief", "matrix_card"}:
             plan = _plan_comparison_windows(
                 target_date,
                 target_date,
@@ -3453,7 +3460,7 @@ class MagikCubeDailyReportTool(Tool):
                     self._cache,
                     self._reporting_actions_enabled,
                 )
-                if report_template == "matrix_card":
+                if report_template in {"brief", "matrix_card"}:
                     assert plan is not None
                     if interactive and not selections:
                         return await reporter.prepare_scope_interaction(
@@ -3461,12 +3468,13 @@ class MagikCubeDailyReportTool(Tool):
                             tenant_query=(tenant_query or "").strip(),
                             granularity=granularity,
                             include_tpm=include_tpm,
+                            report_template=report_template,
                         )
                     if not selections:
                         query = (tenant_query or "").strip()
                         if not query:
                             return ToolResult.error(
-                                "Error: matrix_card requires tenant selection"
+                                "Error: structured usage report requires tenant selection"
                             )
                         selections = [
                             {
@@ -3491,13 +3499,15 @@ class MagikCubeDailyReportTool(Tool):
                             selections,
                             granularity=granularity,
                             include_tpm=include_tpm,
+                            report_template=report_template,
                         )
-                    return await reporter.generate_matrix_report(
+                    result = await reporter.generate_matrix_report(
                         plan,
                         selections,
                         granularity=granularity,
                         include_tpm=include_tpm,
                     )
+                    return self._compatibility_brief(result) if report_template == "brief" else result
                 if report_template == "usage_total":
                     if plan is None or not (tenant_query or "").strip():
                         return ToolResult.error(
@@ -3533,7 +3543,9 @@ class MagikCubeDailyReportTool(Tool):
             logger.info(
                 "Magik Cube report perf: mode={} elapsed_ms={:.0f} api_calls={} "
                 "api_wait_ms={:.0f} cache_hits={} cache_misses={} http_429={} http_5xx={}",
-                "matrix"
+                "brief"
+                if report_template == "brief"
+                else "matrix"
                 if report_template == "matrix_card"
                 else "usage_total"
                 if report_template == "usage_total"
@@ -3548,3 +3560,56 @@ class MagikCubeDailyReportTool(Tool):
                 client.rate_limit_errors if client else 0,
                 client.server_errors if client else 0,
             )
+
+    @staticmethod
+    def _compatibility_brief(result: ToolResult) -> ToolResult:
+        """Reduce a legacy matrix result without changing its already-computed values."""
+
+        ui = result.metadata.get(OUTBOUND_META_AGENT_UI)
+        if not isinstance(ui, dict) or ui.get("kind") != "magik_report":
+            return result
+        compact = deepcopy(ui)
+        fallback_lines: list[str] = []
+        for card in compact.get("cards") or []:
+            if not isinstance(card, dict):
+                continue
+            title = str(card.get("title") or "Cube 报表")
+            card["title"] = title if title.endswith("简报") else f"{title}简报"
+            comparison_windows = [
+                item for item in card.get("comparison_windows") or [] if isinstance(item, dict)
+            ]
+            overview = []
+            for raw_line in card.get("overview") or []:
+                line = str(raw_line)
+                previous = re.search(r"较前一日（[^）]+）：([^｜]+)", line)
+                weekly = re.search(r"较上周同期（[^）]+）：([^｜]+)", line)
+                base = re.split(r"｜较(?:前一日|上周同期)", line, maxsplit=1)[0]
+                if previous and weekly:
+                    line = f"{base}｜同比：{weekly.group(1)}｜环比：{previous.group(1)}"
+                elif previous:
+                    line = f"{base}｜环比：{previous.group(1)}"
+                overview.append(line)
+            card["overview"] = overview
+            card["comparison_windows"] = []
+            card["segments"] = []
+            card["table"] = None
+            card["insights"] = []
+            fallback_lines.extend([str(card.get("title") or "Cube 简报"), *overview])
+            for item in comparison_windows:
+                label = str(item.get("label") or "")
+                window = str(item.get("window") or "")
+                if label == "前一日":
+                    fallback_lines.append(f"环比基准：前一日 {window}")
+                elif label == "上周同期":
+                    fallback_lines.append(f"同比基准：上周同期 {window}")
+                elif label:
+                    fallback_lines.append(f"环比基准：{label} {window}")
+            fallback_lines.append("来源：Cube Admin")
+            quality = str(card.get("quality") or "").strip()
+            if quality:
+                fallback_lines.append(quality)
+        return ToolResult(
+            "\n".join(fallback_lines) or str(result),
+            is_error=result.is_error,
+            metadata={**result.metadata, OUTBOUND_META_AGENT_UI: compact},
+        )

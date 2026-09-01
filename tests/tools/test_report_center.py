@@ -49,6 +49,80 @@ def _tool(monkeypatch, tmp_path):
     return tool, store, cron
 
 
+def test_usage_depth_words_route_to_brief_detail_and_full(monkeypatch, tmp_path) -> None:
+    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+
+    assert tool.match_direct_request("日报") == {
+        "action": "cube_report",
+        "period": "day",
+        "interactive": True,
+        "report_template": "brief",
+    }
+    assert tool.match_direct_request("详细日报")["report_template"] == "matrix_card"
+    assert tool.match_direct_request("完整日报")["report_template"] == "full"
+
+    disabled = ReportCenterTool(
+        ReportCenterToolConfig(cube_usage_brief_template=False), _FakeCron(), MagicMock()
+    )
+    assert disabled.match_direct_request("日报")["report_template"] == "matrix_card"
+
+
+def test_explicit_daily_scope_defaults_to_brief_and_preserves_date(monkeypatch, tmp_path) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = MagicMock()
+    magik.match_direct_request.return_value = {
+        "tenant_query": "tencent_token_hub",
+        "model": "Kimi-K3",
+        "start_date": "2026-08-31",
+        "end_date": "2026-08-31",
+        "report_template": "matrix_card",
+        "breakdown": "model",
+    }
+    tool = ReportCenterTool(ReportCenterToolConfig(), _FakeCron(), magik)
+
+    params = tool.match_direct_request("tencent_token_hub Kimi-K3 2026-08-31日的日报")
+
+    assert params is not None
+    assert params["report_template"] == "brief"
+    assert params["tenant_query"] == "tencent_token_hub"
+    assert params["model"] == "Kimi-K3"
+    assert params["start_date"] == "2026-08-31"
+    assert params["end_date"] == "2026-08-31"
+
+
+def test_further_analysis_command_preserves_scope_without_legacy_parser(
+    monkeypatch, tmp_path
+) -> None:
+    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+
+    params = tool.match_direct_request(
+        "进一步分析（日报）：客户 tencent_token_hub，模型 Kimi-K3，"
+        "日期 2026-08-31 至 2026-08-31"
+    )
+
+    assert params == {
+        "action": "cube_report",
+        "period": "day",
+        "report_template": "matrix_card",
+        "tenant_query": "tencent_token_hub",
+        "model": "Kimi-K3",
+        "models": ["Kimi-K3"],
+        "all_tenants": False,
+        "breakdown": "model",
+        "start_date": "2026-08-31",
+        "end_date": "2026-08-31",
+        "interactive": False,
+        "report_selections": [
+            {
+                "tenant_query": "tencent_token_hub",
+                "model_scope": "selected",
+                "models": ["Kimi-K3"],
+            }
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_report_home_is_direct_and_channel_neutral(monkeypatch, tmp_path) -> None:
     tool, _store, _cron = _tool(monkeypatch, tmp_path)
@@ -187,6 +261,7 @@ async def test_subscription_setup_returns_a_form_without_creating_job(
     assert ui["kind"] == "report_subscription_form"
     assert ui["default_period"] == "day"
     assert ui["default_time"] == "10:00"
+    assert ui["report_params"]["report_template"] == "brief"
     assert cron.jobs == []
 
 
@@ -541,9 +616,8 @@ async def test_model_daily_report_queries_all_cube_customers_and_labels_scope(
     assert captured[0].filters["all_tenants"] is True
     assert captured[0].filters["models"] == ["Kimi-K3"]
     ui = result.metadata[OUTBOUND_META_AGENT_UI]
-    assert ui["title"] == "Kimi-K3 全部客户日报"
-    table = next(block for block in ui["blocks"] if block["kind"] == "table")
-    assert table["data"]["title"] == "客户用量排行：Kimi-K3，按 Token 总量降序"
+    assert ui["title"] == "Kimi-K3 全部客户日报简报"
+    assert all(block["kind"] != "table" for block in ui["blocks"])
     assert magik.execute.await_count == 0
 
 
@@ -606,7 +680,7 @@ async def test_all_customer_model_report_requires_tenant_wildcard_grant_when_rba
     )
     for resource_type, resource_id in (
         ("connector", "magik_cube"),
-        ("template", "usage_daily_matrix"),
+        ("template", "usage_daily_brief"),
         ("model", "Kimi-K3"),
     ):
         store.grant("feishu", "ou_a", resource_type, resource_id)

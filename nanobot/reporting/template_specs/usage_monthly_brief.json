@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "template_id": "usage_monthly_brief",
+  "display_name": "月报简报",
+  "version": "1.0",
+  "category": "usage",
+  "period": "month",
+  "comparison": "previous_period",
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm"],
+  "dimensions": ["tenant", "model", "endpoint", "date"],
+  "description": "固定月报简报，上月环比前一自然月。"
+}

@@ -40,6 +40,7 @@ def capability_catalog(
     health_enabled: bool = False,
     cost_enabled: bool = False,
     provider_quality_enabled: bool = False,
+    brief_default: bool = False,
 ) -> tuple[Capability, ...]:
     has_cube = registry.connector("magik_cube") is not None and store.allowed(
         channel, user_id, "connector", "magik_cube"
@@ -107,11 +108,17 @@ def capability_catalog(
             )
         )
     if has_cube and _allowed(store, channel, user_id, "generate"):
-        period_actions = {
+        matrix_actions = {
             "usage_daily_matrix": ("day", "日报", "昨天对比前天"),
             "usage_weekly_matrix": ("week", "周报", "上周对比上上周"),
             "usage_monthly_matrix": ("month", "月报", "上月对比前一自然月"),
         }
+        brief_actions = {
+            "usage_daily_brief": ("day", "日报简报", "昨日概览，含同比和环比"),
+            "usage_weekly_brief": ("week", "周报简报", "上周核心指标环比"),
+            "usage_monthly_brief": ("month", "月报简报", "上月核心指标环比"),
+        }
+        period_actions = brief_actions if brief_default else matrix_actions
         for template in registry.compatible_templates("magik_cube"):
             manifest = template.manifest
             if manifest.lifecycle_state not in {"publish", "canary"}:
@@ -134,7 +141,8 @@ def capability_catalog(
                     ),
                 )
             )
-        if store.allowed(channel, user_id, "template", "usage_weekly_matrix"):
+        recent_template = "usage_custom_brief" if brief_default else "usage_weekly_matrix"
+        if store.allowed(channel, user_id, "template", recent_template):
             items.append(
                 Capability(
                     "generate:recent7",
@@ -181,7 +189,12 @@ def home_document(
     health_enabled: bool = False,
     cost_enabled: bool = False,
     provider_quality_enabled: bool = False,
+    brief_default: bool = False,
+    admin_skill_enabled: bool = False,
 ) -> ReportDocument:
+    has_cube = registry.connector("magik_cube") is not None and store.allowed(
+        channel, user_id, "connector", "magik_cube"
+    )
     capabilities = capability_catalog(
         registry,
         store,
@@ -190,11 +203,19 @@ def home_document(
         health_enabled=health_enabled,
         cost_enabled=cost_enabled,
         provider_quality_enabled=provider_quality_enabled,
+        brief_default=brief_default,
     )
     if capabilities and capabilities[0].capability_id == "request_access":
         intro = "当前账号尚未获得报表数据源权限，请联系管理员授权。"
     else:
         intro = "选择 Cube 报表功能，或直接发送客户、模型范围和报表周期。明确请求会直接生成。"
+    flexible_help = (
+        "\n\n**Cube 灵活查询**\n"
+        "可用自然语言查询租户、模型、Endpoint、账单、集群、日志和只读配置。"
+        if admin_skill_enabled and has_cube
+        else ""
+    )
+    fallback_help = flexible_help.replace("**", "")
     return ReportDocument(
         title="报表中心",
         subtitle="确定性报表 · 固定口径",
@@ -204,9 +225,10 @@ def home_document(
             + intro
             + "\n可用功能："
             + "、".join(item.title for item in capabilities)
+            + fallback_help
         ),
         blocks=(
-            ReportBlock("markdown", {"content": intro}),
+            ReportBlock("markdown", {"content": intro + flexible_help}),
             ReportBlock(
                 "actions",
                 {
@@ -235,6 +257,7 @@ def examples_document(
     cost_enabled: bool = False,
     all_tenant_model_enabled: bool = False,
     provider_quality_enabled: bool = False,
+    admin_skill_enabled: bool = False,
 ) -> ReportDocument:
     examples = ["我要周报", "我要日报", "健康报告", "查看我的订阅", "查看最近报表"]
     if authorized:
@@ -250,6 +273,16 @@ def examples_document(
     if provider_quality_enabled:
         examples.insert(0, "供应商质量报告")
         examples.insert(1, "Kimi-K3 各供应商性能对比")
+    if authorized and admin_skill_enabled:
+        examples.extend(
+            [
+                "tencent_token_hub 有哪些 Endpoint",
+                "Kimi-K3 配置在哪些集群",
+                "查看某客户最近的账单",
+                "查询某 Endpoint 的路由链",
+                "查看某模型的价格和配置",
+            ]
+        )
     return ReportDocument(
         title="报表问法示例",
         fallback_text="可直接发送：\n" + "\n".join(f"- {item}" for item in examples),

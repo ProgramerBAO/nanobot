@@ -36,16 +36,90 @@ from nanobot.reporting.templates import (
 def test_builtin_template_pack_is_versioned_and_compatible() -> None:
     specs = load_builtin_template_specs()
     assert {item.template_id for item in specs} == {
+        "usage_custom_brief",
+        "usage_custom_matrix",
+        "usage_daily_brief",
         "usage_daily_matrix",
+        "usage_monthly_brief",
         "usage_weekly_matrix",
+        "usage_weekly_brief",
         "usage_monthly_matrix",
     }
     registry = build_default_registry(discover_external=False)
     assert {item.manifest.template_id for item in registry.compatible_templates("magik_cube")} == {
+        "usage_custom_brief",
+        "usage_custom_matrix",
+        "usage_daily_brief",
         "usage_daily_matrix",
+        "usage_monthly_brief",
         "usage_weekly_matrix",
+        "usage_weekly_brief",
         "usage_monthly_matrix",
     }
+
+
+def test_daily_brief_keeps_named_baselines_but_omits_detail_sections() -> None:
+    spec = next(
+        item for item in load_builtin_template_specs() if item.template_id == "usage_daily_brief"
+    )
+    document = UsageMatrixTemplate(spec, semantics_v2=True, presentation="brief").analyze(
+        (
+            ReportDataset(
+                rows=(
+                    {"period": "current", "date": "2026-08-31", "tenant": "a", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 162},
+                    {"period": "current", "date": "2026-08-31", "tenant": "a", "model": "Kimi-K3", "metric": "ai.requests", "value": 110},
+                    {"period": "comparison", "date": "2026-08-30", "tenant": "a", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 100},
+                    {"period": "comparison", "date": "2026-08-30", "tenant": "a", "model": "Kimi-K3", "metric": "ai.requests", "value": 100},
+                    {"period": "previous_week_same_day", "date": "2026-08-24", "tenant": "a", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 137},
+                    {"period": "previous_week_same_day", "date": "2026-08-24", "tenant": "a", "model": "Kimi-K3", "metric": "ai.requests", "value": 114},
+                ),
+                metadata={
+                    "query_windows": [
+                        {"period": "current", "start": "2026-08-31 00:00", "end": "2026-09-01 00:00"},
+                        {"period": "comparison", "start": "2026-08-30 00:00", "end": "2026-08-31 00:00"},
+                        {"period": "previous_week_same_day", "start": "2026-08-24 00:00", "end": "2026-08-25 00:00"},
+                    ],
+                    "scope": {
+                        "all_tenants": True,
+                        "tenant": "",
+                        "model_scope": "selected",
+                        "models": ["Kimi-K3"],
+                    },
+                },
+            ),
+        )
+    )
+
+    token = document.blocks[0].data["items"][0]
+    assert token["comparisons"] == [
+        {
+            "key": "previous_week_same_day",
+            "label": "同比",
+            "baseline_value": 137.0,
+            "change": "↑18.2%",
+        },
+        {
+            "key": "previous_period",
+            "label": "环比",
+            "baseline_value": 100.0,
+            "change": "↑62.0%",
+        },
+    ]
+    assert document.title == "Kimi-K3 全部客户日报简报"
+    assert document.context is not None
+    assert [item.key for item in document.context.comparison_windows] == [
+        "previous_period",
+        "previous_week_same_day",
+    ]
+    assert {block.kind for block in document.blocks} == {"metrics", "note", "actions"}
+    assert "对比（" not in document.fallback_text
+    assert "同比基准：上周同期 2026-08-24" in document.fallback_text
+    assert "环比基准：前一日 2026-08-30" in document.fallback_text
+    action = next(block for block in document.blocks if block.kind == "actions").data["actions"][0]
+    assert action["command"] == (
+        "进一步分析（日报）：客户 全部客户，模型 Kimi-K3，"
+        "日期 2026-08-31 至 2026-08-31"
+    )
 
 
 def test_declarative_template_rejects_executable_fields() -> None:

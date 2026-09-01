@@ -152,6 +152,50 @@ def test_scope_submit_is_idempotent_and_maps_server_side_values() -> None:
     assert state_id in channel._card_interactions
 
 
+def test_scope_card_preserves_selected_report_template() -> None:
+    channel = _channel()
+    ui = _scope_ui()
+    ui["base_params"]["report_template"] = "brief"
+    ui["report_template_options"] = [
+        {"value": "brief", "label": "简报（默认）"},
+        {"value": "matrix_card", "label": "详细分析"},
+        {"value": "full", "label": "完整报表"},
+    ]
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+    card = channel._build_scope_card(ui, msg)
+    channel._schedule_card_resume = MagicMock(return_value=True)
+    selectors = list(_find_tag(card, "select_static"))
+    template_selector = next(item for item in selectors if item["name"] == "report_template")
+    assert template_selector["initial_option"] == "brief"
+    detail_option = next(
+        item["value"] for item in template_selector["options"] if item["value"] == "matrix_card"
+    )
+    tenant_option = next(_find_tag(card, "multi_select_static"))["options"][0]["value"]
+    submit = next(
+        button for button in _find_tag(card, "button") if button.get("value", {}).get("scope") == "summary"
+    )
+
+    response = channel._on_card_action_sync(
+        _action(
+            value=submit["value"],
+            name=submit["name"],
+            form_value={
+                "tenants": [tenant_option],
+                "report_template": detail_option,
+            },
+        )
+    )
+
+    assert response.toast.type == "success"
+    params = channel._schedule_card_resume.call_args.args[1]
+    assert params["report_template"] == "matrix_card"
+
+
 def test_model_form_submit_does_not_require_prior_select_callback() -> None:
     channel = _channel()
     ui = {

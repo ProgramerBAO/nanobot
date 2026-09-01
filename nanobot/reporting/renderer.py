@@ -156,7 +156,24 @@ def _format_report_context(document: ReportDocument) -> str:
     quality = context.quality or "未标记"
     reasons = "；".join(context.quality_reasons[:5]) if context.quality_reasons else "无"
     freshness = context.freshness or "未提供"
-    if context.comparison_windows:
+    if document.document_id.endswith("_brief"):
+        named = {item.key: item for item in context.comparison_windows}
+        previous = named.get("previous_period")
+        weekly = named.get("previous_week_same_day")
+        previous_text = (
+            f"{previous.window.start} - {previous.window.end}"
+            if previous is not None
+            else "暂无可比基准"
+        )
+        if weekly is not None:
+            comparison_text = (
+                f"环比基准：前一日 {previous_text}\n"
+                f"同比基准：上周同期 {weekly.window.start} - {weekly.window.end}"
+            )
+        else:
+            comparison_text = f"环比基准：前一等长周期 {previous_text}"
+        baseline_policy_text = "简报命名基准"
+    elif context.comparison_windows:
         comparison_text = "\n".join(
             f"对比（{item.label}）：{item.window.start} - {item.window.end}"
             for item in context.comparison_windows

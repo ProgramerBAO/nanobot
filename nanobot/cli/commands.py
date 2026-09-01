@@ -2550,6 +2550,9 @@ def report_plugins_list() -> None:
         cube_usage_semantics_v2=bool(
             getattr(config.tools.reporting, "cube_usage_semantics_v2", False)
         ),
+        cube_usage_brief_template_enabled=bool(
+            getattr(config.tools.reporting, "cube_usage_brief_template", True)
+        ),
         timezone=str(getattr(config.tools.reporting, "timezone", "Asia/Shanghai")),
         health_thresholds=getattr(config.tools.reporting, "health_thresholds", None),
     )

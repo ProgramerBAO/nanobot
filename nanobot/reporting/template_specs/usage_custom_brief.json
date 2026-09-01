@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "template_id": "usage_custom_brief",
+  "display_name": "区间简报",
+  "version": "1.0",
+  "category": "usage",
+  "period": "range",
+  "comparison": "previous_period",
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm"],
+  "dimensions": ["tenant", "model", "endpoint", "date"],
+  "description": "固定区间简报，环比前一等长区间。"
+}

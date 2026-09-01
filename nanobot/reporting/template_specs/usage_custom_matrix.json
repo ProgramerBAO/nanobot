@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "template_id": "usage_custom_matrix",
+  "display_name": "区间报表",
+  "version": "1.0",
+  "category": "usage",
+  "period": "range",
+  "comparison": "previous_period",
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm"],
+  "dimensions": ["tenant", "model", "endpoint", "date"],
+  "description": "固定区间详细分析，比较前一等长区间。"
+}

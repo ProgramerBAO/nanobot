@@ -13,7 +13,7 @@ from nanobot.agent.tools.magik_cube import (
     MagikCubeToolConfig,
     _as_int,
 )
-from nanobot.agent.tools.report_center import ReportCenterTool
+from nanobot.agent.tools.report_center import ReportCenterTool, ReportCenterToolConfig
 from nanobot.reporting import (
     CubeConnector,
     CubeCostAccountTemplate,
@@ -839,17 +839,20 @@ def test_health_time_contract_requires_aware_ordered_and_bounded_windows() -> No
 def test_cube_contract_preserves_large_integer_strings_and_fixed_route() -> None:
     assert _as_int("9007199254740993") == 9007199254740993
     tool = ReportCenterTool.__new__(ReportCenterTool)
+    tool._config = ReportCenterToolConfig()
     for text, period in (("我要日报", "day"), ("我要周报", "week"), ("我要月报", "month")):
         assert tool.match_direct_request(text) == {
             "action": "cube_report",
             "period": period,
             "interactive": True,
+            "report_template": "brief",
         }
     assert tool.match_direct_request("Kimi-K3模型的日报") == {
         "action": "cube_report",
         "period": "day",
         "model": "Kimi-K3",
         "all_tenants": True,
+        "report_template": "brief",
     }
 
 
@@ -1056,7 +1059,9 @@ async def test_cube_connector_queries_selected_model_for_all_catalog_tenants() -
     assert result.metadata["scope"] == {
         "tenant_catalog": "all_tenants",
         "all_tenants": True,
+        "tenant": "",
         "tenant_count": 2,
+        "model_scope": "selected",
         "models": ["Kimi-K3"],
     }
 

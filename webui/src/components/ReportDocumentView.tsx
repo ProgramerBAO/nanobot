@@ -95,13 +95,33 @@ function contextLines(document: AgentUIBlob): string[] {
         return `对比（${stringValue(comparison.label, "对比周期")}）：${stringValue(window.start, "暂无")} - ${stringValue(window.end, "暂无")}`;
       })
     : [baseline.start || baseline.end ? `对比基准：${baseline.start || "暂无"} - ${baseline.end || "暂无"}` : "对比基准：暂无可比基准"];
+  const isBrief = stringValue(document.document_id).endsWith("_brief");
   return [
     current.start || current.end ? `统计窗口：${current.start || "暂无"} - ${current.end || "暂无"}` : "",
-    ...comparisonLines,
+    ...(isBrief ? [] : comparisonLines),
     context.timezone ? `时区：${context.timezone}` : "",
-    sources.length ? `来源：${[...new Set(sources)].join("；")}` : "",
-    aggregations.length ? `口径：${[...new Set(aggregations)].join("；")}` : "",
+    ...(!isBrief && sources.length ? [`来源：${[...new Set(sources)].join("；")}`] : []),
+    ...(!isBrief && aggregations.length ? [`口径：${[...new Set(aggregations)].join("；")}`] : []),
   ].filter(Boolean);
+}
+
+function briefReadingNote(document: AgentUIBlob): string {
+  if (!stringValue(document.document_id).endsWith("_brief")) return "";
+  const context = recordValue(document.context);
+  const comparisons = (context.comparison_windows as unknown[] ?? []).map(recordValue);
+  const named = new Map(comparisons.map((item) => [stringValue(item.key), item]));
+  const windowText = (item: RecordValue) => {
+    const window = recordValue(item.window);
+    return `${stringValue(window.start, "暂无")} - ${stringValue(window.end, "暂无")}`;
+  };
+  const previous = named.get("previous_period") ?? {};
+  const weekly = named.get("previous_week_same_day");
+  const sources = (context.sources as unknown[] ?? []).map(recordValue).map((source) => stringValue(source.system)).filter(Boolean);
+  const lines = weekly
+    ? [`环比基准：前一日 ${windowText(previous)}`, `同比基准：上周同期 ${windowText(weekly)}`]
+    : [`环比基准：前一等长周期 ${windowText(previous)}`];
+  lines.push(`来源：${[...new Set(sources)].join("；") || "Cube Admin"}`);
+  return lines.join("\n");
 }
 
 function valueText(value: unknown): string {
@@ -295,6 +315,8 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
       if (content) notes.push(content);
     }
   }
+  const briefNote = briefReadingNote(document);
+  if (briefNote) notes.push(briefNote);
   const actions = (document.blocks ?? []).flatMap((block) => block.kind === "actions" ? (blockData(block).actions as unknown[] ?? []).map(recordValue) : []);
   const isSelector = document.document_id === "provider_quality_selector";
   return (
@@ -317,7 +339,7 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
         if (block.kind === "actions") return null;
         return null;
       })}
-      {actions.length ? <div className="flex flex-wrap gap-2 border-b border-border/70 px-4 py-3">{actions.map((action, index) => { const id = stringValue(action.action_id); return <button key={`${id}-${index}`} type="button" onClick={() => { if (id === "provider_quality_report") onCommand?.("供应商质量报告"); else if (id === "provider_quality_show_empty") onCommand?.(stringValue(action.command, "查看近15分钟供应商无用量")); }} className="inline-flex items-center gap-2 border border-border px-3 py-2 text-sm transition-colors hover:bg-muted/50"><ChevronDown className="h-4 w-4 rotate-[-90deg]" aria-hidden />{stringValue(action.label, "打开")}</button>; })}</div> : null}
+      {actions.length ? <div className="flex flex-wrap gap-2 border-b border-border/70 px-4 py-3">{actions.map((action, index) => { const id = stringValue(action.action_id); return <button key={`${id}-${index}`} type="button" onClick={() => { const command = stringValue(action.command); if (command) onCommand?.(command); else if (id === "provider_quality_report") onCommand?.("供应商质量报告"); else if (id === "provider_quality_show_empty") onCommand?.("查看近15分钟供应商无用量"); }} className="inline-flex items-center gap-2 border border-border px-3 py-2 text-sm transition-colors hover:bg-muted/50"><ChevronDown className="h-4 w-4 rotate-[-90deg]" aria-hidden />{stringValue(action.label, "打开")}</button>; })}</div> : null}
       {document.warnings?.length ? <div className="border-b border-border/70 bg-amber-500/8 px-4 py-3 text-xs leading-5 text-amber-800 dark:text-amber-200"><div className="flex gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{document.warnings.join("；")}</span></div></div> : null}
       {!isSelector ? <details className="group px-4 py-3"><summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium text-muted-foreground"><ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />报表说明与读法</summary><div className="mt-3 space-y-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{notes.length ? notes.join("\n") : "错误率、延迟和 TTFT 越低越好；RPM/TPM 表示流量，不单独代表故障。"}</div></details> : null}
     </article>

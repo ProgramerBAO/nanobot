@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "template_id": "usage_weekly_brief",
+  "display_name": "周报简报",
+  "version": "1.0",
+  "category": "usage",
+  "period": "week",
+  "comparison": "previous_period",
+  "metrics": ["ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm"],
+  "dimensions": ["tenant", "model", "endpoint", "date"],
+  "description": "固定周报简报，上周环比上上周。"
+}

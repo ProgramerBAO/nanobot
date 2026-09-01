@@ -287,7 +287,12 @@ class CubeConnector(ConnectorPlugin):
                         else "key_accounts"
                     ),
                     "all_tenants": all_tenants,
+                    "tenant": str(query.filters.get("tenant") or ""),
                     "tenant_count": len(tenants),
+                    "model_scope": str(
+                        query.filters.get("model_scope")
+                        or ("selected" if selected_models else "summary")
+                    ),
                     "models": list(selected_models),
                 },
             },

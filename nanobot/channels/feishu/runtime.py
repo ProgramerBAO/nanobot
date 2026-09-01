@@ -1722,7 +1722,20 @@ class FeishuChannel(BaseChannel):
             for item in context.get("comparison_windows") or []
             if isinstance(item, dict)
         ]
-        if comparisons:
+        is_brief = str(ui.get("document_id") or "").endswith("_brief")
+        if is_brief:
+            named = {str(item.get("key") or ""): item for item in comparisons}
+            previous = named.get("previous_period", {})
+            weekly = named.get("previous_week_same_day", {})
+            if weekly:
+                comparison_text = (
+                    f"环比基准：前一日 {window_text(previous.get('window'))}\n"
+                    f"同比基准：上周同期 {window_text(weekly.get('window'))}"
+                )
+            else:
+                comparison_text = f"环比基准：前一等长周期 {baseline}"
+            baseline_rule = "简报仅保留命名基准"
+        elif comparisons:
             comparison_lines = []
             for item in comparisons:
                 label = str(item.get("label") or "对比周期")
@@ -1992,34 +2005,67 @@ class FeishuChannel(BaseChannel):
                         "value": opaque_keys[index],
                     }
                 )
+            form_elements: list[dict[str, Any]] = [
+                {
+                    "tag": "multi_select_static",
+                    "name": "tenants",
+                    "required": True,
+                    "width": "fill",
+                    "placeholder": {"tag": "plain_text", "content": "选择客户"},
+                    "options": options,
+                }
+            ]
+            template_options = [
+                item
+                for item in ui.get("report_template_options") or []
+                if isinstance(item, dict)
+                and item.get("value") in {"brief", "matrix_card", "full"}
+            ]
+            if template_options:
+                default_template = str(
+                    (ui.get("base_params") or {}).get("report_template") or "brief"
+                )
+                form_elements.append(
+                    {
+                        "tag": "select_static",
+                        "name": "report_template",
+                        "required": True,
+                        "width": "fill",
+                        "placeholder": {"tag": "plain_text", "content": "选择报表形式"},
+                        "initial_option": default_template,
+                        "options": [
+                            {
+                                "text": {
+                                    "tag": "plain_text",
+                                    "content": str(item.get("label") or "报表"),
+                                },
+                                "value": str(item["value"]),
+                            }
+                            for item in template_options
+                        ],
+                    }
+                )
+            form_elements.append(
+                {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "horizontal_spacing": "default",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "elements": [action],
+                        }
+                        for action in scope_actions
+                    ],
+                }
+            )
             elements.append(
                 {
                     "tag": "form",
                     "name": f"magik_scope_{nonce[:8]}",
-                    "elements": [
-                        {
-                            "tag": "multi_select_static",
-                            "name": "tenants",
-                            "required": True,
-                            "width": "fill",
-                            "placeholder": {"tag": "plain_text", "content": "选择客户"},
-                            "options": options,
-                        },
-                        {
-                            "tag": "column_set",
-                            "flex_mode": "none",
-                            "horizontal_spacing": "default",
-                            "columns": [
-                                {
-                                    "tag": "column",
-                                    "width": "weighted",
-                                    "weight": 1,
-                                    "elements": [action],
-                                }
-                                for action in scope_actions
-                            ],
-                        },
-                    ],
+                    "elements": form_elements,
                 }
             )
         else:
@@ -4351,6 +4397,17 @@ class FeishuChannel(BaseChannel):
                         tenant_query, model = mapped
                         selected_models.setdefault(tenant_query, []).append(model)
                     state.selected_models = selected_models
+
+                if state.phase != "report_document" and "report_template" in form_value:
+                    submitted_template = self._callback_option_values(
+                        form_value["report_template"]
+                    )
+                    report_template = (
+                        submitted_template[0] if len(submitted_template) == 1 else ""
+                    )
+                    if report_template not in {"brief", "matrix_card", "full"}:
+                        return self._card_callback_response("error", "请选择有效的报表形式")
+                    state.base_params["report_template"] = report_template
 
                 name = str(getattr(action, "name", "") or "")
                 if state.phase == "report_document":

@@ -94,6 +94,46 @@ const SLASH_COMMANDS: SlashCommand[] = [
 ];
 
 describe("MessageBubble", () => {
+  it("renders a brief without a standalone comparison section", () => {
+    const onReportCommand = vi.fn();
+    const message: UIMessage = {
+      id: "daily-brief",
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      agentUi: {
+        kind: "report_document",
+        document_id: "usage_daily_brief",
+        title: "Kimi-K3 日报简报",
+        quality: "complete",
+        context: {
+          timezone: "Asia/Shanghai",
+          current_window: { start: "2026-08-31 00:00", end: "2026-09-01 00:00" },
+          comparison_windows: [
+            { key: "previous_period", label: "前一日", window: { start: "2026-08-30 00:00", end: "2026-08-31 00:00" } },
+            { key: "previous_week_same_day", label: "上周同期", window: { start: "2026-08-24 00:00", end: "2026-08-25 00:00" } },
+          ],
+          sources: [{ system: "Cube Admin", route: "analysis/active-tenant-daily-usage/query" }],
+        },
+        blocks: [
+          { kind: "metrics", data: { items: [{ label: "Token 消耗", value: "713.01亿", comparisons: [{ label: "同比", change: "↑18.1%" }, { label: "环比", change: "↑62.3%" }] }] } },
+          { kind: "actions", data: { actions: [{ action_id: "usage_further_analysis", label: "进一步分析", command: "进一步分析（日报）：客户 tencent_token_hub，模型 Kimi-K3，日期 2026-08-31 至 2026-08-31" }] } },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={message} onReportCommand={onReportCommand} />);
+
+    expect(screen.getByText(/同比：↑18.1%/)).toBeInTheDocument();
+    expect(screen.getByText(/环比：↑62.3%/)).toBeInTheDocument();
+    expect(screen.queryByText(/对比（前一日）/)).not.toBeInTheDocument();
+    expect(screen.getByText(/环比基准：前一日 2026-08-30/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "进一步分析" }));
+    expect(onReportCommand).toHaveBeenCalledWith(
+      "进一步分析（日报）：客户 tencent_token_hub，模型 Kimi-K3，日期 2026-08-31 至 2026-08-31",
+    );
+  });
+
   it("renders named daily comparison windows and KPI baselines", () => {
     const message: UIMessage = {
       id: "daily-comparisons",
