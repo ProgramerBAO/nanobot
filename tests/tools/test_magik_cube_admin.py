@@ -26,6 +26,10 @@ HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
 
 def test_catalog_covers_every_upstream_admin_operation() -> None:
+    if not OPENAPI_PATH.is_file():
+        # openapi.yaml 来自 Cube 服务端仓库的本地检出，不属于本仓库；
+        # 缺失时跳过对账（目录本身的单测仍会运行）。
+        pytest.skip(f"local Cube admin OpenAPI spec not available: {OPENAPI_PATH}")
     source_bytes = OPENAPI_PATH.read_bytes()
     openapi = yaml.safe_load(source_bytes)
     expected = {

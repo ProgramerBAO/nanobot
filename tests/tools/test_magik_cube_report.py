@@ -504,6 +504,16 @@ async def test_token_total_returns_requested_million_unit(tmp_path: Path) -> Non
             params: dict[str, Any] | None = None,
             json_body: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
+            if path == "tenants":
+                # 租户解析总是先取 live catalog（alias 仅作为匹配辅助）。
+                assert params is not None
+                assert json_body is None
+                return {
+                    "list": [
+                        {"tenantId": "tenant-test", "tenantName": "magik_test"}
+                    ],
+                    "total": 1,
+                }
             assert params is None
             assert json_body is not None
             assert path == "analysis/active-tenant-daily-usage/query"
