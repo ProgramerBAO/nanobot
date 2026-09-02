@@ -190,6 +190,8 @@ def test_multi_customer_model_brief_groups_aliases_and_named_changes() -> None:
                         "tenant_statuses": {"佛跳墙": "active", "豆汁": "active"},
                     },
                 },
+                quality="partial",
+                warnings=("佛跳墙 current usage model=DeepSeek-R1 no_data",),
             ),
         )
     )
@@ -206,8 +208,14 @@ def test_multi_customer_model_brief_groups_aliases_and_named_changes() -> None:
     assert "DeepSeek-R1" not in markdown
     assert "2 个模型" in document.subtitle
     assert "已自动隐藏 1 个" in markdown
+    assert "<summary>报表说明与数据质量</summary>" in markdown
     assert "时间桶" not in markdown
     assert "订阅" not in markdown
+    note = next(block for block in document.blocks if block.kind == "note")
+    assert note.data["collapsed"] is True
+    assert note.data["include_context"] is True
+    assert document.quality == "complete"
+    assert document.warnings == ()
 
 
 def test_multi_customer_model_brief_keeps_explicit_or_historical_models() -> None:

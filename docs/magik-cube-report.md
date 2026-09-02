@@ -39,6 +39,8 @@ tencent_token_hub Kimi-K3 2026-08-31日的日报 -> 指定范围日报简报
 
 发送 `多客户多模型日报简报` 后选择客户和模型。报告按客户分组，每个模型只展示 Token `同比`（D-7）和`环比`（D-1）。客户名来自实时 catalog 或已验证别名，查询始终使用真实 `tenantId`。“全部模型”会先通过 Cube 实时 `inference/model-configs` 目录展开为该客户的明确模型列表，再逐个查询；目录为空或读取失败时返回明确错误，不生成 `0 个模型` 的空壳报表。三个命名窗口（当前日、前一日、上周同期）均无 Token 用量的目录模型会自动隐藏；任一基准期有量、用户明确点选或存在查询失败时不隐藏。标题模型数量按实际展示模型计算。手工多选最多 20 个模型；“全部模型”允许使用实时目录中的完整模型集合，但仍受最多 20 个客户和 200 个客户模型组合的总上限保护。单客户失败时报告标记 `partial`，失败项不会被当作无用量折叠。该能力由 `cube_multi_scope_brief` 控制，默认关闭。
 
+该简报只在主视图展示客户和有用量模型。统计窗口、同比/环比基准、时区、来源、聚合口径、自动隐藏数量、数据质量和失败原因统一收进默认关闭的“报表说明与数据质量”区域；WebUI 和 Feishu 可点击展开，Markdown fallback 使用 `<details>` 保留同等信息。目录模型在三个窗口均无用量属于成功空数据，不计为 `partial`；连接、认证、限流或上游失败仍保持 `partial/missing`。
+
 ### 单机折算 TPM 峰值
 
 发送 `Kimi-K3 单机 TPM 峰值` 可查询指定模型。数据来自 `analysis/machine-tpm-trend/query`，请求使用 `TIME_LEVEL_HOUR`，按 `model + cluster + gpuProduct` 取窗口最大 `tpmPerMachine`。报告展示峰值北京时间、机器数、GPU 数、总 Token 和有效样本数。接口不返回 `machineId`，因此该指标只代表按机器数量折算的集群/卡型峰值，不能定位到某台物理机器。`machineCount` 和 `gpuCount` 保留小数；公式偏差只产生质量 warning，不覆盖上游值。该能力由 `cube_machine_tpm_report` 控制，默认关闭。

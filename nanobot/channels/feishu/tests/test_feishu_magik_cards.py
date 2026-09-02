@@ -568,6 +568,80 @@ def test_report_document_daily_metrics_name_both_comparisons() -> None:
     assert "对比（上周同期）：2026-08-22 00:00 - 2026-08-23 00:00" in note_text
 
 
+def test_multi_customer_brief_collapses_explanations_and_context() -> None:
+    """Verbose multi-scope semantics belong in one closed disclosure panel."""
+
+    channel = _channel()
+    ui = {
+        "kind": "report_document",
+        "document_id": "usage_customer_model_daily_brief",
+        "title": "多客户多模型日报简报",
+        "quality": "partial",
+        "warnings": ["connection_failed"],
+        "context": {
+            "timezone": "Asia/Shanghai",
+            "current_window": {
+                "start": "2026-09-01 00:00",
+                "end": "2026-09-02 00:00",
+            },
+            "sources": [
+                {
+                    "system": "Cube Admin",
+                    "route": "analysis/active-tenant-daily-usage/query",
+                }
+            ],
+            "quality": "partial",
+            "quality_reasons": ["connection_failed"],
+        },
+        "blocks": [
+            {
+                "kind": "grouped_metrics",
+                "data": {
+                    "groups": [
+                        {
+                            "label": "佛跳墙",
+                            "items": [
+                                {
+                                    "label": "Kimi-K3",
+                                    "status": "active",
+                                    "comparisons": [],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+            {
+                "kind": "note",
+                "data": {
+                    "content": "口径：每个客户、模型的 Token 按日求和。",
+                    "collapsed": True,
+                    "collapsed_label": "报表说明与数据质量",
+                    "include_context": True,
+                    "include_warnings": True,
+                },
+            },
+        ],
+    }
+
+    card = channel._build_agent_ui_cards(
+        ui,
+        OutboundMessage(channel="feishu", chat_id="ou_alice", content="fallback"),
+    )[0]
+    panel = next(
+        element for element in card["elements"] if element.get("tag") == "collapsible_panel"
+    )
+    panel_text = panel["elements"][0]["text"]["content"]
+
+    assert panel["expanded"] is False
+    assert panel["header"]["title"]["content"] == "报表说明与数据质量"
+    assert "口径：每个客户、模型的 Token 按日求和。" in panel_text
+    assert "当前：2026-09-01 00:00 - 2026-09-02 00:00" in panel_text
+    assert "Cube Admin / analysis/active-tenant-daily-usage/query" in panel_text
+    assert "connection_failed" in panel_text
+    assert not any(element.get("tag") == "note" for element in card["elements"])
+
+
 def test_report_document_actions_are_opaque_and_owner_bound() -> None:
     channel = _channel()
     ui = {

@@ -424,14 +424,52 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
   const status = reportStatus(document);
   const context = contextLines(document);
   const notes: string[] = [];
+  let collapseContext = false;
+  let collapseWarnings = false;
+  let disclosureLabel = "报表说明与读法";
   for (const block of document.blocks ?? []) {
     if (block.kind === "note") {
-      const content = stringValue(blockData(block).content);
+      const data = blockData(block);
+      const content = stringValue(data.content);
       if (content) notes.push(content);
+      if (data.collapsed === true) {
+        collapseContext ||= data.include_context === true;
+        collapseWarnings ||= data.include_warnings === true;
+        disclosureLabel = stringValue(data.collapsed_label, disclosureLabel);
+      }
     }
   }
   const briefNote = briefReadingNote(document);
   if (briefNote) notes.push(briefNote);
+  if (collapseContext) {
+    const reportContext = recordValue(document.context);
+    const sources = (reportContext.sources as unknown[] ?? [])
+      .map(recordValue)
+      .map((source) => {
+        const system = stringValue(source.system);
+        const route = stringValue(source.route);
+        return system && route ? `${system} / ${route}` : system || route;
+      })
+      .filter(Boolean);
+    const aggregations = (reportContext.metric_definitions as unknown[] ?? [])
+      .map((item) => stringValue(recordValue(item).aggregation))
+      .filter(Boolean);
+    notes.push(...context);
+    if (sources.length) notes.push(`来源：${[...new Set(sources)].join("；")}`);
+    if (aggregations.length) notes.push(`口径：${[...new Set(aggregations)].join("；")}`);
+    if (reportContext.quality) notes.push(`数据质量：${qualityLabel(reportContext.quality)}`);
+    if (reportContext.freshness) notes.push(`最近样本：${stringValue(reportContext.freshness)}`);
+    const reasons = (reportContext.quality_reasons as unknown[] ?? [])
+      .map((item) => stringValue(item))
+      .filter(Boolean);
+    if (reasons.length) notes.push(`质量原因：${reasons.join("；")}`);
+  }
+  if (collapseWarnings && document.warnings?.length) {
+    const visibleWarnings = document.warnings.slice(0, 5);
+    const remaining = document.warnings.length - visibleWarnings.length;
+    notes.push(`数据提示：${visibleWarnings.join("；")}${remaining > 0 ? `；另有 ${remaining} 项，请查看运行记录` : ""}`);
+  }
+  const uniqueNotes = [...new Set(notes)];
   const isSelector = document.document_id === "provider_quality_selector";
   return (
     <article className="w-full max-w-[min(100%,64rem)] overflow-hidden border border-border/80 bg-card shadow-sm" data-testid="report-document">
@@ -441,7 +479,7 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
           {!isSelector ? <div className={cn("inline-flex shrink-0 items-center gap-1.5 border px-2 py-1 text-xs font-medium", qualityTone(document.quality))}>{statusIcon(status.value)}{status.value} · {qualityLabel(document.quality)}</div> : null}
         </div>
         {!isSelector && status.reason ? <p className="mt-3 break-words text-xs text-muted-foreground">{status.reason}</p> : null}
-        {context.length ? <div className="mt-3 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">{context.map((line) => <div key={line} className="min-w-0 break-words">{line}</div>)}</div> : null}
+        {!collapseContext && context.length ? <div className="mt-3 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">{context.map((line) => <div key={line} className="min-w-0 break-words">{line}</div>)}</div> : null}
       </header>
       {document.blocks?.map((block, index) => {
         const data = blockData(block);
@@ -451,12 +489,13 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
         if (block.kind === "table") return <ReportTable key={index} data={data} />;
         if (block.kind === "markdown" && stringValue(data.variant) === "subscription") return <SubscriptionSummary key={index} data={data} />;
         if (block.kind === "markdown") return <section key={index} className="whitespace-pre-wrap border-b border-border/70 px-4 py-4 text-sm leading-6 text-foreground/85">{stringValue(data.content)}</section>;
+        if (block.kind === "note" && data.collapsed === true) return null;
         if (block.kind === "note") return <section key={index} className={cn("border-b border-border/70 px-4 py-3 text-xs leading-5 whitespace-pre-wrap", stringValue(data.severity) === "warning" ? "bg-amber-500/8 text-amber-800 dark:text-amber-200" : "text-muted-foreground")}><div className="flex gap-2"><CircleHelp className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><div className="min-w-0 break-words">{stringValue(data.content)}</div></div></section>;
         if (block.kind === "actions") return <ReportActions key={index} data={data} onCommand={onCommand} />;
         return null;
       })}
-      {document.warnings?.length ? <div className="border-b border-border/70 bg-amber-500/8 px-4 py-3 text-xs leading-5 text-amber-800 dark:text-amber-200"><div className="flex gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{document.warnings.join("；")}</span></div></div> : null}
-      {!isSelector ? <details className="group px-4 py-3"><summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium text-muted-foreground"><ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />报表说明与读法</summary><div className="mt-3 space-y-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{notes.length ? notes.join("\n") : "错误率、延迟和 TTFT 越低越好；RPM/TPM 表示流量，不单独代表故障。"}</div></details> : null}
+      {!collapseWarnings && document.warnings?.length ? <div className="border-b border-border/70 bg-amber-500/8 px-4 py-3 text-xs leading-5 text-amber-800 dark:text-amber-200"><div className="flex gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{document.warnings.join("；")}</span></div></div> : null}
+      {!isSelector ? <details className="group px-4 py-3"><summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium text-muted-foreground"><ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />{disclosureLabel}</summary><div className="mt-3 space-y-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{uniqueNotes.length ? uniqueNotes.join("\n") : "错误率、延迟和 TTFT 越低越好；RPM/TPM 表示流量，不单独代表故障。"}</div></details> : null}
     </article>
   );
 }

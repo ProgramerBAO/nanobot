@@ -235,7 +235,19 @@ def document_to_markdown(document: ReportDocument) -> str:
     sections = [f"# {document.title}"]
     if document.subtitle:
         sections.append(document.subtitle)
+    collapsed_notes: list[str] = []
+    collapse_context = False
+    collapse_warnings = False
+    collapsed_label = "报表说明与数据质量"
     for block in document.blocks:
+        if block.kind == "note" and block.data.get("collapsed") is True:
+            content = _block_content(block.data)
+            if content:
+                collapsed_notes.append(content)
+            collapse_context = collapse_context or block.data.get("include_context") is True
+            collapse_warnings = collapse_warnings or block.data.get("include_warnings") is True
+            collapsed_label = str(block.data.get("collapsed_label") or collapsed_label)
+            continue
         if block.kind in {"markdown", "note"}:
             content = _block_content(block.data)
         elif block.kind == "metrics":
@@ -270,13 +282,25 @@ def document_to_markdown(document: ReportDocument) -> str:
         if content:
             sections.append(content)
     context_text = _format_report_context(document)
-    if context_text:
+    if context_text and collapse_context:
+        collapsed_notes.append(context_text)
+    elif context_text:
         sections.append(context_text)
+    if collapse_warnings and document.warnings:
+        warning_text = "；".join(document.warnings[:5])
+        if len(document.warnings) > 5:
+            warning_text += f"；另有 {len(document.warnings) - 5} 项，请查看运行记录"
+        collapsed_notes.append("数据提示：" + warning_text)
+    if collapsed_notes:
+        details = "\n\n".join(dict.fromkeys(collapsed_notes))
+        sections.append(
+            f"<details>\n<summary>{collapsed_label}</summary>\n\n{details}\n\n</details>"
+        )
     if not document.blocks and document.fallback_text:
         sections.append(document.fallback_text)
     if document.quality and document.quality != "complete":
         sections.append(f"数据质量：{document.quality}")
-    if document.warnings:
+    if document.warnings and not collapse_warnings:
         sections.append("数据提示：" + "；".join(document.warnings))
     return "\n\n".join(section for section in sections if section).strip()
 

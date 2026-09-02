@@ -1770,6 +1770,33 @@ class FeishuChannel(BaseChannel):
         )
         return {"tag": "note", "elements": [{"tag": "plain_text", "content": content}]}
 
+    @staticmethod
+    def _report_collapsible_panel(title: str, content: str) -> dict[str, Any]:
+        """Build a closed Feishu panel for verbose report explanations.
+
+        Collapsing is only a presentation hint. The channel-neutral document
+        and text fallback retain the same semantics and quality information.
+        """
+
+        return {
+            "tag": "collapsible_panel",
+            "expanded": False,
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "background_color": "grey",
+                "vertical_align": "center",
+            },
+            "border": {"color": "grey", "corner_radius": "5px"},
+            "vertical_spacing": "8px",
+            "padding": "8px 8px 8px 8px",
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": content},
+                }
+            ],
+        }
+
     def _register_scope_interaction(
         self, ui: dict[str, Any], msg: OutboundMessage
     ) -> tuple[str, _FeishuCardInteraction]:
@@ -2426,6 +2453,10 @@ class FeishuChannel(BaseChannel):
         nonce, _state, actions = self._register_report_document_interaction(raw_actions, msg)
         action_map = {id(item): opaque for opaque, item in actions}
         elements: list[dict[str, Any]] = []
+        collapsed_notes: list[str] = []
+        collapsed_label = "报表说明与数据质量"
+        collapse_context = False
+        collapse_warnings = False
         for block in ui.get("blocks") or []:
             if not isinstance(block, dict):
                 continue
@@ -2438,6 +2469,16 @@ class FeishuChannel(BaseChannel):
             elif kind == "note":
                 content = str(data.get("content") or "").strip()
                 if not content:
+                    continue
+                if data.get("collapsed") is True:
+                    collapsed_notes.append(content)
+                    collapsed_label = str(
+                        data.get("collapsed_label") or collapsed_label
+                    )
+                    collapse_context = collapse_context or data.get("include_context") is True
+                    collapse_warnings = (
+                        collapse_warnings or data.get("include_warnings") is True
+                    )
                     continue
                 severity = str(data.get("severity") or "info").casefold()
                 if severity in {"warning", "error", "critical"}:
@@ -2592,8 +2633,34 @@ class FeishuChannel(BaseChannel):
                     elements.append({"tag": "hr"})
                     elements.append({"tag": "action", "actions": buttons})
 
-        groups = self._split_elements_by_table_limit(elements)
         context_note = self._report_context_note(ui)
+        if collapse_context and context_note:
+            context_elements = context_note.get("elements") or []
+            if context_elements and isinstance(context_elements[0], dict):
+                context_content = str(context_elements[0].get("content") or "").strip()
+                if context_content:
+                    collapsed_notes.append(context_content)
+            context_note = None
+        if collapse_warnings:
+            existing = "\n".join(collapsed_notes)
+            warnings = [
+                str(item).strip()
+                for item in ui.get("warnings") or []
+                if str(item).strip() and str(item).strip() not in existing
+            ]
+            if warnings:
+                warning_text = "；".join(warnings[:5])
+                if len(warnings) > 5:
+                    warning_text += f"；另有 {len(warnings) - 5} 项，请查看运行记录"
+                collapsed_notes.append("数据提示：" + warning_text)
+        if collapsed_notes:
+            elements.append(
+                self._report_collapsible_panel(
+                    collapsed_label,
+                    "\n\n".join(dict.fromkeys(collapsed_notes)),
+                )
+            )
+        groups = self._split_elements_by_table_limit(elements)
         title = str(ui.get("title") or "报表中心")
         subtitle = str(ui.get("subtitle") or "")
         template = self._report_header_template(ui)

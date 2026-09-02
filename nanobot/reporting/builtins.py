@@ -272,6 +272,17 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
             for item in windows
             if item.get("period") in {"comparison", "previous_week_same_day"}
         )
+        # Empty catalog models are expected in all-model mode, not an upstream
+        # failure. Preserve genuine query failures while preventing hidden idle
+        # models from polluting the report-level quality explanation.
+        actionable_warnings = tuple(
+            warning
+            for warning in dataset.warnings
+            if warning != "no_business_data" and not warning.endswith("no_data")
+        )
+        display_quality = dataset.quality
+        if rows and dataset.quality == "partial" and not actionable_warnings:
+            display_quality = "complete"
         context = ReportContext(
             timezone=self.timezone,
             current_window=ReportWindow(
@@ -297,8 +308,8 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                 ),
             ),
             calculation_version="1.0",
-            quality=dataset.quality,
-            quality_reasons=dataset.warnings,
+            quality=display_quality,
+            quality_reasons=actionable_warnings,
             freshness=str(dataset.metadata.get("last_sample_at") or ""),
             template_version=self.manifest.version,
         )
@@ -327,7 +338,13 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                         "口径：每个客户、模型的 Token 按日求和；同比对比上周同日，环比对比前一日。"
                         "只展示百分比变化，客户身份来自 Cube 实时目录。"
                         f"{hidden_note}"
-                    )
+                    ),
+                    # Large scopes need their explanation available without
+                    # pushing the customer/model result below verbose metadata.
+                    "collapsed": True,
+                    "collapsed_label": "报表说明与数据质量",
+                    "include_context": True,
+                    "include_warnings": True,
                 },
             ),
         )
@@ -339,10 +356,10 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
             fallback_text=(
                 f"{self.manifest.display_name}\n{subtitle}\n"
                 + "\n".join(fallback_lines)
-                + f"\n数据质量：{dataset.quality}"
+                + f"\n数据质量：{display_quality}"
             ),
-            quality=dataset.quality,
-            warnings=dataset.warnings,
+            quality=display_quality,
+            warnings=actionable_warnings,
             context=context,
             version=2,
         )

@@ -208,6 +208,45 @@ describe("MessageBubble", () => {
     expect(screen.queryByText(/时间桶/)).not.toBeInTheDocument();
   });
 
+  it("collapses multi-customer report context and quality details", () => {
+    const message: UIMessage = {
+      id: "multi-customer-context",
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      agentUi: {
+        kind: "report_document",
+        document_id: "usage_customer_model_daily_brief",
+        title: "多客户多模型日报简报",
+        quality: "partial",
+        warnings: ["connection_failed"],
+        context: {
+          timezone: "Asia/Shanghai",
+          current_window: { start: "2026-09-01 00:00", end: "2026-09-02 00:00" },
+          sources: [{ system: "Cube Admin", route: "analysis/active-tenant-daily-usage/query" }],
+          metric_definitions: [{ aggregation: "每个客户和模型在自然日内求和" }],
+          quality: "partial",
+          quality_reasons: ["connection_failed"],
+        },
+        blocks: [
+          { kind: "grouped_metrics", data: { groups: [{ label: "佛跳墙", items: [{ label: "Kimi-K3", status: "active", comparisons: [] }] }] } },
+          { kind: "note", data: { content: "已自动隐藏 46 个无用量模型。", collapsed: true, collapsed_label: "报表说明与数据质量", include_context: true, include_warnings: true } },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={message} />);
+
+    const disclosure = screen.getByText("报表说明与数据质量").closest("details");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
+    expect(disclosure).toHaveTextContent("统计窗口：2026-09-01 00:00 - 2026-09-02 00:00");
+    expect(disclosure).toHaveTextContent("Cube Admin / analysis/active-tenant-daily-usage/query");
+    expect(disclosure).toHaveTextContent("已自动隐藏 46 个无用量模型");
+    expect(disclosure).toHaveTextContent("connection_failed");
+    expect(screen.getAllByText(/统计窗口：2026-09-01/)).toHaveLength(1);
+  });
+
   it("renders named daily comparison windows and KPI baselines", () => {
     const message: UIMessage = {
       id: "daily-comparisons",

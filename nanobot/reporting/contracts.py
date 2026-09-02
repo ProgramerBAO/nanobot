@@ -253,7 +253,12 @@ class ReportAction:
 
 @dataclass(frozen=True, slots=True)
 class ReportBlock:
-    """One channel-neutral UI block."""
+    """One channel-neutral UI block.
+
+    Note blocks may request a closed disclosure with ``collapsed`` and opt in
+    to co-locating report context or warnings. Renderers must preserve the
+    content when their channel lacks an interactive disclosure component.
+    """
 
     kind: Literal[
         "markdown", "metrics", "grouped_metrics", "table", "note", "actions", "selector"
