@@ -31,6 +31,17 @@ def _allowed(
     return store.allowed(channel, user_id, "capability", capability_id)
 
 
+def _template_enabled(
+    store: ReportStateStore, template_id: str, *, policy_enforced: bool
+) -> bool:
+    """Hide administratively disabled templates when management policies are active."""
+
+    if not policy_enforced:
+        return True
+    policy = store.template_policy(template_id)
+    return policy is None or bool(policy["enabled"])
+
+
 def capability_catalog(
     registry: ReportPluginRegistry,
     store: ReportStateStore,
@@ -41,6 +52,7 @@ def capability_catalog(
     cost_enabled: bool = False,
     provider_quality_enabled: bool = False,
     brief_default: bool = False,
+    template_policy_enforced: bool = False,
 ) -> tuple[Capability, ...]:
     has_cube = registry.connector("magik_cube") is not None and store.allowed(
         channel, user_id, "connector", "magik_cube"
@@ -62,6 +74,7 @@ def capability_catalog(
         and health_template is not None
         and health_template in registry.compatible_templates("magik_cube")
         and store.allowed(channel, user_id, "template", "health_sre")
+        and _template_enabled(store, "health_sre", policy_enforced=template_policy_enforced)
     ):
         items.append(
             Capability(
@@ -82,6 +95,9 @@ def capability_catalog(
         and provider_quality_template is not None
         and provider_quality_template in registry.compatible_templates("cube_provider_quality")
         and store.allowed(channel, user_id, "template", "provider_quality")
+        and _template_enabled(
+            store, "provider_quality", policy_enforced=template_policy_enforced
+        )
     ):
         items.append(
             Capability(
@@ -98,6 +114,7 @@ def capability_catalog(
         and cost_template is not None
         and cost_template in registry.compatible_templates("magik_cube")
         and store.allowed(channel, user_id, "template", "cost_account")
+        and _template_enabled(store, "cost_account", policy_enforced=template_policy_enforced)
     ):
         items.append(
             Capability(
@@ -108,6 +125,25 @@ def capability_catalog(
             )
         )
     if has_cube and _allowed(store, channel, user_id, "generate"):
+        multi_template = registry.template("usage_customer_model_daily_brief")
+        if (
+            multi_template is not None
+            and multi_template in registry.compatible_templates("magik_cube")
+            and store.allowed(channel, user_id, "template", multi_template.manifest.template_id)
+            and _template_enabled(
+                store,
+                multi_template.manifest.template_id,
+                policy_enforced=template_policy_enforced,
+            )
+        ):
+            items.append(
+                Capability(
+                    "multi_scope_brief",
+                    "多客户多模型简报",
+                    "按客户分组查看模型同比和环比",
+                    ReportAction("multi_scope_brief", "多客户多模型简报", style="default"),
+                )
+            )
         matrix_actions = {
             "usage_daily_matrix": ("day", "日报", "昨天对比前天"),
             "usage_weekly_matrix": ("week", "周报", "上周对比上上周"),
@@ -126,6 +162,8 @@ def capability_catalog(
             action_info = period_actions.get(manifest.template_id)
             if action_info is None or not store.allowed(
                 channel, user_id, "template", manifest.template_id
+            ) or not _template_enabled(
+                store, manifest.template_id, policy_enforced=template_policy_enforced
             ):
                 continue
             period, title, description = action_info
@@ -142,13 +180,32 @@ def capability_catalog(
                 )
             )
         recent_template = "usage_custom_brief" if brief_default else "usage_weekly_matrix"
-        if store.allowed(channel, user_id, "template", recent_template):
+        if store.allowed(channel, user_id, "template", recent_template) and _template_enabled(
+            store, recent_template, policy_enforced=template_policy_enforced
+        ):
             items.append(
                 Capability(
                     "generate:recent7",
                     "区间对比",
                     "近 7 天对比前 7 天",
                     ReportAction("generate:recent7", "区间对比"),
+                )
+            )
+        machine_template = registry.template("machine_tpm_peak")
+        if (
+            machine_template is not None
+            and machine_template in registry.compatible_templates("magik_cube")
+            and store.allowed(channel, user_id, "template", "machine_tpm_peak")
+            and _template_enabled(
+                store, "machine_tpm_peak", policy_enforced=template_policy_enforced
+            )
+        ):
+            items.append(
+                Capability(
+                    "machine_tpm_report",
+                    "单机 TPM 峰值",
+                    "按模型、集群和卡型查看单机折算 TPM 峰值",
+                    ReportAction("machine_tpm_report", "单机 TPM 峰值"),
                 )
             )
     if _allowed(store, channel, user_id, "subscriptions"):
@@ -191,6 +248,7 @@ def home_document(
     provider_quality_enabled: bool = False,
     brief_default: bool = False,
     admin_skill_enabled: bool = False,
+    management_enabled: bool = False,
 ) -> ReportDocument:
     has_cube = registry.connector("magik_cube") is not None and store.allowed(
         channel, user_id, "connector", "magik_cube"
@@ -204,6 +262,7 @@ def home_document(
         cost_enabled=cost_enabled,
         provider_quality_enabled=provider_quality_enabled,
         brief_default=brief_default,
+        template_policy_enforced=management_enabled,
     )
     if capabilities and capabilities[0].capability_id == "request_access":
         intro = "当前账号尚未获得报表数据源权限，请联系管理员授权。"
@@ -216,6 +275,12 @@ def home_document(
         else ""
     )
     fallback_help = flexible_help.replace("**", "")
+    management_help = (
+        "\n\n**报表管理**\n管理员可在 WebUI 的 Report platform 管理报表启用状态、订阅和订阅权限。"
+        if management_enabled
+        else ""
+    )
+    fallback_management = management_help.replace("**", "")
     return ReportDocument(
         title="报表中心",
         subtitle="确定性报表 · 固定口径",
@@ -226,9 +291,10 @@ def home_document(
             + "\n可用功能："
             + "、".join(item.title for item in capabilities)
             + fallback_help
+            + fallback_management
         ),
         blocks=(
-            ReportBlock("markdown", {"content": intro + flexible_help}),
+            ReportBlock("markdown", {"content": intro + flexible_help + management_help}),
             ReportBlock(
                 "actions",
                 {
@@ -258,6 +324,8 @@ def examples_document(
     all_tenant_model_enabled: bool = False,
     provider_quality_enabled: bool = False,
     admin_skill_enabled: bool = False,
+    multi_scope_enabled: bool = False,
+    machine_tpm_enabled: bool = False,
 ) -> ReportDocument:
     examples = ["我要周报", "我要日报", "健康报告", "查看我的订阅", "查看最近报表"]
     if authorized:
@@ -273,6 +341,10 @@ def examples_document(
     if provider_quality_enabled:
         examples.insert(0, "供应商质量报告")
         examples.insert(1, "Kimi-K3 各供应商性能对比")
+    if multi_scope_enabled:
+        examples.insert(0, "多客户多模型日报简报")
+    if machine_tpm_enabled:
+        examples.insert(0, "Kimi-K3 单机 TPM 峰值")
     if authorized and admin_skill_enabled:
         examples.extend(
             [
@@ -323,35 +395,120 @@ def recent_document(rows: list[dict[str, Any]]) -> ReportDocument:
 
 def subscriptions_document(rows: list[Any]) -> ReportDocument:
     if not rows:
-        content = "暂无订阅。生成报表后，可在结果卡片底部创建日报、周报或月报订阅。"
-        actions: list[dict[str, Any]] = []
+        content = "暂无订阅。请在 WebUI 的 Report platform 中创建并管理订阅。"
+        blocks = [ReportBlock("markdown", {"content": content})]
     else:
-        content = "\n".join(
-            (
-                f"• **{report_template_label(row.template_id)}**｜"
-                f"{describe_subscription_schedule(row.schedule)}｜"
-                f"{row.timezone}｜{'启用' if row.enabled else '停用'}\n"
-                f"  数据周期：{report_data_period(row.template_id)}｜"
-                f"口径版本：{row.report_params.get('calculation_version', row.template_version)}"
+        enabled_count = sum(1 for row in rows if row.enabled)
+        blocks = [
+            ReportBlock(
+                "note",
+                {
+                    "content": (
+                        f"共 {len(rows)} 个订阅｜启用 {enabled_count}｜"
+                        f"停用 {len(rows) - enabled_count}"
+                    )
+                },
             )
-            for row in rows
-        )
-        actions = [
-            {
-                "action_id": f"subscription:{'disable' if row.enabled else 'enable'}:{row.subscription_id}",
-                "label": "停用" if row.enabled else "启用",
-                "style": "default",
-            }
-            for row in rows
         ]
-    blocks = [ReportBlock("markdown", {"content": content})]
-    if actions:
-        blocks.append(ReportBlock("actions", {"actions": actions}))
+        fallback_sections: list[str] = []
+        for index, row in enumerate(rows, start=1):
+            report_label = report_template_label(row.template_id)
+            schedule = describe_subscription_schedule(row.schedule)
+            data_period = report_data_period(row.template_id)
+            calculation_version = row.report_params.get(
+                "calculation_version", row.template_version
+            )
+            status = "启用" if row.enabled else "停用"
+            scope = _subscription_scope_text(row.report_params)
+            content = (
+                f"**订阅 {index} · {report_label}**｜{status}\n"
+                f"发送计划：{schedule}｜时区：{row.timezone}\n"
+                f"统计范围：{scope}\n"
+                f"数据周期：{data_period}｜口径版本：{calculation_version}"
+            )
+            fallback_sections.append(content)
+            operation = "disable" if row.enabled else "enable"
+            operation_label = "停用" if row.enabled else "启用"
+            blocks.extend(
+                (
+                    ReportBlock(
+                        "markdown",
+                        {
+                            "content": content,
+                            "variant": "subscription",
+                            "index": index,
+                            "title": report_label,
+                            "status": status,
+                            "schedule": schedule,
+                            "timezone": row.timezone,
+                            "scope": scope,
+                            "data_period": data_period,
+                            "calculation_version": str(calculation_version),
+                        },
+                    ),
+                    ReportBlock(
+                        "actions",
+                        {
+                            "actions": [
+                                {
+                                    "action_id": (
+                                        f"subscription:{operation}:{row.subscription_id}"
+                                    ),
+                                    "label": f"{operation_label}订阅 {index}",
+                                    "style": "default",
+                                    "command": f"{operation_label}订阅：{row.subscription_id}",
+                                }
+                            ]
+                        },
+                    ),
+                )
+            )
+        content = "\n\n".join(fallback_sections)
     return ReportDocument(
         title="我的订阅",
         fallback_text=content,
         blocks=tuple(blocks),
     )
+
+
+def _subscription_scope_text(params: dict[str, Any]) -> str:
+    """Describe only persisted, non-sensitive report scope fields."""
+
+    selections = params.get("report_selections")
+    selection = (
+        next((item for item in selections if isinstance(item, dict)), {})
+        if isinstance(selections, list)
+        else {}
+    )
+    all_tenants = params.get("all_tenants") is True
+    tenant = (
+        "全部客户"
+        if all_tenants
+        else str(
+            params.get("tenant_query")
+            or selection.get("tenant_query")
+            or "默认客户"
+        ).strip()
+    )
+    selected_values = params.get("models") or selection.get("models") or []
+    models = [str(item).strip() for item in selected_values if str(item).strip()]
+    legacy_model = str(params.get("model") or "").strip()
+    if not models and legacy_model:
+        models = [legacy_model]
+    model_scope = str(
+        params.get("model_scope")
+        or selection.get("model_scope")
+        or ("selected" if models else "summary")
+    )
+    if model_scope == "all":
+        model_text = "全部模型"
+    elif model_scope == "selected" and models:
+        model_text = "、".join(models[:3])
+        if len(models) > 3:
+            model_text += f" 等 {len(models)} 个模型"
+    else:
+        model_text = "汇总"
+    return f"{tenant}｜{model_text}"
 
 
 def subscription_created_document(row: Any) -> ReportDocument:

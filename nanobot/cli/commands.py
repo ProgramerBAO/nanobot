@@ -2553,6 +2553,12 @@ def report_plugins_list() -> None:
         cube_usage_brief_template_enabled=bool(
             getattr(config.tools.reporting, "cube_usage_brief_template", True)
         ),
+        cube_multi_scope_brief_enabled=bool(
+            getattr(config.tools.reporting, "cube_multi_scope_brief", False)
+        ),
+        cube_machine_tpm_template_enabled=bool(
+            getattr(config.tools.reporting, "cube_machine_tpm_report", False)
+        ),
         timezone=str(getattr(config.tools.reporting, "timezone", "Asia/Shanghai")),
         health_thresholds=getattr(config.tools.reporting, "health_thresholds", None),
     )

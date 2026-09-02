@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -911,12 +912,19 @@ async def test_cube_connector_resolves_alias_only_when_catalog_returns_its_tenan
         filters={"tenant": "佛跳墙", "models": ["Kimi-K3"]},
     )
     result = await CubeConnector(
-        _config(tenant_mappings={"错误别名": "does-not-exist"}),
+        _config(
+            tenant_mappings={
+                "佛跳墙": "tencent_token_hub",
+                "错误别名": "does-not-exist",
+            }
+        ),
         transport=httpx.MockTransport(handler),
     ).query(query)
 
     assert seen_tenants == ["tencent_token_hub"]
-    assert {row["tenant"] for row in result.rows} == {"tencent_token_hub"}
+    assert {row["tenant"] for row in result.rows} == {"佛跳墙"}
+    assert result.metadata["scope"]["tenant_id"] == "tencent_token_hub"
+    assert result.metadata["scope"]["tenant_name"] == "佛跳墙"
 
 
 @pytest.mark.asyncio
@@ -1056,14 +1064,149 @@ async def test_cube_connector_queries_selected_model_for_all_catalog_tenants() -
     result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
 
     assert set(queried_tenants) == {"tenant-a", "tenant-b"}
-    assert result.metadata["scope"] == {
-        "tenant_catalog": "all_tenants",
-        "all_tenants": True,
-        "tenant": "",
-        "tenant_count": 2,
-        "model_scope": "selected",
-        "models": ["Kimi-K3"],
+    scope = result.metadata["scope"]
+    assert scope["tenant_catalog"] == "all_tenants"
+    assert scope["all_tenants"] is True
+    assert scope["tenant_ids"] == ["tenant-a", "tenant-b"]
+    assert scope["tenant_names"] == ["A", "B"]
+    assert scope["tenant_statuses"] == {"A": "active", "B": "active"}
+    assert scope["model_scope"] == "selected"
+    assert scope["models"] == ["Kimi-K3"]
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_keeps_models_scoped_to_each_selected_tenant() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenants"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {"tenantId": "tenant-a", "tenantName": "A"},
+                            {"tenantId": "tenant-b", "tenantName": "B"},
+                        ]
+                    },
+                },
+            )
+        body = json.loads(request.content)
+        seen.append((body["tenantId"], body["model"]))
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "model": body["model"],
+                            "points": [{"date": body["startTime"][:10], "totalTokens": "10"}],
+                        }
+                    ]
+                },
+            },
+        )
+
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=("ai.usage.tokens",),
+        dimensions=("tenant", "model", "date"),
+        start_date=date(2026, 9, 1),
+        end_date=date(2026, 9, 1),
+        comparison_start=date(2026, 8, 31),
+        comparison_end=date(2026, 8, 31),
+        additional_comparisons=(
+            ReportQueryComparison(
+                key="previous_week_same_day",
+                start_date=date(2026, 8, 25),
+                end_date=date(2026, 8, 25),
+            ),
+        ),
+        filters={
+            "tenants": ["tenant-a", "tenant-b"],
+            "models": ["Kimi-K3", "GLM-5.2"],
+            "tenant_models": {
+                "tenant-a": ["Kimi-K3"],
+                "tenant-b": ["GLM-5.2"],
+            },
+            "multi_scope": True,
+        },
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    assert set(seen) == {("tenant-a", "Kimi-K3"), ("tenant-b", "GLM-5.2")}
+    assert len(seen) == 6
+    assert {(row["tenant_id"], row["model"]) for row in result.rows} == {
+        ("tenant-a", "Kimi-K3"),
+        ("tenant-b", "GLM-5.2"),
     }
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_maps_machine_tpm_and_uses_utc_hour_request() -> None:
+    request_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/analysis/machine-tpm-trend/query")
+        request_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "points": [
+                        {
+                            "timestamp": "2026-08-31T16:00:00Z",
+                            "tpmPerMachine": 553181.8672043011,
+                            "totalTokens": "1028918273",
+                            "gpuCount": 248,
+                            "machineCount": 31,
+                            "gpuProduct": "NVIDIA B30Z",
+                            "model": "Kimi-K3",
+                            "cluster": "beast02",
+                        }
+                    ]
+                },
+            },
+        )
+
+    shanghai = ZoneInfo("Asia/Shanghai")
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=(
+            "ai.machine.tpm_per_machine",
+            "ai.machine.total_tokens",
+            "ai.machine.count",
+            "ai.machine.gpu_count",
+        ),
+        dimensions=("model", "cluster", "gpu_product", "date", "hour"),
+        start_date=date(2026, 9, 1),
+        end_date=date(2026, 9, 1),
+        start_time=datetime(2026, 9, 1, 0, 0, tzinfo=shanghai),
+        end_time=datetime(2026, 9, 1, 23, 59, 59, 999000, tzinfo=shanghai),
+        filters={"models": ["Kimi-K3"], "cluster": ""},
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    assert request_body == {
+        "startTime": "2026-08-31T16:00:00Z",
+        "endTime": "2026-09-01T15:59:59.999Z",
+        "model": "Kimi-K3",
+        "cluster": "",
+        "timeLevel": "TIME_LEVEL_HOUR",
+    }
+    assert result.quality == "complete"
+    assert {row["metric"] for row in result.rows} == {
+        "ai.machine.tpm_per_machine",
+        "ai.machine.total_tokens",
+        "ai.machine.count",
+        "ai.machine.gpu_count",
+    }
+    assert {row["date"] for row in result.rows} == {"2026-09-01"}
 
 
 def test_extension_points_are_opt_in_at_registry_boundary() -> None:

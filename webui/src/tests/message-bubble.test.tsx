@@ -94,6 +94,40 @@ const SLASH_COMMANDS: SlashCommand[] = [
 ];
 
 describe("MessageBubble", () => {
+  it("keeps each subscription action next to its matching subscription", () => {
+    const onReportCommand = vi.fn();
+    const message: UIMessage = {
+      id: "subscriptions",
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      agentUi: {
+        kind: "report_document",
+        title: "我的订阅",
+        blocks: [
+          { kind: "note", data: { content: "共 2 个订阅｜启用 1｜停用 1" } },
+          { kind: "markdown", data: { variant: "subscription", index: 1, title: "日报简报", status: "启用", schedule: "每个工作日 10:00", timezone: "Asia/Shanghai", scope: "佛跳墙｜Kimi-K3", data_period: "前一自然日", calculation_version: "2.0" } },
+          { kind: "actions", data: { actions: [{ action_id: "subscription:disable:aaaaaaaaaaaaaaaa", label: "停用订阅 1", command: "停用订阅：aaaaaaaaaaaaaaaa" }] } },
+          { kind: "markdown", data: { variant: "subscription", index: 2, title: "周报简报", status: "停用", schedule: "每周一 09:00", timezone: "Asia/Shanghai", scope: "全部客户｜汇总", data_period: "上一完整周", calculation_version: "2.0" } },
+          { kind: "actions", data: { actions: [{ action_id: "subscription:enable:bbbbbbbbbbbbbbbb", label: "启用订阅 2", command: "启用订阅：bbbbbbbbbbbbbbbb" }] } },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={message} onReportCommand={onReportCommand} />);
+
+    const summaries = screen.getAllByTestId("subscription-summary");
+    const disable = screen.getByRole("button", { name: "停用订阅 1" });
+    const enable = screen.getByRole("button", { name: "启用订阅 2" });
+    expect(summaries[0].compareDocumentPosition(disable) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(disable.compareDocumentPosition(summaries[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(summaries[1].compareDocumentPosition(enable) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(disable);
+    fireEvent.click(enable);
+    expect(onReportCommand).toHaveBeenNthCalledWith(1, "停用订阅：aaaaaaaaaaaaaaaa");
+    expect(onReportCommand).toHaveBeenNthCalledWith(2, "启用订阅：bbbbbbbbbbbbbbbb");
+  });
+
   it("renders a brief without a standalone comparison section", () => {
     const onReportCommand = vi.fn();
     const message: UIMessage = {
@@ -132,6 +166,46 @@ describe("MessageBubble", () => {
     expect(onReportCommand).toHaveBeenCalledWith(
       "进一步分析（日报）：客户 tencent_token_hub，模型 Kimi-K3，日期 2026-08-31 至 2026-08-31",
     );
+  });
+
+  it("groups customer model changes and collapses only no-usage customers", () => {
+    const message: UIMessage = {
+      id: "multi-customer-brief",
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      agentUi: {
+        kind: "report_document",
+        document_id: "usage_customer_model_daily_brief",
+        title: "多客户多模型日报简报",
+        quality: "partial",
+        blocks: [
+          {
+            kind: "grouped_metrics",
+            data: {
+              collapse_no_usage: true,
+              groups: [
+                { label: "佛跳墙", items: [{ label: "Kimi-K3", status: "active", comparisons: [{ label: "同比", change: "↑18.1%" }, { label: "环比", change: "↓20.0%" }] }] },
+                { label: "豆汁", items: [{ label: "GLM-5.2", status: "no_usage", comparisons: [{ label: "同比", change: "暂无可比基准" }] }] },
+                { label: "阳春面", items: [{ label: "M3", status: "unavailable", comparisons: [{ label: "状态", change: "查询失败" }] }] },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText("佛跳墙")).toBeInTheDocument();
+    expect(screen.getByText("阳春面")).toBeInTheDocument();
+    expect(screen.getByText("查询失败")).toBeInTheDocument();
+    const collapsed = screen.getByText(/无用量客户 1 个/).closest("details");
+    expect(collapsed).not.toBeNull();
+    expect(collapsed).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText(/无用量客户 1 个/));
+    expect(screen.getByText("豆汁")).toBeInTheDocument();
+    expect(screen.queryByText(/时间桶/)).not.toBeInTheDocument();
   });
 
   it("renders named daily comparison windows and KPI baselines", () => {

@@ -23,7 +23,12 @@ from nanobot.reporting.contracts import (
     ReportSource,
     ReportWindow,
 )
-from nanobot.reporting.cube import CubeConnector, CubeCostAccountTemplate, CubeHealthTemplate
+from nanobot.reporting.cube import (
+    CubeConnector,
+    CubeCostAccountTemplate,
+    CubeHealthTemplate,
+    CubeMachineTpmTemplate,
+)
 from nanobot.reporting.cube_contract_gate import compare_metric_summaries
 from nanobot.reporting.grafana import GrafanaConnector
 from nanobot.reporting.provider_quality import CubeProviderQualityConnector, ProviderQualityTemplate
@@ -76,6 +81,286 @@ class MagikCubeConnector(ConnectorPlugin):
 
     async def query(self, query: ReportQuery) -> ReportDataset:
         raise RuntimeError("Magik Cube queries are executed through the compatibility Tool adapter")
+
+
+class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
+    """Compact daily brief grouped by catalog-backed tenant display name and model."""
+
+    manifest = TemplateManifest(
+        template_id="usage_customer_model_daily_brief",
+        display_name="多客户多模型日报简报",
+        version="1.0",
+        category="usage",
+        periods=frozenset({"day"}),
+        required_metrics=frozenset({"ai.usage.tokens"}),
+        required_dimensions=frozenset({"tenant", "model", "date"}),
+        connector_ids=frozenset({"magik_cube"}),
+        description="按客户别名分组展示模型 Token 用量的同比和环比",
+    )
+
+    def __init__(self, *, timezone: str = "Asia/Shanghai") -> None:
+        self.timezone = timezone
+
+    def plan(self, intent: ReportIntent) -> tuple[ReportQuery, ...]:
+        if intent.period != "day" or intent.start_date is None or intent.end_date is None:
+            raise ValueError("multi-customer model brief requires one concrete day")
+        if intent.start_date != intent.end_date:
+            raise ValueError("multi-customer model brief only supports a single day")
+        tenant_models = intent.filters.get("tenant_models")
+        has_tenant_models = isinstance(tenant_models, Mapping) and bool(tenant_models)
+        if not intent.models and not has_tenant_models:
+            raise ValueError("multi-customer model brief requires at least one model")
+        all_tenants = bool(intent.filters.get("all_tenants"))
+        tenants = list(intent.tenants)
+        if not all_tenants and not tenants:
+            raise ValueError("multi-customer model brief requires selected tenants or all tenants")
+        return (
+            ReportQuery(
+                connector_id=intent.connector_id,
+                metrics=("ai.usage.tokens",),
+                dimensions=("tenant", "model", "date"),
+                start_date=intent.start_date,
+                end_date=intent.end_date,
+                comparison_start=intent.start_date - timedelta(days=1),
+                comparison_end=intent.end_date - timedelta(days=1),
+                additional_comparisons=(
+                    ReportQueryComparison(
+                        key="previous_week_same_day",
+                        start_date=intent.start_date - timedelta(days=7),
+                        end_date=intent.end_date - timedelta(days=7),
+                    ),
+                ),
+                filters={
+                    "tenants": tenants,
+                    "tenant_scope": "all" if all_tenants else "selected",
+                    "all_tenants": all_tenants,
+                    "models": list(intent.models),
+                    "tenant_models": dict(intent.filters.get("tenant_models") or {}),
+                    "model_scope": str(intent.filters.get("model_scope") or "selected"),
+                    "multi_scope": True,
+                },
+            ),
+        )
+
+    def analyze(self, datasets: tuple[ReportDataset, ...]) -> ReportDocument:
+        if len(datasets) != 1:
+            raise ValueError("multi-customer model brief expects one dataset")
+        dataset = datasets[0]
+        rows = list(dataset.rows)
+        scope = dataset.metadata.get("scope") if isinstance(dataset.metadata, dict) else {}
+        scope = scope if isinstance(scope, Mapping) else {}
+        tenants = [str(item) for item in scope.get("tenant_names", ()) if str(item)]
+        models = [str(item) for item in scope.get("models", ()) if str(item)]
+        observed = sorted(
+            {
+                (str(row.get("tenant") or ""), str(row.get("model") or ""))
+                for row in rows
+                if row.get("tenant") and row.get("model")
+            },
+            key=lambda item: (item[0].casefold(), item[1].casefold()),
+        )
+        if not models:
+            models = sorted({item[1] for item in observed}, key=str.casefold)
+        tenant_models = scope.get("tenant_models")
+        combinations = []
+        if isinstance(tenant_models, Mapping):
+            combinations = [
+                (tenant, str(model))
+                for tenant, tenant_values in tenant_models.items()
+                for model in tenant_values
+                if str(model)
+            ]
+        if not combinations:
+            combinations = (
+                [(tenant, model) for tenant in tenants for model in models]
+                if tenants and models
+                else observed
+            )
+        groups: list[dict[str, Any]] = []
+        fallback_lines: list[str] = []
+        tenant_statuses = scope.get("tenant_statuses")
+        tenant_statuses = tenant_statuses if isinstance(tenant_statuses, Mapping) else {}
+        has_query_failure = any(
+            warning != "no_business_data" and not warning.endswith("no_data")
+            for warning in dataset.warnings
+        )
+        filter_unused_models = (
+            str(scope.get("model_scope") or "") == "all" and not has_query_failure
+        )
+        hidden_model_count = 0
+        for tenant in tenants or sorted({item[0] for item in observed}, key=str.casefold):
+            items: list[dict[str, Any]] = []
+            tenant_lines: list[str] = []
+            for pair_tenant, model in combinations:
+                if pair_tenant != tenant:
+                    continue
+                current = self._token_total(rows, pair_tenant, model, "current")
+                previous = self._token_total(rows, pair_tenant, model, "comparison")
+                weekly = self._token_total(
+                    rows, pair_tenant, model, "previous_week_same_day"
+                )
+                # Catalog-backed "all" scope can contain many configured but idle
+                # models. Hide only when all three named windows prove zero/empty;
+                # an upstream failure disables filtering so unavailable data is not
+                # misrepresented as no usage.
+                if filter_unused_models and all(
+                    value in {None, 0} for value in (current, previous, weekly)
+                ):
+                    hidden_model_count += 1
+                    continue
+                tenant_status = str(tenant_statuses.get(tenant) or "")
+                status = (
+                    "unavailable"
+                    if tenant_status == "unavailable"
+                    else "no_usage"
+                    if current in {None, 0}
+                    else "active"
+                )
+                comparisons = (
+                    [{"key": "status", "label": "状态", "change": "查询失败"}]
+                    if status == "unavailable"
+                    else [
+                        {
+                            "key": "previous_week_same_day",
+                            "label": "同比",
+                            "change": _format_metric_change(current, weekly),
+                        },
+                        {
+                            "key": "previous_period",
+                            "label": "环比",
+                            "change": _format_metric_change(current, previous),
+                        },
+                    ]
+                )
+                item = {
+                    "label": model,
+                    "metric": "ai.usage.tokens",
+                    "value": _format_compact(current),
+                    "status": status,
+                    "comparisons": comparisons,
+                }
+                items.append(item)
+                tenant_lines.append(
+                    f"- {model}  "
+                    + "  ".join(
+                        f"{comparison['label']} {comparison['change']}"
+                        for comparison in comparisons
+                    )
+                )
+            if items:
+                groups.append({"id": tenant, "label": tenant, "items": items})
+                fallback_lines.extend((tenant, *tenant_lines))
+        windows = dataset.metadata.get("query_windows") or ()
+        current_window = next(
+            (item for item in windows if item.get("period") == "current"), {}
+        )
+        comparison_windows = tuple(
+            ReportComparisonWindow(
+                key=(
+                    "previous_period"
+                    if item.get("period") == "comparison"
+                    else str(item.get("period"))
+                ),
+                label=(
+                    "同比" if item.get("period") == "previous_week_same_day" else "环比"
+                ),
+                window=ReportWindow(
+                    start=str(item.get("start") or ""),
+                    end=str(item.get("end") or ""),
+                ),
+            )
+            for item in windows
+            if item.get("period") in {"comparison", "previous_week_same_day"}
+        )
+        context = ReportContext(
+            timezone=self.timezone,
+            current_window=ReportWindow(
+                start=str(current_window.get("start") or ""),
+                end=str(current_window.get("end") or ""),
+                label="统计窗口",
+            ),
+            comparison_windows=comparison_windows,
+            sources=(
+                ReportSource(
+                    system="Cube Admin",
+                    route="analysis/active-tenant-daily-usage/query",
+                    fields=("totalTokens", "model", "tenantId", "date"),
+                ),
+            ),
+            metric_definitions=(
+                MetricDefinition(
+                    metric="ai.usage.tokens",
+                    label="Token 消耗",
+                    unit="tokens",
+                    aggregation="每个客户和模型在自然日内求和",
+                    source="Cube Admin / analysis/active-tenant-daily-usage/query",
+                ),
+            ),
+            calculation_version="1.0",
+            quality=dataset.quality,
+            quality_reasons=dataset.warnings,
+            freshness=str(dataset.metadata.get("last_sample_at") or ""),
+            template_version=self.manifest.version,
+        )
+        date_text = str(current_window.get("start") or "")[:10]
+        displayed_models = {
+            str(item.get("label") or "")
+            for group in groups
+            for item in group.get("items") or []
+            if str(item.get("label") or "")
+        }
+        subtitle = (
+            f"{date_text} · {self.timezone} · {len(groups)} 个客户 / "
+            f"{len(displayed_models)} 个模型"
+        )
+        hidden_note = (
+            f"已自动隐藏 {hidden_model_count} 个当前日、前一日和上周同期均无用量的模型。"
+            if hidden_model_count
+            else ""
+        )
+        blocks = (
+            ReportBlock("grouped_metrics", {"groups": groups, "collapse_no_usage": False}),
+            ReportBlock(
+                "note",
+                {
+                    "content": (
+                        "口径：每个客户、模型的 Token 按日求和；同比对比上周同日，环比对比前一日。"
+                        "只展示百分比变化，客户身份来自 Cube 实时目录。"
+                        f"{hidden_note}"
+                    )
+                },
+            ),
+        )
+        return ReportDocument(
+            title=self.manifest.display_name,
+            subtitle=subtitle,
+            document_id=self.manifest.template_id,
+            blocks=blocks,
+            fallback_text=(
+                f"{self.manifest.display_name}\n{subtitle}\n"
+                + "\n".join(fallback_lines)
+                + f"\n数据质量：{dataset.quality}"
+            ),
+            quality=dataset.quality,
+            warnings=dataset.warnings,
+            context=context,
+            version=2,
+        )
+
+    @staticmethod
+    def _token_total(
+        rows: list[dict[str, Any]], tenant: str, model: str, period: str
+    ) -> float | None:
+        values = [
+            float(row["value"])
+            for row in rows
+            if row.get("period") == period
+            and row.get("tenant") == tenant
+            and row.get("model") == model
+            and row.get("metric") == "ai.usage.tokens"
+            and isinstance(row.get("value"), (int, float))
+        ]
+        return sum(values) if values else None
 
 
 class UsageMatrixTemplate(TemplatePlugin):
@@ -194,20 +479,14 @@ class UsageMatrixTemplate(TemplatePlugin):
                     "aggregation": semantics["aggregation"],
                     "sample_count": current_stat["sample_count"],
                     "valid_sample_count": current_stat["valid_sample_count"],
+                    "sample_label": "有效日期" if metric == "ai.tpm.avg" else "有效样本",
                     "source": semantics["source"],
                 }
             )
         context = self._usage_context(dataset, metric_items)
         scope = dataset.metadata.get("scope")
         scope = scope if isinstance(scope, Mapping) else {}
-        selected_models = [str(item) for item in scope.get("models", ()) if str(item).strip()]
-        selected_model = selected_models[0] if len(selected_models) == 1 else ""
-        all_tenants = bool(scope.get("all_tenants"))
-        title = (
-            f"{selected_model} 全部客户{self._spec.display_name}"
-            if all_tenants and selected_model
-            else self._spec.display_name
-        )
+        title = _usage_report_title(self._spec.display_name, scope)
         warning_text = "；".join(_display_warning(item) for item in dataset.warnings[:5])
         quality_text = f"数据质量：{dataset.quality}"
         if warning_text:
@@ -245,7 +524,7 @@ class UsageMatrixTemplate(TemplatePlugin):
                             "tool_name": "report_center",
                             "params": self._further_analysis_params(dataset),
                             "command": self._further_analysis_command(dataset),
-                        }
+                        },
                     ]
                 },
             )
@@ -260,7 +539,7 @@ class UsageMatrixTemplate(TemplatePlugin):
         )
         return ReportDocument(
             title=title,
-            subtitle="Magik Cube · 简报",
+            subtitle="",
             document_id=self._spec.template_id,
             fallback_text=f"{title}\n{summary}\n{quality_text}\n{_brief_context_text(context)}",
             blocks=tuple(blocks),
@@ -269,6 +548,58 @@ class UsageMatrixTemplate(TemplatePlugin):
             context=context,
             version=2,
         )
+
+    def _period_label(self) -> str:
+        return {"day": "日报", "week": "周报", "month": "月报"}.get(
+            self._spec.period, "报表"
+        )
+
+    def _brief_subscription_params(self, dataset: ReportDataset) -> dict[str, Any]:
+        """Build safe scope-only parameters for the existing subscription form."""
+
+        scope = dataset.metadata.get("scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        tenant = str(scope.get("tenant_id") or scope.get("tenant") or "").strip()
+        models = [str(item).strip() for item in scope.get("models", ()) if str(item).strip()]
+        model_scope = str(scope.get("model_scope") or ("selected" if models else "summary"))
+        return {
+            "action": "subscription_setup",
+            "period": self._spec.period,
+            "report_family": "usage",
+            "report_params": {
+                "report_template": "brief",
+                "tenant_query": tenant,
+                "models": models,
+                "all_tenants": bool(scope.get("all_tenants")),
+                "model_scope": model_scope,
+                "breakdown": "model" if model_scope in {"all", "selected"} else "summary",
+                "report_selections": (
+                    [{"tenant_query": tenant, "model_scope": model_scope, "models": models}]
+                    if tenant
+                    else []
+                ),
+            },
+        }
+
+    def _brief_subscription_command(self, dataset: ReportDataset) -> str:
+        """Build a parser-compatible WebUI command without exposing raw credentials."""
+
+        scope = dataset.metadata.get("scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        tenant_id = str(scope.get("tenant_id") or scope.get("tenant") or "").strip()
+        tenant = str(scope.get("tenant_name") or tenant_id).strip()
+        tenant = tenant or ("全部客户" if scope.get("all_tenants") else "默认客户范围")
+        if tenant_id and tenant not in {"全部客户", "默认客户范围"}:
+            tenant = f"{tenant}（ID {tenant_id}）"
+        models = [str(item).strip() for item in scope.get("models", ()) if str(item).strip()]
+        model_scope = str(scope.get("model_scope") or ("selected" if models else "summary"))
+        if model_scope == "selected" and models:
+            model_text = "、".join(models)
+        elif model_scope == "all":
+            model_text = "全部模型"
+        else:
+            model_text = "汇总"
+        return f"订阅{self._period_label()}简报：客户 {tenant}，模型 {model_text}"
 
     def _brief_comparisons(
         self,
@@ -508,11 +839,14 @@ class UsageMatrixTemplate(TemplatePlugin):
         )
         if warning_text:
             content = f"{content}\n数据提示：{warning_text}"
+        scope = dataset.metadata.get("scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        title = _usage_report_title(self._spec.display_name, scope)
         return ReportDocument(
-            title=self._spec.display_name,
+            title=title,
             subtitle="Magik Cube · 固定口径",
             document_id=self._spec.template_id,
-            fallback_text=f"{self._spec.display_name}\n{content}",
+            fallback_text=f"{title}\n{content}",
             blocks=tuple(blocks),
             quality=dataset.quality,
             warnings=dataset.warnings,
@@ -569,6 +903,7 @@ class UsageMatrixTemplate(TemplatePlugin):
 
         table = _usage_table_v2(current)
         scope = dataset.metadata.get("scope")
+        scope = scope if isinstance(scope, Mapping) else {}
         all_tenants = bool(isinstance(scope, Mapping) and scope.get("all_tenants"))
         scoped_models = (
             tuple(str(item) for item in scope.get("models", ()) if str(item).strip())
@@ -651,8 +986,9 @@ class UsageMatrixTemplate(TemplatePlugin):
             f"{item['label']}：{item['value']}（{item['change']}）"
             for item in metric_items
         )
+        title = _usage_report_title(self._spec.display_name, scope)
         fallback_lines = [
-            self._spec.display_name,
+            title,
             summary,
             _usage_context_text(context),
             (
@@ -665,11 +1001,7 @@ class UsageMatrixTemplate(TemplatePlugin):
         if dataset.warnings:
             fallback_lines.append("数据提示：" + warning_text)
         return ReportDocument(
-            title=(
-                f"{selected_model} 全部客户{self._spec.display_name}"
-                if all_tenants and selected_model
-                else self._spec.display_name
-            ),
+            title=title,
             subtitle=(
                 "Magik Cube · 前一日 / 上周同期对比"
                 if self._spec.period == "day"
@@ -878,6 +1210,21 @@ def _metric_label(metric: str) -> str:
     }.get(metric, metric)
 
 
+def _usage_report_title(display_name: str, scope: Mapping[str, Any] | None) -> str:
+    """Build a stable user-facing title from validated report scope metadata."""
+
+    scope = scope if isinstance(scope, Mapping) else {}
+    tenant = str(scope.get("tenant_name") or scope.get("tenant") or "").strip()
+    if not tenant:
+        tenant = "全部客户" if scope.get("all_tenants") else ""
+    models = [str(item).strip() for item in scope.get("models", ()) if str(item).strip()]
+    model_scope = str(scope.get("model_scope") or "")
+    model = f"{models[0]}模型" if model_scope != "all" and len(models) == 1 else "全部模型"
+    if not tenant:
+        return f"Cube {display_name}"
+    return f"{tenant} {model}{display_name}"
+
+
 def _display_warning(warning: str) -> str:
     code = report_failure_code_from_warning(warning)
     return report_failure_message(code) if code else warning
@@ -903,6 +1250,19 @@ def _format_metric_change(
     if change < 0:
         return f"↓{abs(change):.1f}%"
     return "0.0%"
+
+
+def _format_compact(value: int | float | None) -> str:
+    """Format model totals compactly without manufacturing zero for missing rows."""
+
+    if value is None:
+        return "暂无数据"
+    absolute = abs(float(value))
+    if absolute >= 100_000_000:
+        return f"{float(value) / 100_000_000:.2f}亿"
+    if absolute >= 10_000:
+        return f"{float(value) / 10_000:.2f}万"
+    return f"{float(value):,.0f}"
 
 
 def _usage_table(rows: list[dict[str, Any]]) -> list[list[Any]]:
@@ -1232,6 +1592,8 @@ def build_default_registry(
     cube_ttft_detail_enabled: bool = False,
     cube_usage_semantics_v2: bool = False,
     cube_usage_brief_template_enabled: bool = True,
+    cube_multi_scope_brief_enabled: bool = False,
+    cube_machine_tpm_template_enabled: bool = False,
     cube_cost_template_enabled: bool = False,
     cube_provider_quality_connector_enabled: bool = False,
     cube_provider_quality_template_enabled: bool = False,
@@ -1278,6 +1640,14 @@ def build_default_registry(
                     presentation="brief" if is_brief else "matrix",
                 )
             )
+    if cube_multi_scope_brief_enabled and isinstance(
+        registry.connector("magik_cube"), CubeConnector
+    ):
+        registry.register_template(MultiCustomerModelDailyBriefTemplate(timezone=timezone))
+    if cube_machine_tpm_template_enabled and isinstance(
+        registry.connector("magik_cube"), CubeConnector
+    ):
+        registry.register_template(CubeMachineTpmTemplate(timezone_name=timezone))
     if cube_health_active:
         registry.register_template(
             CubeHealthTemplate(

@@ -14,8 +14,8 @@ from nanobot.reporting import (
     build_default_registry,
     create_report_state_store,
 )
-from nanobot.reporting.authorization import authorize_magik_params
-from nanobot.reporting.builtins import UsageMatrixTemplate
+from nanobot.reporting.authorization import authorize_magik_params, template_id_for_magik_params
+from nanobot.reporting.builtins import MultiCustomerModelDailyBriefTemplate, UsageMatrixTemplate
 from nanobot.reporting.capabilities import capability_catalog
 from nanobot.reporting.contracts import ReportContext, ReportSource, ReportWindow
 from nanobot.reporting.registry import (
@@ -105,7 +105,7 @@ def test_daily_brief_keeps_named_baselines_but_omits_detail_sections() -> None:
             "change": "↑62.0%",
         },
     ]
-    assert document.title == "Kimi-K3 全部客户日报简报"
+    assert document.title == "全部客户 Kimi-K3模型日报简报"
     assert document.context is not None
     assert [item.key for item in document.context.comparison_windows] == [
         "previous_period",
@@ -120,6 +120,188 @@ def test_daily_brief_keeps_named_baselines_but_omits_detail_sections() -> None:
         "进一步分析（日报）：客户 全部客户，模型 Kimi-K3，"
         "日期 2026-08-31 至 2026-08-31"
     )
+    actions = next(block for block in document.blocks if block.kind == "actions").data["actions"]
+    assert len(actions) == 1
+    assert all(not action["action_id"].startswith("usage_subscription_setup:") for action in actions)
+
+
+def test_daily_brief_uses_display_alias_without_result_subscription_action() -> None:
+    spec = next(
+        item for item in load_builtin_template_specs() if item.template_id == "usage_daily_brief"
+    )
+    document = UsageMatrixTemplate(spec, semantics_v2=True, presentation="brief").analyze(
+        (
+            ReportDataset(
+                rows=(
+                    {
+                        "period": "current",
+                        "date": "2026-08-31",
+                        "tenant": "tenant-baowjhsicyf65",
+                        "model": "Kimi-K3",
+                        "metric": "ai.usage.tokens",
+                        "value": 100,
+                    },
+                ),
+                metadata={
+                    "scope": {
+                        "tenant": "佛跳墙",
+                        "tenant_id": "tenant-baowjhsicyf65",
+                        "tenant_name": "佛跳墙",
+                        "model_scope": "selected",
+                        "models": ["Kimi-K3"],
+                    }
+                },
+            ),
+        )
+    )
+
+    assert document.title == "佛跳墙 Kimi-K3模型日报简报"
+    actions = next(block for block in document.blocks if block.kind == "actions").data["actions"]
+    assert len(actions) == 1
+    assert actions[0]["action_id"] == "usage_further_analysis"
+
+
+def test_multi_customer_model_brief_groups_aliases_and_named_changes() -> None:
+    document = MultiCustomerModelDailyBriefTemplate().analyze(
+        (
+            ReportDataset(
+                rows=(
+                    {"period": "current", "tenant": "佛跳墙", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 80},
+                    {"period": "comparison", "tenant": "佛跳墙", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 100},
+                    {"period": "previous_week_same_day", "tenant": "佛跳墙", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 64},
+                    {"period": "current", "tenant": "豆汁", "model": "GLM-5.2", "metric": "ai.usage.tokens", "value": 167},
+                    {"period": "comparison", "tenant": "豆汁", "model": "GLM-5.2", "metric": "ai.usage.tokens", "value": 100},
+                    {"period": "previous_week_same_day", "tenant": "豆汁", "model": "GLM-5.2", "metric": "ai.usage.tokens", "value": 100},
+                ),
+                metadata={
+                    "query_windows": [
+                        {"period": "current", "start": "2026-09-01 00:00", "end": "2026-09-02 00:00"},
+                        {"period": "comparison", "start": "2026-08-31 00:00", "end": "2026-09-01 00:00"},
+                        {"period": "previous_week_same_day", "start": "2026-08-25 00:00", "end": "2026-08-26 00:00"},
+                    ],
+                    "scope": {
+                        "tenant_names": ["佛跳墙", "豆汁"],
+                        "models": ["Kimi-K3", "GLM-5.2", "DeepSeek-R1"],
+                        "model_scope": "all",
+                        "tenant_models": {
+                            "佛跳墙": ["Kimi-K3", "DeepSeek-R1"],
+                            "豆汁": ["GLM-5.2"],
+                        },
+                        "tenant_statuses": {"佛跳墙": "active", "豆汁": "active"},
+                    },
+                },
+            ),
+        )
+    )
+
+    grouped = next(block for block in document.blocks if block.kind == "grouped_metrics")
+    assert [group["label"] for group in grouped.data["groups"]] == ["佛跳墙", "豆汁"]
+    assert grouped.data["groups"][0]["items"][0]["comparisons"] == [
+        {"key": "previous_week_same_day", "label": "同比", "change": "↑25.0%"},
+        {"key": "previous_period", "label": "环比", "change": "↓20.0%"},
+    ]
+    markdown = document_to_markdown(document)
+    assert "## 佛跳墙" in markdown
+    assert "同比：↑25.0%" in markdown
+    assert "DeepSeek-R1" not in markdown
+    assert "2 个模型" in document.subtitle
+    assert "已自动隐藏 1 个" in markdown
+    assert "时间桶" not in markdown
+    assert "订阅" not in markdown
+
+
+def test_multi_customer_model_brief_keeps_explicit_or_historical_models() -> None:
+    """Explicit selections and historical activity must not disappear as idle models."""
+
+    template = MultiCustomerModelDailyBriefTemplate()
+    base_metadata = {
+        "query_windows": [
+            {"period": "current", "start": "2026-09-01 00:00", "end": "2026-09-02 00:00"},
+        ],
+        "scope": {
+            "tenant_names": ["佛跳墙"],
+            "models": ["DeepSeek-R1"],
+            "tenant_models": {"佛跳墙": ["DeepSeek-R1"]},
+            "tenant_statuses": {"佛跳墙": "active"},
+        },
+    }
+    selected = template.analyze(
+        (ReportDataset(rows=(), metadata=base_metadata, warnings=("no_business_data",)),)
+    )
+    selected_group = next(
+        block for block in selected.blocks if block.kind == "grouped_metrics"
+    )
+    assert selected_group.data["groups"][0]["items"][0]["label"] == "DeepSeek-R1"
+
+    all_scope_metadata = {
+        **base_metadata,
+        "scope": {**base_metadata["scope"], "model_scope": "all"},
+    }
+    historical = template.analyze(
+        (
+            ReportDataset(
+                rows=(
+                    {
+                        "period": "comparison",
+                        "tenant": "佛跳墙",
+                        "model": "DeepSeek-R1",
+                        "metric": "ai.usage.tokens",
+                        "value": 100,
+                    },
+                ),
+                metadata=all_scope_metadata,
+            ),
+        )
+    )
+    historical_group = next(
+        block for block in historical.blocks if block.kind == "grouped_metrics"
+    )
+    assert historical_group.data["groups"][0]["items"][0]["label"] == "DeepSeek-R1"
+
+    failed_metadata = {
+        **all_scope_metadata,
+        "scope": {
+            **all_scope_metadata["scope"],
+            "tenant_statuses": {"佛跳墙": "unavailable"},
+        },
+    }
+    failed = template.analyze(
+        (
+            ReportDataset(
+                rows=(),
+                quality="missing",
+                warnings=("connection_failed:佛跳墙 usage query failed",),
+                metadata=failed_metadata,
+            ),
+        )
+    )
+    failed_group = next(block for block in failed.blocks if block.kind == "grouped_metrics")
+    assert failed_group.data["groups"][0]["items"][0]["status"] == "unavailable"
+
+
+def test_template_policy_uses_revision_and_subscription_grant(tmp_path) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    created = store.set_template_policy(
+        "machine_tpm_peak",
+        enabled=True,
+        subscription_mode="allowlist",
+        updated_by="test-admin",
+        expected_revision=0,
+    )
+
+    assert created["revision"] == 1
+    assert store.template_policy("machine_tpm_peak")["subscription_mode"] == "allowlist"
+    with pytest.raises(ValueError, match="another operator"):
+        store.set_template_policy(
+            "machine_tpm_peak",
+            enabled=False,
+            subscription_mode="disabled",
+            updated_by="stale-admin",
+            expected_revision=0,
+        )
+    store.set_rbac_enabled(True)
+    store.grant("feishu", "ou-a", "subscription_template", "machine_tpm_peak")
+    assert store.allowed("feishu", "ou-a", "subscription_template", "machine_tpm_peak")
 
 
 def test_declarative_template_rejects_executable_fields() -> None:
@@ -137,6 +319,16 @@ def test_declarative_template_rejects_executable_fields() -> None:
                 "python_hook": "os.system('whoami')",
             }
         )
+
+
+def test_brief_subscription_authorization_uses_period_template() -> None:
+    assert template_id_for_magik_params(
+        {
+            "report_template": "brief",
+            "subscription_period": "week",
+            "tenant_query": "tenant-a",
+        }
+    ) == "usage_weekly_brief"
 
 
 def test_report_store_onboarding_rbac_runs_and_subscriptions(tmp_path) -> None:

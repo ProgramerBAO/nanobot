@@ -9,6 +9,7 @@ from typing import Any, Literal
 DataQuality = Literal["complete", "partial", "missing"]
 ReportPeriod = Literal["day", "week", "month", "recent7", "recent15m", "range"]
 ModelScope = Literal["summary", "all", "selected"]
+TenantScope = Literal["key_accounts", "all", "selected"]
 BaselinePolicy = Literal["previous_equal_window"]
 
 # Canonical names are the only metric/dimension vocabulary exposed to templates.
@@ -43,6 +44,10 @@ CANONICAL_METRICS = frozenset(
         "ai.provider.test_score",
         "ai.provider.input_price",
         "ai.provider.output_price",
+        "ai.machine.tpm_per_machine",
+        "ai.machine.total_tokens",
+        "ai.machine.count",
+        "ai.machine.gpu_count",
     }
 )
 
@@ -56,6 +61,7 @@ CANONICAL_DIMENSIONS = frozenset(
         "cluster",
         "date",
         "hour",
+        "gpu_product",
     }
 )
 
@@ -116,6 +122,8 @@ class ReportIntent:
     template_id: str
     period: ReportPeriod
     tenant: str = ""
+    tenant_scope: TenantScope | None = None
+    tenants: tuple[str, ...] = ()
     project: str = ""
     endpoint: str = ""
     environment: str = ""
@@ -247,7 +255,9 @@ class ReportAction:
 class ReportBlock:
     """One channel-neutral UI block."""
 
-    kind: Literal["markdown", "metrics", "table", "note", "actions", "selector"]
+    kind: Literal[
+        "markdown", "metrics", "grouped_metrics", "table", "note", "actions", "selector"
+    ]
     data: dict[str, Any]
 
 
@@ -304,11 +314,16 @@ def validate_report_intent(intent: ReportIntent) -> None:
     all_tenants = intent.filters.get("all_tenants", False)
     if not isinstance(all_tenants, bool):
         raise ValueError("report Intent all_tenants must be boolean")
+    requested_tenants = tuple(str(item).strip() for item in intent.tenants if str(item).strip())
+    if len(requested_tenants) > 20:
+        raise ValueError("report Intent supports at most 20 selected tenants")
+    if intent.tenant and requested_tenants:
+        raise ValueError("report Intent cannot combine tenant and tenants")
     if all_tenants:
-        if intent.tenant or str(intent.filters.get("tenant") or "").strip():
+        if intent.tenant or requested_tenants or str(intent.filters.get("tenant") or "").strip():
             raise ValueError("all_tenants report cannot select an individual tenant")
-        if len(intent.models) != 1:
-            raise ValueError("all_tenants report requires exactly one selected model")
+    if len(intent.models) > 20:
+        raise ValueError("report Intent supports at most 20 selected models")
     times = (intent.start_time, intent.end_time)
     if any(value is not None for value in times):
         if not all(value is not None for value in times):

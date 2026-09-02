@@ -7,6 +7,7 @@ import {
   Clock3,
   Database,
   Filter,
+  PauseCircle,
   Play,
   Search,
   XCircle,
@@ -36,6 +37,78 @@ function stringValue(value: unknown, fallback = ""): string {
 
 function blockData(block: unknown): RecordValue {
   return recordValue(recordValue(block).data);
+}
+
+function ReportActions({
+  data,
+  onCommand,
+}: {
+  data: RecordValue;
+  onCommand?: (command: string) => void;
+}) {
+  const actions = (data.actions as unknown[] ?? []).map(recordValue);
+  if (!actions.length) return null;
+  return (
+    <div className="flex flex-wrap gap-2 border-b border-border/70 bg-muted/15 px-4 py-3 sm:px-5">
+      {actions.map((action, index) => {
+        const id = stringValue(action.action_id);
+        const command = stringValue(action.command);
+        const isDisable = id.includes(":disable:");
+        const ActionIcon = isDisable ? PauseCircle : Play;
+        return (
+          <button
+            key={`${id}-${index}`}
+            type="button"
+            onClick={() => {
+              if (command) onCommand?.(command);
+              else if (id === "provider_quality_report") onCommand?.("供应商质量报告");
+              else if (id === "provider_quality_show_empty") onCommand?.("查看近15分钟供应商无用量");
+            }}
+            className={cn(
+              "inline-flex h-9 items-center gap-2 border px-3 text-sm font-medium transition-colors",
+              isDisable
+                ? "border-amber-600/40 text-amber-800 hover:bg-amber-500/10 dark:text-amber-200"
+                : "border-border text-foreground hover:bg-muted/60",
+            )}
+          >
+            <ActionIcon className="h-4 w-4" aria-hidden />
+            {stringValue(action.label, "打开")}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SubscriptionSummary({ data }: { data: RecordValue }) {
+  const enabled = stringValue(data.status) === "启用";
+  return (
+    <section
+      className="border-b border-border/70 px-4 py-4 sm:px-5"
+      data-testid="subscription-summary"
+    >
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <h3 className="min-w-0 break-words text-sm font-semibold text-foreground">
+          订阅 {stringValue(data.index)} · {stringValue(data.title, "固定报表")}
+        </h3>
+        <span
+          className={cn(
+            "shrink-0 border px-2 py-1 text-xs font-medium",
+            enabled
+              ? "border-emerald-600/30 bg-emerald-500/8 text-emerald-800 dark:text-emerald-200"
+              : "border-border bg-muted/40 text-muted-foreground",
+          )}
+        >
+          {enabled ? "启用" : "停用"}
+        </span>
+      </div>
+      <div className="mt-3 grid gap-2 text-xs leading-5 text-muted-foreground sm:grid-cols-2">
+        <div className="flex min-w-0 gap-2"><Clock3 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{stringValue(data.schedule)} · {stringValue(data.timezone)}</span></div>
+        <div className="flex min-w-0 gap-2"><Filter className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{stringValue(data.scope)}</span></div>
+        <div className="flex min-w-0 gap-2 sm:col-span-2"><Database className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{stringValue(data.data_period)} · 口径 {stringValue(data.calculation_version)}</span></div>
+      </div>
+    </section>
+  );
 }
 
 function qualityLabel(value: unknown): string {
@@ -162,6 +235,48 @@ function ReportMetrics({ data }: { data: RecordValue }) {
           );
         })}
       </div>
+    </section>
+  );
+}
+
+function GroupedMetrics({ data }: { data: RecordValue }) {
+  const groups = (data.groups as unknown[] ?? []).map(recordValue);
+  const visible = groups.filter((group) => {
+    const items = (group.items as unknown[] ?? []).map(recordValue);
+    return !data.collapse_no_usage || items.some((item) => stringValue(item.status) !== "no_usage");
+  });
+  const hidden = groups.filter((group) => !visible.includes(group));
+  const renderGroup = (group: RecordValue) => (
+    <div key={stringValue(group.id, stringValue(group.label))} className="border-b border-border/60 px-4 py-4 last:border-b-0 sm:px-5">
+      <h3 className="break-words text-sm font-semibold text-foreground">{stringValue(group.label, "未命名客户")}</h3>
+      <div className="mt-2 divide-y divide-border/50">
+        {(group.items as unknown[] ?? []).map(recordValue).map((item, index) => (
+          <div key={`${stringValue(item.label)}-${index}`} className="grid gap-1 py-2 text-sm sm:grid-cols-[minmax(10rem,1fr)_auto_auto] sm:items-center sm:gap-4">
+            <span className="min-w-0 break-words font-medium">{stringValue(item.label, "未命名模型")}</span>
+            {(item.comparisons as unknown[] ?? []).map(recordValue).map((comparison, comparisonIndex) => (
+              <span key={`${stringValue(comparison.key)}-${comparisonIndex}`} className="whitespace-nowrap text-xs text-muted-foreground">
+                {stringValue(comparison.label, "对比")} {stringValue(comparison.change, "暂无可比基准")}
+              </span>
+            ))}
+            {stringValue(item.status) === "no_usage" ? <span className="text-xs text-muted-foreground">暂无用量</span> : null}
+            {stringValue(item.status) === "unavailable" ? <span className="text-xs text-destructive">查询失败</span> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+  return (
+    <section className="border-b border-border/70" aria-label="客户模型变化">
+      {visible.map(renderGroup)}
+      {hidden.length ? (
+        <details className="group px-4 py-3 sm:px-5">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-muted-foreground">
+            <span>无用量客户 {hidden.length} 个，点击查看</span>
+            <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />
+          </summary>
+          <div className="mt-2 border border-border/60">{hidden.map(renderGroup)}</div>
+        </details>
+      ) : null}
     </section>
   );
 }
@@ -317,7 +432,6 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
   }
   const briefNote = briefReadingNote(document);
   if (briefNote) notes.push(briefNote);
-  const actions = (document.blocks ?? []).flatMap((block) => block.kind === "actions" ? (blockData(block).actions as unknown[] ?? []).map(recordValue) : []);
   const isSelector = document.document_id === "provider_quality_selector";
   return (
     <article className="w-full max-w-[min(100%,64rem)] overflow-hidden border border-border/80 bg-card shadow-sm" data-testid="report-document">
@@ -333,13 +447,14 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
         const data = blockData(block);
         if (block.kind === "selector") return <ProviderSelector key={index} data={data} onAction={onAction} />;
         if (block.kind === "metrics") return <ReportMetrics key={index} data={data} />;
+        if (block.kind === "grouped_metrics") return <GroupedMetrics key={index} data={data} />;
         if (block.kind === "table") return <ReportTable key={index} data={data} />;
-        if (block.kind === "markdown") return <section key={index} className="border-b border-border/70 px-4 py-4 text-sm leading-6 text-foreground/85">{stringValue(data.content)}</section>;
+        if (block.kind === "markdown" && stringValue(data.variant) === "subscription") return <SubscriptionSummary key={index} data={data} />;
+        if (block.kind === "markdown") return <section key={index} className="whitespace-pre-wrap border-b border-border/70 px-4 py-4 text-sm leading-6 text-foreground/85">{stringValue(data.content)}</section>;
         if (block.kind === "note") return <section key={index} className={cn("border-b border-border/70 px-4 py-3 text-xs leading-5 whitespace-pre-wrap", stringValue(data.severity) === "warning" ? "bg-amber-500/8 text-amber-800 dark:text-amber-200" : "text-muted-foreground")}><div className="flex gap-2"><CircleHelp className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><div className="min-w-0 break-words">{stringValue(data.content)}</div></div></section>;
-        if (block.kind === "actions") return null;
+        if (block.kind === "actions") return <ReportActions key={index} data={data} onCommand={onCommand} />;
         return null;
       })}
-      {actions.length ? <div className="flex flex-wrap gap-2 border-b border-border/70 px-4 py-3">{actions.map((action, index) => { const id = stringValue(action.action_id); return <button key={`${id}-${index}`} type="button" onClick={() => { const command = stringValue(action.command); if (command) onCommand?.(command); else if (id === "provider_quality_report") onCommand?.("供应商质量报告"); else if (id === "provider_quality_show_empty") onCommand?.("查看近15分钟供应商无用量"); }} className="inline-flex items-center gap-2 border border-border px-3 py-2 text-sm transition-colors hover:bg-muted/50"><ChevronDown className="h-4 w-4 rotate-[-90deg]" aria-hidden />{stringValue(action.label, "打开")}</button>; })}</div> : null}
       {document.warnings?.length ? <div className="border-b border-border/70 bg-amber-500/8 px-4 py-3 text-xs leading-5 text-amber-800 dark:text-amber-200"><div className="flex gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{document.warnings.join("；")}</span></div></div> : null}
       {!isSelector ? <details className="group px-4 py-3"><summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium text-muted-foreground"><ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />报表说明与读法</summary><div className="mt-3 space-y-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{notes.length ? notes.join("\n") : "错误率、延迟和 TTFT 越低越好；RPM/TPM 表示流量，不单独代表故障。"}</div></details> : null}
     </article>

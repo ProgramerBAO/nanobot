@@ -21,7 +21,12 @@ from nanobot.reporting.contracts import (
     validate_report_intent,
     validate_report_query,
 )
-from nanobot.reporting.cube import CubeConnector, CubeCostAccountTemplate, CubeHealthTemplate
+from nanobot.reporting.cube import (
+    CubeConnector,
+    CubeCostAccountTemplate,
+    CubeHealthTemplate,
+    CubeMachineTpmTemplate,
+)
 from nanobot.reporting.cube_contract_gate import (
     CubeContractGate,
     CubeContractGateResult,
@@ -72,6 +77,7 @@ __all__ = [
     "CubeConnector",
     "CubeCostAccountTemplate",
     "CubeHealthTemplate",
+    "CubeMachineTpmTemplate",
     "CubeProviderQualityConnector",
     "ProviderQualityTemplate",
     "CubeContractGate",

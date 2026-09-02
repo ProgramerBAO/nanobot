@@ -57,17 +57,31 @@ _CUBE_HEALTH_METRICS = frozenset(
     }
 )
 _CUBE_ACCOUNT_METRICS = frozenset({"ai.cost", "ai.balance", "ai.unbilled_amount"})
+_CUBE_MACHINE_METRICS = frozenset(
+    {
+        "ai.machine.tpm_per_machine",
+        "ai.machine.total_tokens",
+        "ai.machine.count",
+        "ai.machine.gpu_count",
+    }
+)
 _CUBE_METRICS = (
     frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm.avg"})
     | _CUBE_HEALTH_METRICS
     | _CUBE_ACCOUNT_METRICS
+    | _CUBE_MACHINE_METRICS
 )
 _CUBE_DIMENSIONS = frozenset(
-    {"tenant", "project", "model", "endpoint", "provider", "date", "hour"}
+    {
+        "tenant", "project", "model", "endpoint", "provider", "cluster",
+        "date", "hour", "gpu_product",
+    }
 )
 _ALLOWED_FILTERS = frozenset(
     {
         "tenant",
+        "tenants",
+        "tenant_scope",
         "model",
         "models",
         "model_scope",
@@ -75,6 +89,9 @@ _ALLOWED_FILTERS = frozenset(
         "provider",
         "project",
         "all_tenants",
+        "multi_scope",
+        "tenant_models",
+        "cluster",
     }
 )
 
@@ -165,9 +182,10 @@ class CubeConnector(ConnectorPlugin):
         if all_tenants:
             if str(query.filters.get("tenant") or "").strip():
                 raise ValueError("Cube all_tenants query cannot select an individual tenant")
-            if len(selected_models) != 1:
+            if len(selected_models) != 1 and not query.filters.get("multi_scope"):
                 raise ValueError("Cube all_tenants query requires exactly one selected model")
         account_metrics = set(query.metrics).intersection(_CUBE_ACCOUNT_METRICS)
+        machine_metrics = set(query.metrics).intersection(_CUBE_MACHINE_METRICS)
         if str(query.filters.get("project") or "").strip() and not account_metrics:
             raise ValueError(
                 "Cube usage contract does not support project filtering yet; use tenant/model/endpoint/provider"
@@ -181,6 +199,10 @@ class CubeConnector(ConnectorPlugin):
             return await self._query_health(query)
         if account_metrics:
             return await self._query_account(query)
+        if machine_metrics:
+            if machine_metrics != set(query.metrics):
+                raise ValueError("Cube machine TPM metrics require a separate query plan")
+            return await self._query_machine_tpm(query)
 
         warnings: list[str] = []
         rows: list[dict[str, Any]] = []
@@ -209,6 +231,16 @@ class CubeConnector(ConnectorPlugin):
             )
         async with MagikCubeClient(self._config, transport=self._transport) as client:
             tenants = await self._resolve_tenants(client, query.filters)
+            if len(tenants) > 20:
+                raise ValueError("Cube multi-customer report supports at most 20 tenants")
+            tenant_models = query.filters.get("tenant_models")
+            requested_pair_count = (
+                sum(max(1, len(values)) for values in tenant_models.values())
+                if isinstance(tenant_models, dict)
+                else len(tenants) * max(1, len(selected_models))
+            )
+            if requested_pair_count > 200:
+                raise ValueError("Cube multi-customer report supports at most 200 tenant/model pairs")
             windows = [("current", query.start_date, query.end_date)]
             if query.comparison_start is not None and query.comparison_end is not None:
                 windows.append(("comparison", query.comparison_start, query.comparison_end))
@@ -229,9 +261,30 @@ class CubeConnector(ConnectorPlugin):
                     for tenant in tenants
                 )
             )
-            for tenant_rows, tenant_warnings in results:
+            tenant_statuses: dict[str, str] = {}
+            for tenant, (tenant_rows, tenant_warnings) in zip(tenants, results, strict=True):
                 rows.extend(tenant_rows)
                 warnings.extend(tenant_warnings)
+                label = self._tenant_display_name(tenant)
+                only_empty = bool(tenant_warnings) and all(
+                    warning.endswith("no_data") for warning in tenant_warnings
+                )
+                tenant_statuses[label] = (
+                    "partial"
+                    if tenant_rows and tenant_warnings
+                    else "active"
+                    if tenant_rows
+                    else "no_usage"
+                    if only_empty or not tenant_warnings
+                    else "unavailable"
+                )
+            observed_pairs = {
+                (str(row.get("tenant_id") or ""), str(row.get("model") or ""))
+                for row in rows
+                if row.get("tenant_id") and row.get("model")
+            }
+            if len(observed_pairs) > 200:
+                raise ValueError("Cube multi-customer report returned more than 200 tenant/model pairs")
 
         unique_warnings = tuple(dict.fromkeys(warnings))
         if unique_warnings and rows:
@@ -288,13 +341,190 @@ class CubeConnector(ConnectorPlugin):
                     ),
                     "all_tenants": all_tenants,
                     "tenant": str(query.filters.get("tenant") or ""),
+                    "tenant_id": tenants[0].tenant_id if len(tenants) == 1 else "",
+                    "tenant_name": (
+                        self._tenant_display_name(tenants[0]) if len(tenants) == 1 else ""
+                    ),
                     "tenant_count": len(tenants),
+                    "tenant_ids": [item.tenant_id for item in tenants],
+                    "tenant_names": [self._tenant_display_name(item) for item in tenants],
+                    "tenant_statuses": tenant_statuses,
+                    "tenant_models": {
+                        self._tenant_display_name(item): list(
+                            (query.filters.get("tenant_models") or {}).get(item.tenant_id, ())
+                        )
+                        for item in tenants
+                    }
+                    if isinstance(query.filters.get("tenant_models"), dict)
+                    else {},
                     "model_scope": str(
                         query.filters.get("model_scope")
                         or ("selected" if selected_models else "summary")
                     ),
                     "models": list(selected_models),
                 },
+            },
+        )
+
+    def _tenant_display_name(self, tenant: _CubeTenant) -> str:
+        """Return a safe display label while keeping the catalog ID authoritative.
+
+        Configured aliases are presentation aids only; the tenant object has already
+        been matched against the live Cube catalog before this helper is called.
+        """
+
+        aliases = sorted(
+            (
+                str(alias).strip()
+                for alias, tenant_id in self._config.tenant_mappings.items()
+                if str(tenant_id).strip() == tenant.tenant_id and str(alias).strip()
+            ),
+            key=str.casefold,
+        )
+        return aliases[0] if aliases else tenant.name
+
+    async def _query_machine_tpm(self, query: ReportQuery) -> ReportDataset:
+        """Query Cube's hourly cluster/card-type normalized per-machine TPM series.
+
+        The upstream response has no machine identifier. Rows therefore retain
+        ``cluster`` and ``gpu_product`` and must never be presented as measurements
+        for a named physical machine.
+        """
+
+        models = self._selected_model_values(query.filters)
+        if len(models) != 1:
+            raise ValueError("Cube machine TPM report requires exactly one model")
+        start = query.start_time or datetime.combine(
+            query.start_date, time.min, tzinfo=self._tz
+        )
+        end = query.end_time or datetime.combine(
+            query.end_date, time.max, tzinfo=self._tz
+        )
+        if start.tzinfo is None or end.tzinfo is None or end <= start:
+            raise ValueError("Cube machine TPM report requires a valid timezone-aware window")
+        body = {
+            "startTime": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "endTime": end.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            ),
+            "model": models[0],
+            "cluster": str(query.filters.get("cluster") or "").strip(),
+            "timeLevel": "TIME_LEVEL_HOUR",
+        }
+        warnings: list[str] = []
+        rows: list[dict[str, Any]] = []
+        try:
+            async with MagikCubeClient(self._config, transport=self._transport) as client:
+                data = await client.request(
+                    "POST", "analysis/machine-tpm-trend/query", json_body=body
+                )
+        except Exception as exc:
+            return ReportDataset(
+                rows=(),
+                quality="missing",
+                warnings=(f"{classify_report_failure(exc)}:machine_tpm query failed",),
+                source=self.manifest.connector_id,
+            )
+
+        for point in data.get("points") or []:
+            if not isinstance(point, dict):
+                continue
+            timestamp = self._parse_timestamp(point.get("timestamp"))
+            tpm = self._as_float(_pick(point, "tpmPerMachine", "tpm_per_machine", default=None))
+            machine_count = self._as_float(
+                _pick(point, "machineCount", "machine_count", default=None)
+            )
+            gpu_count = self._as_float(_pick(point, "gpuCount", "gpu_count", default=None))
+            total_tokens = _as_optional_int(
+                _pick(point, "totalTokens", "total_tokens", default=None)
+            )
+            if timestamp is None or tpm is None:
+                warnings.append("machine_tpm invalid_point")
+                continue
+            cluster = str(point.get("cluster") or "未标记集群")
+            gpu_product = str(
+                _pick(point, "gpuProduct", "gpu_product", default="未标记卡型")
+            )
+            common = {
+                "period": "current",
+                "timestamp": timestamp.astimezone(self._tz).isoformat(),
+                "date": timestamp.astimezone(self._tz).date().isoformat(),
+                "hour": timestamp.astimezone(self._tz).strftime("%H:00"),
+                "model": str(point.get("model") or models[0]),
+                "cluster": cluster,
+                "gpu_product": gpu_product,
+                "sample_count": 1,
+                "valid_sample_count": 1,
+                "source": "Cube Admin / analysis/machine-tpm-trend/query",
+            }
+            values = (
+                ("ai.machine.tpm_per_machine", tpm, "tokens/minute"),
+                ("ai.machine.total_tokens", total_tokens, "tokens"),
+                ("ai.machine.count", machine_count, "machines"),
+                ("ai.machine.gpu_count", gpu_count, "gpus"),
+            )
+            for metric, value, unit in values:
+                if metric in query.metrics and value is not None:
+                    rows.append(
+                        {
+                            **common,
+                            "metric": metric,
+                            "value": value,
+                            "unit": unit,
+                            "aggregation": "hourly_normalized_value",
+                        }
+                    )
+            if total_tokens is not None and machine_count and machine_count > 0:
+                calculated = total_tokens / machine_count / 60
+                if calculated and abs(tpm - calculated) / calculated > 0.005:
+                    warnings.append(f"machine_tpm formula_mismatch:{cluster}:{gpu_product}")
+            expected_ratio = self._config.machine_gpu_per_host_expected
+            if expected_ratio is not None and machine_count and gpu_count:
+                actual_ratio = gpu_count / machine_count
+                deviation = abs(actual_ratio - expected_ratio) / expected_ratio
+                if deviation > self._config.machine_gpu_per_host_tolerance:
+                    warnings.append(
+                        f"machine_tpm gpu_machine_ratio_mismatch:{cluster}:{gpu_product}"
+                    )
+
+        quality = "partial" if rows and warnings else "complete" if rows else "missing"
+        if not rows and not warnings:
+            warnings.append("machine_tpm no_data")
+        rows.sort(
+            key=lambda row: (
+                str(row.get("cluster")),
+                str(row.get("gpu_product")),
+                str(row.get("timestamp")),
+                str(row.get("metric")),
+            )
+        )
+        return ReportDataset(
+            rows=tuple(rows),
+            quality=quality,
+            warnings=tuple(dict.fromkeys(warnings)),
+            source=self.manifest.connector_id,
+            metadata={
+                "query_windows": (
+                    {
+                        "period": "current",
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                    },
+                ),
+                "source_refs": (
+                    {
+                        "system": "Cube Admin",
+                        "route": "analysis/machine-tpm-trend/query",
+                        "fields": (
+                            "tpmPerMachine", "totalTokens", "machineCount", "gpuCount",
+                            "cluster", "gpuProduct", "timestamp",
+                        ),
+                    },
+                ),
+                "last_sample_at": max(
+                    (str(row.get("timestamp") or "") for row in rows), default=""
+                ),
+                "scope": {"models": list(models), "cluster": body["cluster"]},
             },
         )
 
@@ -1189,16 +1419,42 @@ class CubeConnector(ConnectorPlugin):
         filters: dict[str, Any],
     ) -> list[_CubeTenant]:
         requested = str(filters.get("tenant") or "").strip()
+        requested_many = tuple(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (filters.get("tenants") or ())
+                if str(item).strip()
+            )
+        )
+        if requested and requested_many:
+            raise ValueError("Cube tenant and tenants filters are mutually exclusive")
         # Cube tenant catalog is the source of truth. Local display aliases
         # may not construct a tenant that is absent from this API response.
         params = (
             None
-            if requested or filters.get("all_tenants") is True
+            if requested or requested_many or filters.get("all_tenants") is True
             else {"isKeyAccount": "true"}
         )
         items = await self._get_pages(client, "tenants", params=params, label="Cube tenant catalog")
         tenants = [self._tenant(item) for item in items]
         tenants = [item for item in tenants if item is not None]
+        if requested_many:
+            resolved: list[_CubeTenant] = []
+            for value in requested_many:
+                matches = _match_catalog_tenants(tenants, value, self._config.tenant_mappings)
+                if not matches:
+                    raise MagikCubeTenantResolutionError(
+                        f"Cube tenant was not found: {value}",
+                        failure_code="tenant_not_found",
+                    )
+                if len(matches) > 1:
+                    raise MagikCubeTenantResolutionError(
+                        f"Cube tenant selection was ambiguous: {value}",
+                        failure_code="tenant_ambiguous",
+                    )
+                if matches[0] not in resolved:
+                    resolved.append(matches[0])
+            return resolved
         if not requested:
             return tenants
 
@@ -1280,11 +1536,27 @@ class CubeConnector(ConnectorPlugin):
     ) -> tuple[list[dict[str, Any]], list[str]]:
         rows: list[dict[str, Any]] = []
         warnings: list[str] = []
+        tenant_models = query.filters.get("tenant_models")
+        scoped_models = ()
+        has_scoped_models = False
+        if isinstance(tenant_models, dict):
+            has_scoped_models = tenant.tenant_id in tenant_models
+            scoped_models = tuple(
+                str(item).strip()
+                for item in tenant_models.get(tenant.tenant_id, ())
+                if str(item).strip()
+            )
         for period, start_date, end_date in windows:
             async with semaphore:
                 try:
                     if {"ai.usage.tokens", "ai.requests"}.intersection(query.metrics):
-                        model_values = self._selected_model_values(query.filters) or (None,)
+                        model_values = (
+                            scoped_models
+                            if has_scoped_models and scoped_models
+                            else (None,)
+                            if has_scoped_models
+                            else self._selected_model_values(query.filters) or (None,)
+                        )
                         for model in model_values:
                             data = await client.request(
                                 "POST",
@@ -1307,7 +1579,13 @@ class CubeConnector(ConnectorPlugin):
                     )
                 if {"ai.tpm", "ai.tpm.avg"}.intersection(query.metrics):
                     try:
-                        model_values = self._selected_model_values(query.filters) or (None,)
+                        model_values = (
+                            scoped_models
+                            if has_scoped_models and scoped_models
+                            else (None,)
+                            if has_scoped_models
+                            else self._selected_model_values(query.filters) or (None,)
+                        )
                         for model in model_values:
                             data = await client.request(
                                 "POST",
@@ -1408,7 +1686,16 @@ class CubeConnector(ConnectorPlugin):
         query: ReportQuery,
         model: str | None = None,
     ) -> list[dict[str, Any]]:
-        selected = self._selected_models(query.filters)
+        tenant_models = query.filters.get("tenant_models")
+        selected = (
+            {
+                str(item).strip().casefold()
+                for item in tenant_models.get(tenant.tenant_id, ())
+                if str(item).strip()
+            }
+            if isinstance(tenant_models, dict) and tenant.tenant_id in tenant_models
+            else self._selected_models(query.filters)
+        )
         rows: list[dict[str, Any]] = []
         for index, item in enumerate(data.get("items") or []):
             row_model = str(
@@ -1425,7 +1712,8 @@ class CubeConnector(ConnectorPlugin):
                 if not day or day < start_date.isoformat() or day > end_date.isoformat():
                     continue
                 common = {
-                    "tenant": tenant.name,
+                    "tenant": self._tenant_display_name(tenant),
+                    "tenant_id": tenant.tenant_id,
                     "model": row_model,
                     "endpoint": endpoint,
                     "date": day,
@@ -1469,7 +1757,16 @@ class CubeConnector(ConnectorPlugin):
         query: ReportQuery,
         model: str | None = None,
     ) -> list[dict[str, Any]]:
-        selected = self._selected_models(query.filters)
+        tenant_models = query.filters.get("tenant_models")
+        selected = (
+            {
+                str(item).strip().casefold()
+                for item in tenant_models.get(tenant.tenant_id, ())
+                if str(item).strip()
+            }
+            if isinstance(tenant_models, dict) and tenant.tenant_id in tenant_models
+            else self._selected_models(query.filters)
+        )
         rows: list[dict[str, Any]] = []
         for item in data.get("items") or []:
             row_model = str(
@@ -1486,7 +1783,8 @@ class CubeConnector(ConnectorPlugin):
                 if not day or day < start_date.isoformat() or day > end_date.isoformat():
                     continue
                 common = {
-                    "tenant": tenant.name,
+                    "tenant": self._tenant_display_name(tenant),
+                    "tenant_id": tenant.tenant_id,
                     "model": row_model,
                     "endpoint": endpoint,
                     "date": day,
@@ -1517,6 +1815,183 @@ class CubeConnector(ConnectorPlugin):
                         }
                     )
         return rows
+
+
+class CubeMachineTpmTemplate(TemplatePlugin):
+    """Render peak normalized per-machine TPM by model, cluster, and GPU product."""
+
+    manifest = TemplateManifest(
+        template_id="machine_tpm_peak",
+        display_name="Cube 单机折算 TPM 峰值",
+        version="1.0",
+        category="capacity",
+        periods=frozenset({"day", "week", "range"}),
+        required_metrics=_CUBE_MACHINE_METRICS,
+        required_dimensions=frozenset({"model", "cluster", "gpu_product", "date", "hour"}),
+        connector_ids=frozenset({"magik_cube"}),
+        description="按集群和卡型展示 Cube 单机折算 TPM 峰值，不代表具体机器实例",
+    )
+
+    def __init__(self, *, timezone_name: str = "Asia/Shanghai") -> None:
+        self.timezone_name = timezone_name
+
+    def plan(self, intent: ReportIntent) -> tuple[ReportQuery, ...]:
+        if intent.start_date is None or intent.end_date is None:
+            raise ValueError("machine TPM planning requires concrete dates")
+        if len(intent.models) != 1:
+            raise ValueError("machine TPM report requires exactly one model")
+        tz = ZoneInfo(self.timezone_name)
+        start = datetime.combine(intent.start_date, time.min, tzinfo=tz)
+        end = datetime.combine(intent.end_date, time.max, tzinfo=tz)
+        return (
+            ReportQuery(
+                connector_id=intent.connector_id,
+                metrics=tuple(sorted(_CUBE_MACHINE_METRICS)),
+                dimensions=("model", "cluster", "gpu_product", "date", "hour"),
+                start_date=intent.start_date,
+                end_date=intent.end_date,
+                start_time=start,
+                end_time=end,
+                filters={
+                    "models": list(intent.models),
+                    "model_scope": "selected",
+                    "cluster": intent.filters.get("cluster", ""),
+                },
+            ),
+        )
+
+    def analyze(self, datasets: tuple[ReportDataset, ...]) -> ReportDocument:
+        if len(datasets) != 1:
+            raise ValueError("machine TPM template expects one dataset")
+        dataset = datasets[0]
+        points: dict[tuple[str, str, str, str], dict[str, Any]] = defaultdict(dict)
+        for row in dataset.rows:
+            key = (
+                str(row.get("model") or ""),
+                str(row.get("cluster") or ""),
+                str(row.get("gpu_product") or ""),
+                str(row.get("timestamp") or ""),
+            )
+            points[key][str(row.get("metric") or "")] = row.get("value")
+        grouped: dict[tuple[str, str, str], list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+        for (model, cluster, gpu_product, timestamp), metrics in points.items():
+            grouped[(model, cluster, gpu_product)].append((timestamp, metrics))
+
+        table_rows: list[dict[str, Any]] = []
+        for (model, cluster, gpu_product), samples in grouped.items():
+            valid = [
+                item for item in samples
+                if isinstance(item[1].get("ai.machine.tpm_per_machine"), (int, float))
+            ]
+            if not valid:
+                continue
+            peak_timestamp, peak = max(
+                valid,
+                key=lambda item: (float(item[1]["ai.machine.tpm_per_machine"]), item[0]),
+            )
+            table_rows.append(
+                {
+                    "model": model,
+                    "cluster": cluster,
+                    "gpu_product": gpu_product,
+                    "peak_tpm": f"{float(peak['ai.machine.tpm_per_machine']):,.2f}",
+                    "peak_at": peak_timestamp.replace("T", " ")[:19],
+                    "machine_count": self._format_count(peak.get("ai.machine.count")),
+                    "gpu_count": self._format_count(peak.get("ai.machine.gpu_count")),
+                    "total_tokens": self._format_integer(peak.get("ai.machine.total_tokens")),
+                    "samples": len(valid),
+                    "quality": "可用",
+                    "_sort": float(peak["ai.machine.tpm_per_machine"]),
+                }
+            )
+        table_rows.sort(
+            key=lambda row: (-float(row["_sort"]), str(row["cluster"]), str(row["gpu_product"]))
+        )
+        for row in table_rows:
+            row.pop("_sort", None)
+        scope = dataset.metadata.get("scope") if isinstance(dataset.metadata, dict) else {}
+        model = str((scope or {}).get("models", [""])[0] or "")
+        windows = dataset.metadata.get("query_windows") or ()
+        window = windows[0] if windows else {}
+        start_text = str(window.get("start") or "")
+        end_text = str(window.get("end") or "")
+        title_date = start_text[:10] if start_text[:10] == end_text[:10] else f"{start_text[:10]} 至 {end_text[:10]}"
+        title = f"{model} 单机折算 TPM 峰值｜{title_date}".strip("｜")
+        columns = [
+            ("cluster", "集群"), ("gpu_product", "卡型"), ("peak_tpm", "单机 TPM 峰值"),
+            ("peak_at", "峰值时间"), ("machine_count", "机器数"),
+            ("gpu_count", "GPU 数"), ("samples", "有效样本"), ("quality", "质量"),
+            ("total_tokens", "峰值桶 Token"),
+        ]
+        blocks = (
+            ReportBlock(
+                "table",
+                {
+                    "title": "单机折算 TPM 排行：按峰值降序",
+                    "columns": [
+                        {"name": key, "display_name": label, "data_type": "text"}
+                        for key, label in columns
+                    ],
+                    "rows": table_rows,
+                },
+            ),
+            ReportBlock(
+                "note",
+                {
+                    "content": (
+                        "来源：Cube Admin / analysis/machine-tpm-trend/query。口径：按集群和卡型"
+                        "取得日内每小时单机折算值的最大值；接口不包含 machineId，因此不代表具体机器。"
+                    )
+                },
+            ),
+        )
+        context = ReportContext(
+            timezone=self.timezone_name,
+            current_window=ReportWindow(start=start_text, end=end_text, label="统计窗口"),
+            sources=(
+                ReportSource(
+                    system="Cube Admin",
+                    route="analysis/machine-tpm-trend/query",
+                    fields=("tpmPerMachine", "machineCount", "gpuCount", "totalTokens"),
+                ),
+            ),
+            metric_definitions=(
+                MetricDefinition(
+                    metric="ai.machine.tpm_per_machine",
+                    label="单机折算 TPM 峰值",
+                    unit="tokens/minute/machine",
+                    aggregation="同一模型、集群和卡型的日内最大值",
+                    source="Cube Admin / analysis/machine-tpm-trend/query.tpmPerMachine",
+                ),
+            ),
+            calculation_version="1.0",
+            quality=dataset.quality,
+            quality_reasons=dataset.warnings,
+            freshness=str(dataset.metadata.get("last_sample_at") or ""),
+            template_version=self.manifest.version,
+        )
+        fallback_rows = "\n".join(
+            f"- {row['cluster']} / {row['gpu_product']}：{row['peak_tpm']}，峰值时间 {row['peak_at']}"
+            for row in table_rows
+        ) or "- 暂无数据"
+        return ReportDocument(
+            title=title,
+            document_id=self.manifest.template_id,
+            blocks=blocks,
+            fallback_text=f"{title}\n{fallback_rows}\n数据质量：{dataset.quality}",
+            quality=dataset.quality,
+            warnings=dataset.warnings,
+            context=context,
+            version=2,
+        )
+
+    @staticmethod
+    def _format_count(value: Any) -> str:
+        return "暂不可用" if value is None else f"{float(value):,.2f}"
+
+    @staticmethod
+    def _format_integer(value: Any) -> str:
+        return "暂不可用" if value is None else f"{int(value):,}"
 
 
 class CubeCostAccountTemplate(TemplatePlugin):

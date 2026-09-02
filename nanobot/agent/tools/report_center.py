@@ -9,6 +9,7 @@ import re
 import secrets
 import time
 import uuid
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -56,6 +57,13 @@ _HOME_RE = re.compile(
 )
 _RECENT_RE = re.compile(r"^(?:查看|打开|显示)?(?:我的)?最近报表[？?。！!]*$")
 _SUBSCRIPTIONS_RE = re.compile(r"^(?:查看|打开|显示|管理)?(?:我的)?(?:报表)?订阅[？?。！!]*$")
+_SUBSCRIPTION_CONTROL_RE = re.compile(
+    r"^(?P<operation>启用|停用)订阅：(?P<subscription_id>[0-9a-f]{1,64})$"
+)
+_BRIEF_SUBSCRIPTION_RE = re.compile(
+    r"^订阅(?P<period>日报|周报|月报)简报：客户 (?P<tenant>[^，（]{1,128})"
+    r"(?:（ID (?P<tenant_id>[^）]{1,128})）)?，模型 (?P<models>[^，]{1,512})$"
+)
 _HEALTH_RE = re.compile(
     r"^(?:请)?(?:查看|查询|生成|打开|显示)?(?:过去\s*15\s*分钟|近\s*15\s*分钟)?(?:平台)?健康(?:报告|情况)?[？?。！!]*$"
 )
@@ -98,6 +106,16 @@ _MODEL_CUBE_PERIOD_RE = re.compile(
     r"(?:全部|所有|全体)?\s*(?:客户|用户|租户)?[？?。！!]*$",
     re.IGNORECASE,
 )
+_MULTI_SCOPE_BRIEF_RE = re.compile(
+    r"^(?:请)?(?:打开|查看|生成)?(?:Cube\s*)?多客户多模型(?:日报)?简报[？?。！!]*$",
+    re.IGNORECASE,
+)
+_MACHINE_TPM_RE = re.compile(
+    r"^(?:请)?(?:查看|查询|生成)?\s*(?P<model>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"\s*(?:模型)?(?:的)?(?:单机|每台机器)\s*(?:折算)?\s*TPM"
+    r"\s*(?:峰值)?\s*(?:报表)?[？?。！!]*$",
+    re.IGNORECASE,
+)
 _FURTHER_ANALYSIS_RE = re.compile(
     r"^进一步分析（(?P<period>日报|周报|月报|区间报表)）："
     r"客户 (?P<tenant>[^，]{1,128})，模型 (?P<models>[^，]{1,512})，"
@@ -107,8 +125,10 @@ _FURTHER_ANALYSIS_RE = re.compile(
 _ALLOWED_REPORT_PARAM_KEYS = frozenset(
     {
         "tenant_query",
+        "tenants",
         "model",
         "models",
+        "model_scope",
         "project",
         "endpoint",
         "provider",
@@ -123,6 +143,7 @@ _ALLOWED_REPORT_PARAM_KEYS = frozenset(
         "subscription_period",
         "provider_id",
         "providers",
+        "cluster",
     }
 )
 _PERIOD_TEMPLATES: dict[str, str] = {
@@ -163,6 +184,11 @@ class ReportCenterToolConfig(Base):
     # disabled independently to restore existing matrix cards immediately.
     cube_usage_brief_template: bool = True
     cube_usage_brief_default: bool = True
+    # These wider-scope capabilities are independently gated because they can
+    # fan out across tenants or expose platform-level capacity information.
+    cube_multi_scope_brief: bool = False
+    cube_machine_tpm_report: bool = False
+    report_management_v1: bool = False
     cube_admin_skill_help: bool = True
     # Cost/account reports need both an enabled template and an independently
     # configured TokenAPI credential. The Admin JWT is never used as fallback.
@@ -230,6 +256,8 @@ _REPORT_CENTER_PARAMETERS = {
                 "health_report",
                 "cost_report",
                 "provider_quality_report",
+                "multi_scope_brief",
+                "machine_tpm_report",
                 "examples",
                 "recent",
                 "subscriptions",
@@ -242,16 +270,21 @@ _REPORT_CENTER_PARAMETERS = {
                 "request_access",
             ],
         },
-        "period": {"type": "string", "enum": ["day", "week", "month", "recent7", "recent15m"]},
+        "period": {"type": "string", "enum": ["day", "week", "month", "recent7", "recent15m", "range"]},
         "report_family": {
             "type": "string",
-            "enum": ["usage", "health", "cost", "provider_quality"],
+            "enum": ["usage", "health", "cost", "provider_quality", "capacity"],
         },
         "report_template": {
             "type": "string",
             "enum": ["brief", "matrix_card", "full"],
         },
         "tenant_query": {"type": "string", "maxLength": 128},
+        "tenants": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 128},
+            "maxItems": 20,
+        },
         "project": {"type": "string", "maxLength": 128},
         "model": {"type": "string", "maxLength": 128},
         "models": {
@@ -261,7 +294,7 @@ _REPORT_CENTER_PARAMETERS = {
         },
         "report_selections": {
             "type": "array",
-            "maxItems": 1,
+            "maxItems": 20,
             "items": {
                 "type": "object",
                 "properties": {
@@ -281,6 +314,7 @@ _REPORT_CENTER_PARAMETERS = {
         "endpoint": {"type": "string", "maxLength": 128},
         "provider": {"type": "string", "maxLength": 128},
         "provider_id": {"type": "string", "maxLength": 64},
+        "cluster": {"type": "string", "maxLength": 128},
         "providers": {
             "type": "array",
             "items": {"type": "string", "maxLength": 128},
@@ -342,6 +376,8 @@ class ReportCenterTool(Tool):
             cube_ttft_detail_enabled=config.cube_ttft_detail,
             cube_usage_semantics_v2=config.cube_usage_semantics_v2,
             cube_usage_brief_template_enabled=config.cube_usage_brief_template,
+            cube_multi_scope_brief_enabled=config.cube_multi_scope_brief,
+            cube_machine_tpm_template_enabled=config.cube_machine_tpm_report,
             cube_cost_template_enabled=(config.cube_cost_connector and config.cube_cost_template),
             cube_provider_quality_connector_enabled=config.cube_provider_quality_connector,
             cube_provider_quality_template_enabled=(
@@ -403,6 +439,43 @@ class ReportCenterTool(Tool):
 
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
         raw = text.strip()
+        subscription_control = _SUBSCRIPTION_CONTROL_RE.fullmatch(raw)
+        if subscription_control:
+            operation = "enable" if subscription_control.group("operation") == "启用" else "disable"
+            return {
+                "action": f"subscription_{operation}",
+                "subscription_id": subscription_control.group("subscription_id"),
+            }
+        brief_subscription = _BRIEF_SUBSCRIPTION_RE.fullmatch(raw)
+        if brief_subscription:
+            tenant_display = brief_subscription.group("tenant").strip()
+            tenant_id = str(brief_subscription.group("tenant_id") or "").strip()
+            models_text = brief_subscription.group("models").strip()
+            all_tenants = tenant_display == "全部客户"
+            tenant = (
+                ""
+                if all_tenants or tenant_display == "默认客户范围"
+                else tenant_id or tenant_display
+            )
+            models = [] if models_text in {"汇总", "全部模型"} else models_text.split("、")
+            model_scope = "all" if models_text == "全部模型" else "selected" if models else "summary"
+            return {
+                "action": "subscription_setup",
+                "period": {"日报": "day", "周报": "week", "月报": "month"}[brief_subscription.group("period")],
+                "report_family": "usage",
+                "report_params": {
+                    "report_template": "brief",
+                    "tenant_query": tenant,
+                    "models": models,
+                    "all_tenants": all_tenants,
+                    "model_scope": model_scope,
+                    "breakdown": "model" if model_scope in {"all", "selected"} else "summary",
+                    "report_selections": (
+                        [{"tenant_query": tenant, "model_scope": model_scope, "models": models}]
+                        if tenant else []
+                    ),
+                },
+            }
         detail_match = _FURTHER_ANALYSIS_RE.fullmatch(raw)
         if detail_match:
             period = {
@@ -440,6 +513,15 @@ class ReportCenterTool(Tool):
             }
         if _HOME_RE.fullmatch(raw):
             return {"action": "home"}
+        if _MULTI_SCOPE_BRIEF_RE.fullmatch(raw):
+            return {"action": "multi_scope_brief", "interactive": True, "period": "day"}
+        machine_tpm_match = _MACHINE_TPM_RE.fullmatch(raw)
+        if machine_tpm_match:
+            return {
+                "action": "machine_tpm_report",
+                "period": "day",
+                "model": machine_tpm_match.group("model"),
+            }
         if _RECENT_RE.fullmatch(raw):
             return {"action": "recent"}
         if _SUBSCRIPTIONS_RE.fullmatch(raw):
@@ -722,6 +804,7 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
+                template_policy_enforced=self._config.report_management_v1,
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行 Cube 健康报告的权限，请联系管理员授权。")
@@ -831,6 +914,7 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
+                template_policy_enforced=self._config.report_management_v1,
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行 Cube 供应商质量报告的权限，请联系管理员授权。")
@@ -940,6 +1024,7 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
+                template_policy_enforced=self._config.report_management_v1,
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行 Cube 成本与账户报表的权限，请联系管理员授权。")
@@ -1089,11 +1174,339 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
+                template_policy_enforced=self._config.report_management_v1,
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行该 Cube 报表的权限，请联系管理员授权。")
         except (LookupError, ValueError) as exc:
             return ToolResult.error(f"Error: Cube report unavailable: {exc}")
+        document = self._filter_usage_subscription_actions(
+            outcome.document,
+            channel=channel,
+            user_id=user_id,
+            template_id=template_id,
+        )
+        return self._result(document)
+
+    async def _run_multi_scope_brief(
+        self,
+        *,
+        period: str,
+        tenants: list[str],
+        models: list[str],
+        all_tenants: bool,
+        interactive: bool,
+        start_date: str,
+        end_date: str,
+        report_selections: list[dict[str, Any]] | None = None,
+    ) -> ToolResult:
+        """Run the explicit multi-customer/model brief after scope selection."""
+
+        if not self._config.cube_multi_scope_brief:
+            return ToolResult.error("Error: multi-customer model brief is not enabled")
+        if period != "day":
+            return ToolResult.error("Error: multi-customer model brief supports day only")
+        channel, chat_id, user_id, _session_key, metadata = self._request_identity()
+        if interactive and not tenants and not report_selections:
+            if self._magik_tool is None:
+                return ToolResult.error("Error: Cube scope selector is unavailable")
+            today = datetime.now(ZoneInfo(self._config.timezone)).date()
+            selected_day, _ = self._cube_period_dates("day", today)
+            result = await self._magik_tool.execute(
+                start_date=selected_day.isoformat(),
+                end_date=selected_day.isoformat(),
+                comparison="none",
+                include_tpm=False,
+                report_template="matrix_card",
+                granularity="day",
+                interactive=True,
+                save_snapshot=False,
+            )
+            ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+            if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
+                ui["title"] = "选择多客户多模型日报范围"
+                ui["base_params"] = {
+                    "action": "multi_scope_brief",
+                    "period": "day",
+                    "interactive": False,
+                    "start_date": selected_day.isoformat(),
+                    "end_date": selected_day.isoformat(),
+                    # The form UI comes from the legacy Cube tool, but every callback
+                    # in this workflow must resume the multi-scope ReportRunner action.
+                    "_report_center_selector": True,
+                }
+                ui["max_tenants"] = 20
+            return result
+        selections = [item for item in report_selections or [] if isinstance(item, dict)]
+        needs_model_selection = interactive and any(
+            str(item.get("model_scope") or "") == "selected" and not item.get("models")
+            for item in selections
+        )
+        if needs_model_selection:
+            if self._magik_tool is None:
+                return ToolResult.error("Error: Cube model selector is unavailable")
+            result = await self._magik_tool.execute(
+                start_date=start_date,
+                end_date=end_date,
+                comparison="none",
+                include_tpm=False,
+                report_template="matrix_card",
+                granularity="day",
+                interactive=True,
+                report_selections=selections,
+                save_snapshot=False,
+                # Tool-schema callers cannot submit this private control. It only
+                # raises the internal selector bound for the explicitly gated
+                # multi-scope workflow; ordinary compatibility calls keep their cap.
+                _trusted_selection_limit=20,
+            )
+            ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+            if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
+                ui["title"] = "选择多客户日报模型"
+                ui["base_params"] = {
+                    "action": "multi_scope_brief",
+                    "period": "day",
+                    "interactive": False,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "_report_center_selector": True,
+                }
+                ui["max_tenants"] = 20
+            return result
+        if selections:
+            tenants = [
+                str(item.get("tenant_query") or "").strip()
+                for item in selections
+                if str(item.get("tenant_query") or "").strip()
+            ]
+            tenant_models = {
+                tenant: [str(model).strip() for model in item.get("models") or [] if str(model).strip()]
+                for item in selections
+                for tenant in [str(item.get("tenant_query") or "").strip()]
+                if tenant and str(item.get("model_scope") or "") == "selected"
+            }
+            all_model_tenants = [
+                str(item.get("tenant_query") or "").strip()
+                for item in selections
+                if str(item.get("model_scope") or "") == "all"
+                and str(item.get("tenant_query") or "").strip()
+            ]
+            all_models = bool(all_model_tenants)
+        else:
+            tenant_models = {}
+            all_model_tenants = []
+            all_models = False
+        if not tenants and not all_tenants:
+            return ToolResult.error("请选择至少一个客户")
+        if not all_models and not models and not tenant_models:
+            return ToolResult.error("请选择至少一个模型")
+        try:
+            target_start = date.fromisoformat(start_date) if start_date else None
+            target_end = date.fromisoformat(end_date) if end_date else None
+        except ValueError:
+            return ToolResult.error("报表日期需要使用 YYYY-MM-DD 格式。")
+        if target_start is None or target_end is None:
+            target_start, target_end = self._cube_period_dates(
+                "day", datetime.now(ZoneInfo(self._config.timezone)).date()
+            )
+        if target_start != target_end:
+            return ToolResult.error("多客户多模型简报只支持单日")
+        if all_model_tenants:
+            if self._magik_tool is None:
+                return ToolResult.error("Cube 模型目录当前不可用，请稍后重试。")
+            # The usage endpoint may return a tenant-level aggregate when model is
+            # omitted. Expand "all models" from the live catalog first so the
+            # ReportRunner always receives explicit tenant/model pairs.
+            catalog_result = await self._magik_tool.execute(
+                start_date=target_start.isoformat(),
+                end_date=target_end.isoformat(),
+                comparison="none",
+                include_tpm=False,
+                report_template="matrix_card",
+                granularity="day",
+                interactive=True,
+                report_selections=[
+                    {
+                        "tenant_query": tenant_id,
+                        "model_scope": "selected",
+                        "models": [],
+                    }
+                    for tenant_id in all_model_tenants
+                ],
+                save_snapshot=False,
+                _trusted_selection_limit=20,
+            )
+            catalog_ui = (
+                catalog_result.metadata.get(OUTBOUND_META_AGENT_UI)
+                if catalog_result.metadata
+                else None
+            )
+            catalog_entries = (
+                catalog_ui.get("tenant_models", [])
+                if isinstance(catalog_ui, dict) and catalog_ui.get("phase") == "models"
+                else []
+            )
+            catalog_models = {
+                str(item.get("tenant_query") or "").strip(): [
+                    str(model_name).strip()
+                    for model_name in item.get("models") or []
+                    if str(model_name).strip()
+                ]
+                for item in catalog_entries
+                if isinstance(item, dict) and str(item.get("tenant_query") or "").strip()
+            }
+            missing_catalogs = [
+                tenant_id
+                for tenant_id in all_model_tenants
+                if not catalog_models.get(tenant_id)
+            ]
+            if getattr(catalog_result, "is_error", False) or missing_catalogs:
+                return ToolResult.error(
+                    "Cube 实时模型目录未返回可用模型，请检查客户模型配置或目录查询权限。"
+                )
+            tenant_models.update(
+                {tenant_id: catalog_models[tenant_id] for tenant_id in all_model_tenants}
+            )
+        template = self._registry.template("usage_customer_model_daily_brief")
+        if template is None:
+            return ToolResult.error("Error: multi-customer model brief template is unavailable")
+        scoped_model_values = tuple(
+            dict.fromkeys(
+                [*models]
+                + [
+                    model_name
+                    for tenant_values in tenant_models.values()
+                    for model_name in tenant_values
+                ]
+            )
+        )
+        selected_models = self._canonical_cube_models(scoped_model_values)
+        if len(selected_models) > 20 and not all_models:
+            return ToolResult.error("多客户多模型简报最多支持 20 个模型，请缩小范围。")
+        canonical_by_name = {item.casefold(): item for item in selected_models}
+        tenant_models = {
+            tenant_id: list(
+                dict.fromkeys(
+                    canonical_by_name.get(model_name.casefold(), model_name)
+                    for model_name in tenant_values
+                )
+            )
+            for tenant_id, tenant_values in tenant_models.items()
+        }
+        # Keep the shared Intent's explicit-selection cap intact. Catalog-expanded
+        # "all" models remain in tenant_models, which ReportRunner authorizes item
+        # by item and CubeConnector bounds to 200 tenant/model combinations.
+        intent_models = () if all_models else selected_models
+        intent = ReportIntent(
+            connector_id="magik_cube",
+            template_id=template.manifest.template_id,
+            period="day",
+            tenant_scope="all" if all_tenants else "selected",
+            tenants=tuple(dict.fromkeys(tenants)),
+            models=intent_models,
+            start_date=target_start,
+            end_date=target_end,
+            filters={
+                "tenants": list(dict.fromkeys(tenants)),
+                "tenant_scope": "all" if all_tenants else "selected",
+                "models": list(intent_models),
+                "model_scope": "all" if all_models else "selected",
+                "all_tenants": all_tenants,
+                "tenant_models": tenant_models,
+                "multi_scope": True,
+            },
+        )
+        try:
+            outcome = await ReportRunner(
+                self._registry,
+                self._store,
+                semantic_shadow_enabled=self._config.cube_semantics_shadow,
+                template_policy_enforced=self._config.report_management_v1,
+            ).run(
+                intent,
+                ReportRunContext(
+                    channel=channel,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    timezone=self._config.timezone,
+                    trace_id=uuid.uuid4().hex,
+                    template_version=template.manifest.version,
+                    metadata=metadata,
+                ),
+            )
+        except PermissionError:
+            return ToolResult.error("当前账号没有执行多客户多模型简报的权限，请联系管理员授权。")
+        except (LookupError, ValueError) as exc:
+            return ToolResult.error(f"Error: multi-customer model brief unavailable: {exc}")
+        return self._result(outcome.document)
+
+    async def _run_machine_tpm_report(
+        self,
+        *,
+        period: str,
+        model: str,
+        cluster: str,
+        start_date: str,
+        end_date: str,
+    ) -> ToolResult:
+        """Generate the read-only machine TPM report for one validated model."""
+
+        if not self._config.cube_machine_tpm_report:
+            return ToolResult.error("Error: machine TPM report is not enabled")
+        if not model.strip():
+            return ToolResult("请指定一个模型，例如：Kimi-K3 单机 TPM 峰值。")
+        if period not in {"day", "week", "range"}:
+            return ToolResult.error("Error: machine TPM report supports day, week, or range")
+        try:
+            if start_date or end_date:
+                target_start = date.fromisoformat(start_date)
+                target_end = date.fromisoformat(end_date)
+            else:
+                target_start, target_end = self._cube_period_dates(
+                    period, datetime.now(ZoneInfo(self._config.timezone)).date()
+                )
+        except ValueError:
+            return ToolResult.error("报表日期需要使用 YYYY-MM-DD 格式。")
+        if target_end < target_start or (target_end - target_start).days >= 90:
+            return ToolResult.error("机器 TPM 报表日期范围无效或超过 90 天。")
+        selected_model = self._canonical_cube_models((model.strip(),))
+        if len(selected_model) != 1:
+            return ToolResult.error("请选择一个有效模型")
+        channel, chat_id, user_id, _session_key, metadata = self._request_identity()
+        template = self._registry.template("machine_tpm_peak")
+        if template is None:
+            return ToolResult.error("Error: machine TPM report template is unavailable")
+        intent = ReportIntent(
+            connector_id="magik_cube",
+            template_id=template.manifest.template_id,
+            period=period,  # type: ignore[arg-type]
+            models=selected_model,
+            start_date=target_start,
+            end_date=target_end,
+            filters={"models": list(selected_model), "cluster": cluster.strip()},
+        )
+        try:
+            outcome = await ReportRunner(
+                self._registry,
+                self._store,
+                semantic_shadow_enabled=self._config.cube_semantics_shadow,
+                template_policy_enforced=self._config.report_management_v1,
+            ).run(
+                intent,
+                ReportRunContext(
+                    channel=channel,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    timezone=self._config.timezone,
+                    trace_id=uuid.uuid4().hex,
+                    template_version=template.manifest.version,
+                    metadata=metadata,
+                ),
+            )
+        except PermissionError:
+            return ToolResult.error("当前账号没有执行机器 TPM 报表的权限，请联系管理员授权。")
+        except (LookupError, ValueError) as exc:
+            return ToolResult.error(f"Error: machine TPM report unavailable: {exc}")
         return self._result(outcome.document)
 
     async def _run_scope_selector(
@@ -1222,13 +1635,78 @@ class ReportCenterTool(Tool):
             channel, user_id, "connector", "magik_cube"
         )
 
+    def _filter_usage_subscription_actions(
+        self,
+        document: Any,
+        *,
+        channel: str,
+        user_id: str,
+        template_id: str,
+    ) -> Any:
+        """Hide brief subscription actions unless the full server capability is usable.
+
+        The action remains independently authorized during setup and creation. This
+        presentation gate prevents offering a control that the current Gateway,
+        template lifecycle, or user grants cannot execute.
+        """
+
+        template = self._registry.template(template_id)
+        allowed = bool(
+            self._cron is not None
+            and self._config.cube_subscription
+            and user_id
+            and self._authorized_for_magik(channel, user_id)
+            and self._store.allowed(channel, user_id, "capability", "subscriptions")
+            and template is not None
+            and template.manifest.lifecycle_state in {"publish", "canary"}
+            and self._store.allowed(channel, user_id, "template", template_id)
+        )
+        if allowed:
+            return document
+
+        blocks = []
+        for block in document.blocks:
+            if block.kind != "actions":
+                blocks.append(block)
+                continue
+            actions = block.data.get("actions")
+            if not isinstance(actions, list):
+                blocks.append(block)
+                continue
+            visible_actions = [
+                action
+                for action in actions
+                if not (
+                    isinstance(action, dict)
+                    and str(action.get("action_id") or "").startswith(
+                        "usage_subscription_setup:"
+                    )
+                )
+            ]
+            if visible_actions:
+                blocks.append(replace(block, data={**block.data, "actions": visible_actions}))
+        return replace(document, blocks=tuple(blocks))
+
     def _safe_report_params(self, value: Any) -> dict[str, Any]:
+        """Normalize subscription scope while keeping internal controls server-owned.
+
+        Subscription forms round-trip the already normalized parameters. Internal
+        controls such as ``save_snapshot`` must therefore be removed before the
+        external allowlist check and re-applied with the safe fixed value below.
+        """
+
         if not isinstance(value, dict):
             raise ValueError("report_params must be an object")
-        unknown = set(value) - _ALLOWED_REPORT_PARAM_KEYS
+        candidate = dict(value)
+        candidate.pop("save_snapshot", None)
+        unknown = set(candidate) - _ALLOWED_REPORT_PARAM_KEYS
         if unknown:
             raise ValueError("unsupported report subscription parameters")
-        params = {key: value[key] for key in value if key in _ALLOWED_REPORT_PARAM_KEYS}
+        params = {
+            key: candidate[key]
+            for key in candidate
+            if key in _ALLOWED_REPORT_PARAM_KEYS
+        }
         params.setdefault(
             "report_template",
             "brief" if self._usage_brief_default_enabled else "matrix_card",
@@ -1280,6 +1758,73 @@ class ReportCenterTool(Tool):
         params = self._dynamic_magik_params(subscription)
         family = str(subscription.report_params.get("report_family") or "usage")
         period = self._subscription_period(subscription)
+        if subscription.template_id == "machine_tpm_peak":
+            if not self._config.cube_machine_tpm_report:
+                return None
+            try:
+                start_date = date.fromisoformat(str(params["start_date"]))
+                end_date = date.fromisoformat(str(params["end_date"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+            model = str(params.get("model") or "").strip()
+            if not model:
+                return None
+            return ReportIntent(
+                connector_id="magik_cube",
+                template_id="machine_tpm_peak",
+                period=period,  # type: ignore[arg-type]
+                models=self._canonical_cube_models((model,)),
+                start_date=start_date,
+                end_date=end_date,
+                filters={
+                    "models": [model],
+                    "model_scope": "selected",
+                    "cluster": str(params.get("cluster") or "").strip(),
+                },
+            )
+        if subscription.template_id == "usage_customer_model_daily_brief":
+            if not self._config.cube_multi_scope_brief or period != "day":
+                return None
+            try:
+                start_date = date.fromisoformat(str(params["start_date"]))
+                end_date = date.fromisoformat(str(params["end_date"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+            tenants = tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in params.get("tenants") or []
+                    if str(item).strip()
+                )
+            )
+            models = self._canonical_cube_models(
+                tuple(
+                    dict.fromkeys(
+                        str(item).strip()
+                        for item in params.get("models") or []
+                        if str(item).strip()
+                    )
+                )
+            )
+            if not tenants or not models:
+                return None
+            return ReportIntent(
+                connector_id="magik_cube",
+                template_id="usage_customer_model_daily_brief",
+                period="day",
+                tenant_scope="selected",
+                tenants=tenants,
+                models=models,
+                start_date=start_date,
+                end_date=end_date,
+                filters={
+                    "tenants": list(tenants),
+                    "tenant_scope": "selected",
+                    "models": list(models),
+                    "model_scope": "selected",
+                    "multi_scope": True,
+                },
+            )
         if family == "provider_quality":
             if not self.provider_quality_subscriptions_enabled or period not in {"day", "week"}:
                 return None
@@ -1439,6 +1984,7 @@ class ReportCenterTool(Tool):
             self._registry,
             self._store,
             semantic_shadow_enabled=self._config.cube_semantics_shadow,
+            template_policy_enforced=self._config.report_management_v1,
         )
         outcome = await runner.run(intent, context)
         report_attempts = 1
@@ -1480,6 +2026,10 @@ class ReportCenterTool(Tool):
     ) -> ToolResult:
         if self._cron is None:
             return ToolResult.error("Error: report subscriptions require the Gateway Cron service")
+        if not user_id or not self._store.allowed(
+            channel, user_id, "capability", "subscriptions"
+        ):
+            return ToolResult.error("Error: no permission to manage report subscriptions")
         params = self._safe_report_params(report_params)
         saved_family = str(params.get("report_family") or "")
         if saved_family == "health" and report_family == "usage":
@@ -1502,8 +2052,11 @@ class ReportCenterTool(Tool):
                 return ToolResult.error("Error: Cube cost/account subscription is not enabled")
             if period != "month":
                 return ToolResult.error("Error: cost/account subscriptions support month only")
-        elif period not in _PERIOD_TEMPLATES:
-            return ToolResult.error("Error: subscription period must be day, week, or month")
+        elif report_family == "usage":
+            if not self._config.cube_subscription:
+                return ToolResult.error("Error: Cube usage subscription is not enabled")
+            if period not in _PERIOD_TEMPLATES:
+                return ToolResult.error("Error: subscription period must be day, week, or month")
         if report_family == "provider_quality":
             if not user_id or not self.provider_quality_connector_enabled:
                 return ToolResult.error("Error: no permission for the Cube provider quality connector")
@@ -1517,6 +2070,8 @@ class ReportCenterTool(Tool):
             return ToolResult.error("Error: no permission for the Magik Cube connector")
         if report_family in {"health", "cost"}:
             params["report_family"] = report_family
+            params["subscription_period"] = period
+        elif report_family == "usage" and params.get("report_template") == "brief":
             params["subscription_period"] = period
         denial = None if report_family == "provider_quality" else authorize_magik_params(
             self._store, channel=channel, user_id=user_id, params=params
@@ -1545,8 +2100,31 @@ class ReportCenterTool(Tool):
             else _PERIOD_TEMPLATES[period]
         )
         template = self._registry.template(template_id)
+        if (
+            report_family == "usage"
+            and params.get("report_template") == "brief"
+            and (
+                template is None
+                or template.manifest.lifecycle_state not in {"publish", "canary"}
+            )
+        ):
+            return ToolResult.error("Error: Cube usage brief template is not available")
         if template is not None:
             params["calculation_version"] = template.manifest.version
+        if self._config.report_management_v1:
+            policy = self._store.template_policy(template_id)
+            if policy is not None:
+                if not policy["enabled"]:
+                    return ToolResult.error("Error: this report template is disabled")
+                mode = str(policy["subscription_mode"])
+                if mode == "disabled":
+                    return ToolResult.error("Error: this report template does not allow subscriptions")
+                if mode == "allowlist" and not self._store.allowed(
+                    channel, user_id, "subscription_template", template_id
+                ):
+                    return ToolResult.error(
+                        "Error: no permission to subscribe to this report template"
+                    )
         if report_family == "health":
             params["threshold_version"] = "health-default-v1"
         fingerprint_payload = json.dumps(
@@ -1609,6 +2187,10 @@ class ReportCenterTool(Tool):
     ) -> ToolResult:
         if self._cron is None:
             return ToolResult.error("Error: report subscriptions require the Gateway Cron service")
+        if not user_id or not self._store.allowed(
+            channel, user_id, "capability", "subscriptions"
+        ):
+            return ToolResult.error("Error: no permission to manage report subscriptions")
         if report_family == "provider_quality":
             if not self.provider_quality_subscriptions_enabled:
                 return ToolResult.error("Error: Cube provider quality subscription is not enabled")
@@ -1624,8 +2206,13 @@ class ReportCenterTool(Tool):
                 return ToolResult.error("Error: Cube cost/account subscription is not enabled")
             if period != "month":
                 return ToolResult.error("Error: cost/account subscriptions support month only")
-        elif report_family != "usage" or period not in _PERIOD_TEMPLATES:
-            return ToolResult.error("Error: subscription period must be day, week, or month")
+        elif report_family == "usage":
+            if not self._config.cube_subscription:
+                return ToolResult.error("Error: Cube usage subscription is not enabled")
+            if period not in _PERIOD_TEMPLATES:
+                return ToolResult.error("Error: subscription period must be day, week, or month")
+        else:
+            return ToolResult.error("Error: unsupported report family")
         if report_family == "provider_quality":
             authorized = bool(
                 user_id
@@ -1645,6 +2232,11 @@ class ReportCenterTool(Tool):
         if report_family in {"health", "cost", "provider_quality"}:
             params["report_family"] = report_family
             params["subscription_period"] = period
+        elif params.get("report_template") == "brief":
+            params["subscription_period"] = period
+            template = self._registry.template(_BRIEF_PERIOD_TEMPLATES[period])
+            if template is None or template.manifest.lifecycle_state not in {"publish", "canary"}:
+                return ToolResult.error("Error: Cube usage brief template is not available")
         denial = None if report_family == "provider_quality" else authorize_magik_params(
             self._store, channel=channel, user_id=user_id, params=params
         )
@@ -1673,6 +2265,10 @@ class ReportCenterTool(Tool):
         subscription = self._store.subscription(subscription_id)
         if subscription is None or not subscription.enabled:
             return ToolResult.error("Error: report subscription is missing or disabled")
+        if self._config.report_management_v1:
+            policy = self._store.template_policy(subscription.template_id)
+            if policy is not None and not policy["enabled"]:
+                return ToolResult.error("Error: report template is disabled")
         family = str(subscription.report_params.get("report_family") or "usage")
         if self._magik_tool is None and family != "provider_quality":
             return ToolResult.error("Error: Magik Cube connector is unavailable")
@@ -1760,6 +2356,8 @@ class ReportCenterTool(Tool):
         provider: str = "",
         provider_id: str = "",
         providers: list[str] | None = None,
+        tenants: list[str] | None = None,
+        cluster: str = "",
         selection_confirmed: bool = False,
         include_empty: bool = False,
         start_date: str = "",
@@ -1785,6 +2383,7 @@ class ReportCenterTool(Tool):
                     admin_skill_enabled=(
                         self._config.cube_admin_skill_help and self._magik_tool is not None
                     ),
+                    management_enabled=self._config.report_management_v1,
                 )
             )
         if action == "examples":
@@ -1797,6 +2396,8 @@ class ReportCenterTool(Tool):
                     admin_skill_enabled=(
                         self._config.cube_admin_skill_help and self._magik_tool is not None
                     ),
+                    multi_scope_enabled=self._config.cube_multi_scope_brief,
+                    machine_tpm_enabled=self._config.cube_machine_tpm_report,
                 )
             )
         if action == "recent":
@@ -1822,6 +2423,25 @@ class ReportCenterTool(Tool):
                 start_date=start_date,
                 end_date=end_date,
                 report_selections=report_selections,
+            )
+        if action == "multi_scope_brief":
+            return await self._run_multi_scope_brief(
+                period=period,
+                tenants=tenants or [],
+                models=models or ([model] if model else []),
+                all_tenants=all_tenants,
+                interactive=interactive,
+                start_date=start_date,
+                end_date=end_date,
+                report_selections=report_selections,
+            )
+        if action == "machine_tpm_report":
+            return await self._run_machine_tpm_report(
+                period=period,
+                model=model,
+                cluster=cluster,
+                start_date=start_date,
+                end_date=end_date,
             )
         if action == "health_report":
             return await self._run_health_report(period=period)
@@ -1893,7 +2513,9 @@ class ReportCenterTool(Tool):
             self._store.set_subscription_enabled(
                 subscription_id, channel=channel, user_id=user_id, enabled=enabled
             )
-            return ToolResult("订阅已启用。" if enabled else "订阅已停用。")
+            return self._result(
+                subscriptions_document(self._store.subscriptions(channel, user_id))
+            )
         if action == "subscription_remove":
             if self._cron:
                 self._cron.remove_job(subscription.cron_job_id)

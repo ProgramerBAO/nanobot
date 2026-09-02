@@ -8,8 +8,10 @@ import pytest
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu.runtime import FeishuChannel, FeishuConfig
+from nanobot.reporting.capabilities import subscriptions_document
 from nanobot.reporting.interactions import report_interactions
 from nanobot.reporting.provider_quality import provider_quality_selector_document
+from nanobot.reporting.store import ReportSubscription
 
 
 def _channel() -> FeishuChannel:
@@ -150,6 +152,50 @@ def test_scope_submit_is_idempotent_and_maps_server_side_values() -> None:
     assert duplicate.toast.type == "info"
     channel._schedule_card_resume.assert_called_once()
     assert state_id in channel._card_interactions
+
+
+def test_report_center_scope_selector_resumes_the_owning_tool() -> None:
+    """Protect the callback ownership regression that sent ReportCenter params to legacy Tool."""
+
+    channel = _channel()
+    ui = _scope_ui()
+    ui["base_params"] = {
+        "action": "multi_scope_brief",
+        "period": "day",
+        "interactive": False,
+        "_report_center_selector": True,
+    }
+    card = channel._build_scope_card(
+        ui,
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_alice",
+            content="fallback",
+            metadata={"sender_open_id": "ou_alice"},
+        ),
+    )
+    channel._schedule_tool_resume = MagicMock(return_value=True)
+    tenant_option = next(_find_tag(card, "multi_select_static"))["options"][0]["value"]
+    all_button = next(
+        button
+        for button in _find_tag(card, "button")
+        if button.get("value", {}).get("scope") == "all"
+    )
+
+    response = channel._on_card_action_sync(
+        _action(
+            value=all_button["value"],
+            name=all_button["name"],
+            form_value={"tenants": [tenant_option]},
+        )
+    )
+
+    assert response.toast.type == "success"
+    _, tool_name, params, _ = channel._schedule_tool_resume.call_args.args
+    assert tool_name == "report_center"
+    assert params["action"] == "multi_scope_brief"
+    assert params["period"] == "day"
+    assert "_report_center_selector" not in params
 
 
 def test_scope_card_preserves_selected_report_template() -> None:
@@ -637,6 +683,78 @@ def test_health_document_actions_route_to_health_report_and_health_subscription(
         "params": {"action": "provider_quality_report", "period": "recent15m"},
         "content": "生成 Cube 供应商质量报告",
     }
+
+
+def test_subscription_card_keeps_each_button_with_its_opaque_subscription_target() -> None:
+    channel = _channel()
+    rows = [
+        ReportSubscription(
+            subscription_id="aaaaaaaaaaaaaaaa",
+            channel="feishu",
+            chat_id="ou_alice",
+            user_id="ou_alice",
+            connector_id="magik_cube",
+            template_id="usage_daily_brief",
+            template_version="2.0",
+            schedule="0 10 * * 1-5",
+            timezone="Asia/Shanghai",
+            report_params={"tenant_query": "tenant-a", "model_scope": "summary"},
+            cron_job_id="job-a",
+            enabled=True,
+            created_at="2026-09-02T10:00:00+08:00",
+            updated_at="2026-09-02T10:00:00+08:00",
+        ),
+        ReportSubscription(
+            subscription_id="bbbbbbbbbbbbbbbb",
+            channel="feishu",
+            chat_id="ou_alice",
+            user_id="ou_alice",
+            connector_id="magik_cube",
+            template_id="usage_weekly_brief",
+            template_version="2.0",
+            schedule="0 9 * * 1",
+            timezone="Asia/Shanghai",
+            report_params={"all_tenants": True, "model_scope": "summary"},
+            cron_job_id="job-b",
+            enabled=False,
+            created_at="2026-09-02T10:00:00+08:00",
+            updated_at="2026-09-02T10:00:00+08:00",
+        ),
+    ]
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+
+    card = channel._build_agent_ui_cards(subscriptions_document(rows).to_agent_ui(), msg)[0]
+    direct_elements = card["elements"]
+    markdown_indices = [
+        index
+        for index, element in enumerate(direct_elements)
+        if element.get("tag") == "markdown" and "**订阅 " in element.get("content", "")
+    ]
+    action_indices = [
+        index for index, element in enumerate(direct_elements) if element.get("tag") == "action"
+    ]
+    assert markdown_indices[0] < action_indices[0] < markdown_indices[1] < action_indices[1]
+
+    buttons = [element["actions"][0] for element in direct_elements if element.get("tag") == "action"]
+    assert [button["text"]["content"] for button in buttons] == ["停用订阅 1", "启用订阅 2"]
+    for button, expected_id, expected_action in zip(
+        buttons,
+        ("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        ("subscription_disable", "subscription_enable"),
+        strict=True,
+    ):
+        value = button["value"]
+        state = channel._card_interactions[value["interaction_id"]]
+        target = state.option_values[value["action_token"]]
+        assert target["params"] == {
+            "action": expected_action,
+            "subscription_id": expected_id,
+        }
 
 
 def test_period_report_action_routes_to_interactive_scope_selection() -> None:

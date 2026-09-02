@@ -94,7 +94,10 @@ def _format_metric_items(data: dict[str, Any]) -> str:
             baseline = ""
         samples = ""
         if item.get("valid_sample_count") not in (None, ""):
-            sample_label = "有效请求" if item.get("metric") == "ai.ttft" else "时间桶"
+            sample_label = str(
+                item.get("sample_label")
+                or ("有效请求" if item.get("metric") == "ai.ttft" else "时间桶")
+            )
             samples = f"；{sample_label}：{item['valid_sample_count']}"
         aggregation = str(item.get("aggregation") or "").strip()
         semantics = f"；口径：{aggregation}" if aggregation else ""
@@ -137,6 +140,36 @@ def _format_table(data: dict[str, Any]) -> str:
             continue
         lines.append("| " + " | ".join(str(value) for value in values) + " |")
     return "\n".join(lines)
+
+
+def _format_grouped_metrics(data: dict[str, Any]) -> str:
+    """Render customer/model groups without introducing template-specific Markdown."""
+
+    sections: list[str] = []
+    hidden_groups: list[str] = []
+    for group in data.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        label = str(group.get("label") or "未命名客户")
+        items = [item for item in group.get("items") or [] if isinstance(item, dict)]
+        has_visible_data = any(str(item.get("status") or "") != "no_usage" for item in items)
+        if data.get("collapse_no_usage") is True and items and not has_visible_data:
+            hidden_groups.append(label)
+            continue
+        lines = [f"## {label}"]
+        for item in items:
+            comparisons = "｜".join(
+                f"{value.get('label') or '对比'}：{value.get('change') or '暂无可比基准'}"
+                for value in item.get("comparisons") or []
+                if isinstance(value, dict)
+            )
+            status = str(item.get("status") or "")
+            suffix = "｜暂无用量" if status == "no_usage" else ""
+            lines.append(f"- {item.get('label') or '未命名模型'}｜{comparisons}{suffix}")
+        sections.append("\n".join(lines))
+    if hidden_groups:
+        sections.append(f"无用量客户 {len(hidden_groups)} 个（默认收起）：" + "、".join(hidden_groups))
+    return "\n\n".join(sections)
 
 
 def _format_report_context(document: ReportDocument) -> str:
@@ -209,6 +242,8 @@ def document_to_markdown(document: ReportDocument) -> str:
             content = _format_metric_items(block.data)
         elif block.kind == "table":
             content = _format_table(block.data)
+        elif block.kind == "grouped_metrics":
+            content = _format_grouped_metrics(block.data)
         elif block.kind == "actions":
             actions = block.data.get("actions") or []
             content = "\n".join(

@@ -13,6 +13,13 @@ def template_id_for_magik_params(params: dict[str, Any]) -> str:
         return "cost_account"
     if str(params.get("report_family") or "") == "health":
         return "health_sre"
+    if str(params.get("report_template") or "") == "brief":
+        period = str(params.get("subscription_period") or params.get("period") or "day")
+        return {
+            "day": "usage_daily_brief",
+            "week": "usage_weekly_brief",
+            "month": "usage_monthly_brief",
+        }.get(period, "usage_daily_brief")
     if str(params.get("report_template") or "full") != "matrix_card":
         return "usage_full"
     if str(params.get("granularity") or "day") == "week":

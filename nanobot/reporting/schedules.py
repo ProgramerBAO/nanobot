@@ -5,19 +5,29 @@ from __future__ import annotations
 import re
 
 REPORT_TEMPLATE_LABELS = {
+    "usage_daily_brief": "日报简报",
+    "usage_weekly_brief": "周报简报",
+    "usage_monthly_brief": "月报简报",
     "usage_daily_matrix": "日报",
     "usage_weekly_matrix": "周报",
     "usage_monthly_matrix": "月报",
     "health_sre": "Cube 健康报告",
     "cost_account": "Cube 成本与账户报表",
+    "usage_customer_model_daily_brief": "多客户多模型日报简报",
+    "machine_tpm_peak": "单机折算 TPM 峰值",
 }
 
 REPORT_DATA_PERIODS = {
+    "usage_daily_brief": "前一自然日，对比前一日和上周同期",
+    "usage_weekly_brief": "上一完整周，对比前一完整周",
+    "usage_monthly_brief": "上一自然月，对比前一自然月",
     "usage_daily_matrix": "前一自然日，对比前两日",
     "usage_weekly_matrix": "上周，对比上上周",
     "usage_monthly_matrix": "上月，对比前一自然月",
     "health_sre": "发送时生成平台级健康日/周趋势",
     "cost_account": "上月账单归属月，对比前一自然月；余额为发送时快照",
+    "usage_customer_model_daily_brief": "前一自然日，对比前一日和上周同期",
+    "machine_tpm_peak": "发送时按订阅周期计算单机折算 TPM 峰值",
 }
 
 _WEEKDAY_LABELS = {

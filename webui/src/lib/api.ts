@@ -637,7 +637,17 @@ export async function fetchReportingSettings(
 
 export async function runReportingSettingsAction(
   token: string,
-  action: "rbac" | "grant" | "revoke" | "export",
+  action:
+    | "rbac"
+    | "grant"
+    | "revoke"
+    | "export"
+    | "template_policy"
+    | "subscription_create"
+    | "subscription_enable"
+    | "subscription_disable"
+    | "subscription_schedule"
+    | "subscription_delete",
   values: Record<string, string>,
   base: string = "",
 ): Promise<ReportingSettingsPayload> {

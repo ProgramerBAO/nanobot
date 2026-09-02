@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -132,6 +133,26 @@ class ReportStateStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (idempotency_key, part_index, attempt)
                 );
+                CREATE TABLE IF NOT EXISTS report_template_policies (
+                    template_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL,
+                    subscription_mode TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS report_admin_audit (
+                    audit_id TEXT PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    before_summary TEXT NOT NULL,
+                    after_summary TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS report_admin_audit_created
+                    ON report_admin_audit(created_at DESC);
                 """
             )
 
@@ -175,10 +196,180 @@ class ReportStateStore:
     def set_rbac_enabled(self, enabled: bool) -> None:
         self.set_setting("rbac_enabled", "true" if enabled else "false")
 
+    def template_policies(self) -> list[dict[str, Any]]:
+        """Return persisted template policies without exposing report parameters."""
+
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM report_template_policies ORDER BY template_id"
+            ).fetchall()
+        return [
+            {
+                "template_id": str(row["template_id"]),
+                "enabled": bool(row["enabled"]),
+                "subscription_mode": str(row["subscription_mode"]),
+                "revision": int(row["revision"]),
+                "updated_at": str(row["updated_at"]),
+                "updated_by": str(row["updated_by"]),
+            }
+            for row in rows
+        ]
+
+    def template_policy(self, template_id: str) -> dict[str, Any] | None:
+        """Return one template policy for runtime enforcement, if configured."""
+
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM report_template_policies WHERE template_id=?",
+                (template_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "template_id": str(row["template_id"]),
+            "enabled": bool(row["enabled"]),
+            "subscription_mode": str(row["subscription_mode"]),
+            "revision": int(row["revision"]),
+            "updated_at": str(row["updated_at"]),
+            "updated_by": str(row["updated_by"]),
+        }
+
+    def set_template_policy(
+        self,
+        template_id: str,
+        *,
+        enabled: bool,
+        subscription_mode: str,
+        updated_by: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist an exposure policy with optimistic concurrency and safe audit."""
+
+        if not template_id or len(template_id) > 128:
+            raise ValueError("invalid report template id")
+        if subscription_mode not in {"all_authorized", "allowlist", "disabled"}:
+            raise ValueError("unsupported report subscription mode")
+        now = _utc_now()
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM report_template_policies WHERE template_id=?",
+                (template_id,),
+            ).fetchone()
+            revision = int(row["revision"]) if row else 0
+            if expected_revision is not None and revision != expected_revision:
+                raise ValueError("report template policy was updated by another operator")
+            before = (
+                {
+                    "enabled": bool(row["enabled"]),
+                    "subscription_mode": str(row["subscription_mode"]),
+                    "revision": revision,
+                }
+                if row
+                else {}
+            )
+            after = {
+                "enabled": bool(enabled),
+                "subscription_mode": subscription_mode,
+                "revision": revision + 1,
+            }
+            db.execute(
+                """INSERT INTO report_template_policies(
+                    template_id, enabled, subscription_mode, revision, updated_at, updated_by
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(template_id) DO UPDATE SET enabled=excluded.enabled,
+                    subscription_mode=excluded.subscription_mode, revision=excluded.revision,
+                    updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
+                (template_id, int(enabled), subscription_mode, revision + 1, now, updated_by),
+            )
+            db.execute(
+                """INSERT INTO report_admin_audit(
+                    audit_id, action, target_type, target_id, before_summary,
+                    after_summary, created_at, updated_by
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    uuid.uuid4().hex,
+                    "template_policy_update",
+                    "template",
+                    template_id,
+                    json.dumps(before, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(after, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                    updated_by[:256] or "webui_admin",
+                ),
+            )
+        return {"template_id": template_id, **after, "updated_at": now}
+
+    def all_subscriptions(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> list[ReportSubscription]:
+        """Return a bounded subscription page for the authenticated admin surface."""
+
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, min(int(offset), 100_000))
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM report_subscriptions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [self._subscription_from_row(row) for row in rows]
+
+    def update_subscription_schedule(
+        self,
+        subscription_id: str,
+        *,
+        schedule: str,
+        timezone_name: str,
+    ) -> ReportSubscription | None:
+        """Update only scheduling metadata after the corresponding Cron job succeeds."""
+
+        if not schedule.strip() or len(schedule) > 128:
+            raise ValueError("invalid report subscription schedule")
+        if not timezone_name.strip() or len(timezone_name) > 64:
+            raise ValueError("invalid report subscription timezone")
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                """UPDATE report_subscriptions SET schedule=?, timezone=?, updated_at=?
+                WHERE subscription_id=?""",
+                (schedule, timezone_name, _utc_now(), subscription_id),
+            )
+        return self.subscription(subscription_id) if cursor.rowcount else None
+
+    def record_admin_audit(
+        self,
+        *,
+        action: str,
+        target_type: str,
+        target_id: str,
+        before_summary: dict[str, Any],
+        after_summary: dict[str, Any],
+        updated_by: str,
+    ) -> None:
+        """Record bounded control-plane metadata without report scope or credentials."""
+
+        if not action or len(action) > 64 or not target_id or len(target_id) > 256:
+            raise ValueError("invalid report admin audit target")
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO report_admin_audit(
+                    audit_id, action, target_type, target_id, before_summary,
+                    after_summary, created_at, updated_by
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    uuid.uuid4().hex,
+                    action,
+                    target_type[:64],
+                    target_id,
+                    json.dumps(before_summary, ensure_ascii=False, separators=(",", ":"))[:4096],
+                    json.dumps(after_summary, ensure_ascii=False, separators=(",", ":"))[:4096],
+                    _utc_now(),
+                    updated_by[:256] or "webui_admin",
+                ),
+            )
+
     def grant(self, channel: str, user_id: str, resource_type: str, resource_id: str) -> None:
         if resource_type not in {
             "connector", "template", "tenant", "project", "model", "endpoint",
-            "provider", "environment", "capability",
+            "provider", "environment", "capability", "subscription_template",
         }:
             raise ValueError("unsupported report grant resource type")
         with self._lock, self._connect() as db:
@@ -500,6 +691,17 @@ class PostgresReportStateStore(ReportStateStore):
                 attempt INTEGER NOT NULL, status TEXT NOT NULL, error_type TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (idempotency_key, part_index, attempt))""",
+            """CREATE TABLE IF NOT EXISTS report_template_policies (
+                template_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+                subscription_mode TEXT NOT NULL, revision INTEGER NOT NULL,
+                updated_at TEXT NOT NULL, updated_by TEXT NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS report_admin_audit (
+                audit_id TEXT PRIMARY KEY, action TEXT NOT NULL, target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL, before_summary TEXT NOT NULL,
+                after_summary TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL)""",
+            """CREATE INDEX IF NOT EXISTS report_admin_audit_created
+                ON report_admin_audit(created_at DESC)""",
         )
         with self._lock, self._connect() as db:
             for statement in statements:

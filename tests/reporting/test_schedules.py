@@ -88,3 +88,59 @@ def test_subscriptions_document_uses_readable_schedule() -> None:
     assert "每个工作日 10:00" in document.fallback_text
     assert "前一自然日" in document.fallback_text
     assert "0 10 * * 1-5" not in document.fallback_text
+
+
+def test_subscriptions_document_pairs_each_summary_with_its_numbered_action() -> None:
+    rows = [
+        ReportSubscription(
+            subscription_id="aaaaaaaaaaaaaaaa",
+            channel="feishu",
+            chat_id="chat-a",
+            user_id="ou-a",
+            connector_id="magik_cube",
+            template_id="usage_daily_brief",
+            template_version="2.0",
+            schedule="0 10 * * 1-5",
+            timezone="Asia/Shanghai",
+            report_params={
+                "tenant_query": "tenant-a",
+                "model": "Kimi-K3",
+            },
+            cron_job_id="job-a",
+            enabled=True,
+            created_at="2026-09-02T10:00:00+08:00",
+            updated_at="2026-09-02T10:00:00+08:00",
+        ),
+        ReportSubscription(
+            subscription_id="bbbbbbbbbbbbbbbb",
+            channel="feishu",
+            chat_id="chat-a",
+            user_id="ou-a",
+            connector_id="magik_cube",
+            template_id="usage_weekly_brief",
+            template_version="2.0",
+            schedule="0 9 * * 1",
+            timezone="Asia/Shanghai",
+            report_params={"all_tenants": True, "model_scope": "summary"},
+            cron_job_id="job-b",
+            enabled=False,
+            created_at="2026-09-02T10:00:00+08:00",
+            updated_at="2026-09-02T10:00:00+08:00",
+        ),
+    ]
+
+    document = subscriptions_document(rows)
+
+    assert [block.kind for block in document.blocks] == [
+        "note",
+        "markdown",
+        "actions",
+        "markdown",
+        "actions",
+    ]
+    assert document.blocks[1].data["title"] == "日报简报"
+    assert document.blocks[2].data["actions"][0]["label"] == "停用订阅 1"
+    assert document.blocks[3].data["title"] == "周报简报"
+    assert document.blocks[4].data["actions"][0]["label"] == "启用订阅 2"
+    assert "tenant-a｜Kimi-K3" in document.fallback_text
+    assert "全部客户｜汇总" in document.fallback_text

@@ -1533,13 +1533,13 @@ class FeishuChannel(BaseChannel):
 
     @staticmethod
     def _split_elements_by_table_limit(
-        elements: list[dict], max_tables: int = 1
+        elements: list[dict], max_tables: int = 1, max_elements: int = 38
     ) -> list[list[dict]]:
-        """Split card elements into groups with at most *max_tables* table elements each.
+        """Split card elements by Feishu table and total-element limits.
 
         Feishu cards have a hard limit of one table per card (API error 11310).
-        When the rendered content contains multiple markdown tables each table is
-        placed in a separate card message so every table reaches the user.
+        Grouped reports can also produce many non-table elements, so continuation
+        cards are bounded before the platform rejects an otherwise valid report.
         """
         if not elements:
             return [[]]
@@ -1547,16 +1547,25 @@ class FeishuChannel(BaseChannel):
         current: list[dict] = []
         table_count = 0
         for el in elements:
-            if el.get("tag") == "table":
-                if table_count >= max_tables:
-                    if current:
-                        groups.append(current)
-                    current = []
-                    table_count = 0
-                current.append(el)
+            is_table = el.get("tag") == "table"
+            split_for_table = is_table and table_count >= max_tables
+            split_for_size = len(current) >= max_elements
+            if current and (split_for_table or split_for_size):
+                carry: list[dict] = []
+                # Keep a table with its immediately preceding section heading.
+                if is_table and current[-1].get("tag") == "div":
+                    carry.append(current.pop())
+                while current and current[-1].get("tag") == "hr":
+                    current.pop()
+                if current:
+                    groups.append(current)
+                current = carry
+                table_count = 0
+            if el.get("tag") == "hr" and not current:
+                continue
+            current.append(el)
+            if is_table:
                 table_count += 1
-            else:
-                current.append(el)
         if current:
             groups.append(current)
         return groups or [[]]
@@ -2317,6 +2326,18 @@ class FeishuChannel(BaseChannel):
                 "params": {"action": "provider_quality_report", "period": "recent15m"},
                 "content": "生成 Cube 供应商质量报告",
             }
+        if action_id == "multi_scope_brief":
+            return {
+                "tool_name": "report_center",
+                "params": {"action": "multi_scope_brief", "period": "day", "interactive": True},
+                "content": "生成多客户多模型日报简报",
+            }
+        if action_id == "machine_tpm_report":
+            return {
+                "tool_name": "report_center",
+                "params": {"action": "machine_tpm_report", "period": "day"},
+                "content": "生成单机 TPM 峰值报表",
+            }
         if action_id == "subscription_setup:health":
             return {
                 "tool_name": "report_center",
@@ -2462,6 +2483,51 @@ class FeishuChannel(BaseChannel):
                         }
                     )
                     elements.extend(self._metric_grid(metric_items))
+            elif kind == "grouped_metrics":
+                hidden_groups: list[str] = []
+                for group in data.get("groups") or []:
+                    if not isinstance(group, dict):
+                        continue
+                    label = str(group.get("label") or "未命名客户")
+                    items = [
+                        item for item in group.get("items") or [] if isinstance(item, dict)
+                    ]
+                    has_visible_data = any(
+                        str(item.get("status") or "") != "no_usage" for item in items
+                    )
+                    if data.get("collapse_no_usage") is True and items and not has_visible_data:
+                        hidden_groups.append(label)
+                        continue
+                    lines = [f"**{label}**"]
+                    for item in items:
+                        comparisons = "  ".join(
+                            f"{value.get('label') or '对比'} {value.get('change') or '暂无可比基准'}"
+                            for value in item.get("comparisons") or []
+                            if isinstance(value, dict)
+                        )
+                        status = "  暂无用量" if item.get("status") == "no_usage" else ""
+                        lines.append(
+                            f"{item.get('label') or '未命名模型'}  {comparisons}{status}"
+                        )
+                    elements.append(
+                        {
+                            "tag": "div",
+                            "text": {"tag": "lark_md", "content": "\n".join(lines)},
+                        }
+                    )
+                    elements.append({"tag": "hr"})
+                if hidden_groups:
+                    elements.append(
+                        {
+                            "tag": "note",
+                            "elements": [
+                                {
+                                    "tag": "plain_text",
+                                    "content": f"无用量客户 {len(hidden_groups)} 个，默认收起",
+                                }
+                            ],
+                        }
+                    )
             elif kind == "table":
                 title = str(data.get("title") or "明细").strip()
                 rows = list(data.get("rows") or [])
@@ -4833,6 +4899,12 @@ class FeishuChannel(BaseChannel):
             ),
             cube_provider_quality_detail_enabled=bool(
                 getattr(reporting_config, "cube_provider_quality_detail", False)
+            ),
+            cube_multi_scope_brief_enabled=bool(
+                getattr(reporting_config, "cube_multi_scope_brief", False)
+            ),
+            cube_machine_tpm_template_enabled=bool(
+                getattr(reporting_config, "cube_machine_tpm_report", False)
             ),
             health_thresholds=getattr(reporting_config, "health_thresholds", None),
             timezone=str(getattr(reporting_config, "timezone", "Asia/Shanghai")),

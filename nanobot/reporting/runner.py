@@ -47,14 +47,20 @@ class ReportRunner:
         store: ReportStateStore,
         *,
         semantic_shadow_enabled: bool = False,
+        template_policy_enforced: bool = False,
     ) -> None:
         self._registry = registry
         self._store = store
         self._query_slots = asyncio.Semaphore(2)
         self._semantic_shadow_enabled = semantic_shadow_enabled
+        self._template_policy_enforced = template_policy_enforced
 
     def _authorize(self, intent: ReportIntent, context: ReportRunContext) -> None:
         validate_report_intent(intent)
+        if self._template_policy_enforced:
+            policy = self._store.template_policy(intent.template_id)
+            if policy is not None and not policy["enabled"]:
+                raise PermissionError("report template is disabled")
         checks = [
             ("connector", intent.connector_id),
             ("template", intent.template_id),
@@ -68,9 +74,10 @@ class ReportRunner:
             # Cross-customer reports require an explicit tenant wildcard grant.
             # A grant for one tenant must never fan out to every Cube customer.
             checks.append(("tenant", "*"))
+        checks.extend(("tenant", tenant) for tenant in intent.tenants)
         checks.extend(("model", model) for model in intent.models)
         filter_scope_keys = {
-            "tenant": ("tenant",),
+            "tenant": ("tenant", "tenants"),
             "project": ("project",),
             "endpoint": ("endpoint",),
             "provider": ("provider",),
@@ -87,6 +94,18 @@ class ReportRunner:
                 else:
                     values = ()
                 checks.extend((resource_type, item.strip()) for item in values if item.strip())
+        tenant_models = intent.filters.get("tenant_models")
+        if isinstance(tenant_models, dict):
+            for tenant, models in tenant_models.items():
+                tenant_id = str(tenant).strip()
+                if tenant_id:
+                    checks.append(("tenant", tenant_id))
+                if isinstance(models, Sequence) and not isinstance(models, (str, bytes, bytearray)):
+                    checks.extend(
+                        ("model", str(model).strip())
+                        for model in models
+                        if str(model).strip()
+                    )
         for resource_type, resource_id in checks:
             if not resource_id:
                 continue

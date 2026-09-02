@@ -73,6 +73,10 @@ Feishu 消息/卡片
 4. 用户也可以跳过首页，直接发送明确的报表问法。
 5. 卡片操作使用 opaque interaction nonce 绑定发起人和有效期，重复提交不会重复执行。
 
+简报标题会显示已验证的客户展示名和模型范围，例如“佛跳墙 Kimi-K3模型日报简报”；多个模型统一显示“全部模型”。所有用量简报隐藏时间桶、桶数量和 interval；详细分析和健康诊断仍保留必要的趋势口径。结果卡不再提供订阅按钮，已有订阅继续执行，新建和修改订阅统一进入 WebUI `Report platform`。订阅保存实时 catalog 验证后的真实 `tenantId`。
+
+订阅管理卡片按编号逐条展示计划，启停按钮位于对应订阅信息下方并携带相同编号。启停操作通过服务端 opaque action 或受控 WebUI 命令执行，完成后返回最新订阅状态；卡片不提供无确认的删除操作。
+
 ## 4. 固定报表产品定义
 
 统一使用 `Asia/Shanghai` 时区。
@@ -83,6 +87,8 @@ Feishu 消息/卡片
 | 周报简报 | 上周 vs 上上周 | Token、请求数、平均 TPM、最高 Endpoint 峰值 TPM | 简报（默认） |
 | 月报简报 | 上月 vs 前一自然月 | Token、请求数、平均 TPM、最高 Endpoint 峰值 TPM | 简报（默认） |
 | 区间简报 | 自定义窗口 vs 前一等长窗口 | Token、请求数、平均 TPM、最高 Endpoint 峰值 TPM | 简报（默认） |
+| 多客户多模型日报简报 | 昨日；同比 D-7、环比 D-1 | 按客户分组的模型 Token 百分比变化；全部模型模式过滤三个窗口均无用量的模型 | 独立简报，默认关闭 |
+| 单机折算 TPM 峰值 | 日/周/区间 | 集群、卡型、峰值时间、折算 TPM、机器/GPU 数和质量 | 明细表，默认关闭 |
 | 详细分析 | 继承对应周期和范围 | 模型/客户排行、分段趋势、Endpoint 明细和关键变化 | 矩阵卡 |
 | 完整报表 | 继承对应周期 | 保留原有详细文本报告和数据质量说明 | 文本 |
 
@@ -187,10 +193,12 @@ Feishu 消息/卡片
 
 - 查看 connector/template/renderer catalog 和加载错误。
 - 管理用户到 channel、connector、template、tenant、model 的 grants。
-- 查看最近运行、订阅状态、模板版本和报表参数摘要。
+- 管理模板启用状态、是否可订阅和 `all_authorized/allowlist/disabled` 订阅受众。
+- 分页查看订阅，并创建、修改计划、启用、停用和删除；变更同步 Cron。
+- 使用 revision 防止模板策略并发覆盖，管理操作写入不含敏感字段的审计摘要。
 - 导出不含凭据的声明式 catalog，进入 Git 审核流程。
 
-后续需要补充连接测试、catalog 同步、模板 fixture preview、canary/publish/deprecated/rollback、订阅编辑和失败重试。
+第一版只允许持有 Gateway/WebUI 管理 token 的管理员操作，模板代码、计算公式和 API 路径只读。详细使用方法见 [`report-management.md`](report-management.md)。后续仍需补充连接测试、catalog 同步、模板 fixture preview 和完整生命周期管理。
 
 ### 关键 SLI
 

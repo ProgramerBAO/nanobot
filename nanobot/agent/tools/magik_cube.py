@@ -135,6 +135,10 @@ class MagikCubeToolConfig(Base):
     cache_ttl_seconds: int = Field(default=300, ge=0, le=3600)
     # 模型进入趋势异常榜所需的最小 Token 占比。
     trend_min_share: float = Field(default=0.01, ge=0, le=1)
+    # 可选的 GPU/机器数量合理性基准。不同集群拓扑可能不同，因此默认关闭；
+    # 只有部署方明确配置后才告警，绝不据此改写 Cube 返回值。
+    machine_gpu_per_host_expected: float | None = Field(default=None, gt=0, le=64)
+    machine_gpu_per_host_tolerance: float = Field(default=0.15, ge=0, le=1)
     # 当日 Token 超过周期中位数的倍数阈值。
     spike_median_multiplier: float = Field(default=1.5, ge=1, le=10)
     # 一次交互最多查询的客户数，避免模型 fan-out 放大管理面压力。
@@ -199,6 +203,9 @@ _ADMIN_READ_ONLY_ROUTES = frozenset(
         ("POST", "analysis/provider-performance/query"),
         ("POST", "analysis/provider-daily-traffic/query"),
         ("POST", "analysis/model-machine-usage/query"),
+        # Capacity reporting consumes this aggregate trend only. The response
+        # has no machine ID and remains read-only at the client allowlist.
+        ("POST", "analysis/machine-tpm-trend/query"),
         ("POST", "providers/list"),
         ("POST", "providers/detail"),
         ("POST", "quota-changes/list"),
@@ -3396,10 +3403,15 @@ class MagikCubeDailyReportTool(Tool):
         if granularity not in {"day", "week"}:
             return ToolResult.error("Error: granularity must be day or week")
         selections = list(report_selections or [])
-        if len(selections) > self._config.interactive_max_tenants:
+        # ReportCenter is the only caller allowed to raise this hidden bound. The
+        # public Tool schema rejects unknown arguments before execute(), preserving
+        # the legacy interactive limit for LLM and direct compatibility calls.
+        trusted_limit = 20 if _kwargs.get("_trusted_selection_limit") == 20 else None
+        selection_limit = trusted_limit or self._config.interactive_max_tenants
+        if len(selections) > selection_limit:
             return ToolResult.error(
                 f"Error: report_selections supports at most "
-                f"{self._config.interactive_max_tenants} tenants"
+                f"{selection_limit} tenants"
             )
         for selection in selections:
             if not isinstance(selection, dict):

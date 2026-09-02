@@ -966,6 +966,28 @@ export interface ReportingGrant {
   created_at: string;
 }
 
+export interface ReportingTemplatePolicy extends ReportingCatalogTemplate {
+  enabled: boolean;
+  subscription_mode: "all_authorized" | "allowlist" | "disabled";
+  revision: number;
+  updated_at: string;
+}
+
+export interface ReportingSubscription {
+  subscription_id: string;
+  channel: string;
+  chat_id: string;
+  user_id: string;
+  connector_id: string;
+  template_id: string;
+  template_version: string;
+  schedule: string;
+  timezone: string;
+  enabled: boolean;
+  report_params: Record<string, unknown>;
+  updated_at: string;
+}
+
 export interface ReportingSettingsPayload {
   catalog: {
     connectors: ReportingCatalogConnector[];
@@ -974,13 +996,15 @@ export interface ReportingSettingsPayload {
   };
   policy: {
     rbac_enabled: boolean;
+    management_enabled: boolean;
     resource_types: string[];
   };
   storage: { backend: string; retention_days: number };
   onboarding_version: number;
   grants: ReportingGrant[];
   recent_runs: Array<Record<string, unknown>>;
-  subscriptions: Array<Record<string, unknown>>;
+  subscriptions: ReportingSubscription[];
+  template_policies: ReportingTemplatePolicy[];
   last_action?: { ok: boolean; action: string; path?: string };
 }
 
