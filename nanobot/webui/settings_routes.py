@@ -87,6 +87,8 @@ _CHANNEL_VALUES_HEADER = "X-Nanobot-Channel-Values"
 _CHANNEL_VALUES_HEADER_MAX_BYTES = 64 * 1024
 _API_SERVICE_VALUES_HEADER = "X-Nanobot-API-Service-Values"
 _API_SERVICE_VALUES_HEADER_MAX_BYTES = 8 * 1024
+_REPORTING_VALUES_HEADER = "X-Nanobot-Reporting-Values"
+_REPORTING_VALUES_HEADER_MAX_BYTES = 64 * 1024
 _OAUTH_CODE_HEADER = "X-Nanobot-OAuth-Code"
 _OAUTH_CODE_HEADER_MAX_BYTES = 8 * 1024
 
@@ -151,10 +153,18 @@ class WebUISettingsRouter:
         if path == "/api/settings/usage":
             return self._handle_settings_usage(request)
         if path == "/api/settings/reporting":
-            return self._handle_settings_reporting(request)
+            return await self._handle_settings_reporting(request)
+        reporting_sub_action = self._reporting_subscription_route(path, request)
+        if reporting_sub_action is not None:
+            action, subscription_id = reporting_sub_action
+            return await self._handle_settings_reporting(
+                request,
+                action,
+                subscription_id=subscription_id,
+            )
         if path.startswith("/api/settings/reporting/"):
             action = path.removeprefix("/api/settings/reporting/").strip("/")
-            return self._handle_settings_reporting(request, action)
+            return await self._handle_settings_reporting(request, action)
         if path == "/api/settings/update":
             return self._handle_settings_update(request)
         if path == "/api/settings/model-configurations/create":
@@ -239,6 +249,35 @@ class WebUISettingsRouter:
 
     def _query(self, request: WsRequest) -> QueryParams:
         return self._parse_query(request.path)
+
+    @staticmethod
+    def _reporting_subscription_route(
+        path: str, request: WsRequest
+    ) -> tuple[str | None, str] | None:
+        """Map REST-shaped subscription paths to the legacy action protocol."""
+
+        prefix = "/api/settings/reporting/"
+        if not path.startswith(prefix):
+            return None
+        suffix = path.removeprefix(prefix).strip("/")
+        method = str(getattr(request, "method", "GET") or "GET").upper()
+        if suffix == "options":
+            return ("subscription_options", "")
+        if suffix == "subscriptions/preview":
+            return ("subscription_preview", "")
+        if suffix == "subscriptions":
+            return ("subscription_create_guided", "") if method == "POST" else (None, "")
+        parts = suffix.split("/")
+        if len(parts) not in {2, 3} or parts[0] != "subscriptions" or not parts[1]:
+            return None
+        subscription_id = parts[1][:64]
+        if len(parts) == 2 and method == "PATCH":
+            return ("subscription_update", subscription_id)
+        if len(parts) == 2 and method == "DELETE":
+            return ("subscription_delete", subscription_id)
+        if len(parts) == 3 and method == "POST" and parts[2] in {"enable", "disable"}:
+            return (f"subscription_{parts[2]}", subscription_id)
+        return None
 
     def _authorized(self, request: WsRequest) -> bool:
         return self._check_api_token(request)
@@ -340,13 +379,43 @@ class WebUISettingsRouter:
             return self._unauthorized()
         return self._json_response(settings_usage_payload())
 
-    def _handle_settings_reporting(
-        self, request: WsRequest, action: str | None = None
+    def _reporting_query(self, request: WsRequest) -> QueryParams:
+        """Merge the bounded private guided-form header into query context."""
+
+        query = dict(self._query(request))
+        raw = case_insensitive_header(request.headers, _REPORTING_VALUES_HEADER)
+        if not raw:
+            return query
+        if len(raw.encode("utf-8")) > _REPORTING_VALUES_HEADER_MAX_BYTES:
+            raise ReportingSettingsError("structured reporting values are too large")
+        decoded = unquote(raw)
+        try:
+            values = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise ReportingSettingsError(
+                "structured reporting values must be valid JSON"
+            ) from exc
+        if not isinstance(values, dict):
+            raise ReportingSettingsError("structured reporting values must be an object")
+        # Keep the raw object in one private field. The reporting API applies
+        # its own field allowlist before any value reaches Cron or SQLite.
+        query["__reporting_values"] = [json.dumps(values, ensure_ascii=False)]
+        return query
+
+    async def _handle_settings_reporting(
+        self,
+        request: WsRequest,
+        action: str | None = None,
+        *,
+        subscription_id: str = "",
     ) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = reporting_settings_action(action, self._query(request))
+            query = self._reporting_query(request)
+            if subscription_id:
+                query["subscription_id"] = [subscription_id]
+            payload = await asyncio.to_thread(reporting_settings_action, action, query)
         except ReportingSettingsError as exc:
             return self._error_response(exc.status, exc.message)
         except Exception:

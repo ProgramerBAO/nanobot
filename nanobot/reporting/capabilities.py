@@ -326,6 +326,7 @@ def examples_document(
     admin_skill_enabled: bool = False,
     multi_scope_enabled: bool = False,
     machine_tpm_enabled: bool = False,
+    subscription_nlu_enabled: bool = False,
 ) -> ReportDocument:
     examples = ["我要周报", "我要日报", "健康报告", "查看我的订阅", "查看最近报表"]
     if authorized:
@@ -345,6 +346,13 @@ def examples_document(
         examples.insert(0, "多客户多模型日报简报")
     if machine_tpm_enabled:
         examples.insert(0, "Kimi-K3 单机 TPM 峰值")
+    if subscription_nlu_enabled:
+        examples.extend(
+            [
+                "每天上午十点发送阳春面、豆汁、佛跳墙全部模型的多客户日报简报",
+                "引用日报卡片并回复：工作日上午十点发送给我",
+            ]
+        )
     if authorized and admin_skill_enabled:
         examples.extend(
             [

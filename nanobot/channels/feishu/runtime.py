@@ -25,6 +25,7 @@ from rich.text import Text
 from nanobot.bus.events import (
     INBOUND_META_DIRECT_TOOL,
     OUTBOUND_META_AGENT_UI,
+    OUTBOUND_META_REPORT_REFERENCE,
     OutboundMessage,
 )
 from nanobot.bus.outbound_events import ProgressEvent
@@ -3606,8 +3607,15 @@ class FeishuChannel(BaseChannel):
             self.logger.exception("error fetching sheet {}: {}", sheet_token, e)
             return "", f"exception: {e}"
 
-    def _reply_message_sync(self, parent_message_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> bool:
-        """Reply to an existing Feishu message using the Reply API (synchronous).
+    def _reply_message_result_sync(
+        self,
+        parent_message_id: str,
+        msg_type: str,
+        content: str,
+        *,
+        reply_in_thread: bool = False,
+    ) -> tuple[bool, str | None]:
+        """Reply once and return success plus Feishu's optional message ID.
 
         Args:
             reply_in_thread: If True, reply as a thread/topic message
@@ -3634,26 +3642,81 @@ class FeishuChannel(BaseChannel):
                     response.msg,
                     response.get_log_id(),
                 )
-                if msg_type == "interactive":
-                    return self._reply_interactive_fallback_sync(
-                        parent_message_id,
-                        content,
-                        reply_in_thread=reply_in_thread,
-                    )
-                return False
+                return False, None
             sent_message_id = getattr(getattr(response, "data", None), "message_id", None)
             self._remember_bot_message(sent_message_id)
             self.logger.debug("reply sent to message {}", parent_message_id)
-            return True
+            return True, sent_message_id if isinstance(sent_message_id, str) else None
         except Exception:
             self.logger.exception("Error replying to message {}", parent_message_id)
-            if msg_type == "interactive":
-                return self._reply_interactive_fallback_sync(
-                    parent_message_id,
-                    content,
-                    reply_in_thread=reply_in_thread,
-                )
-            return False
+            return False, None
+
+    def _reply_message_sync(
+        self,
+        parent_message_id: str,
+        msg_type: str,
+        content: str,
+        *,
+        reply_in_thread: bool = False,
+    ) -> bool:
+        """Reply to an existing message, with text fallback for rejected cards."""
+
+        succeeded, _message_id = self._reply_message_result_sync(
+            parent_message_id,
+            msg_type,
+            content,
+            reply_in_thread=reply_in_thread,
+        )
+        if succeeded:
+            return True
+        if msg_type == "interactive":
+            return self._reply_interactive_fallback_sync(
+                parent_message_id,
+                content,
+                reply_in_thread=reply_in_thread,
+            )
+        return False
+
+    def _save_report_message_reference_sync(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Bind a delivered Feishu card to a bounded server-owned report scope."""
+
+        try:
+            from nanobot.reporting import configured_report_state_store
+            from nanobot.reporting.store import ReportMessageReference
+
+            now = datetime.now(UTC)
+            expires_at = str(payload.get("expires_at") or "")
+            if not expires_at:
+                self.logger.warning("Report reference omitted expires_at; mapping was not saved")
+                return
+            reference = ReportMessageReference(
+                channel=self.name,
+                chat_id=chat_id,
+                message_id=message_id,
+                run_id=str(payload.get("run_id") or ""),
+                document_id=str(payload.get("document_id") or ""),
+                connector_id=str(payload.get("connector_id") or ""),
+                template_id=str(payload.get("template_id") or ""),
+                period=str(payload.get("period") or ""),
+                scope=dict(payload.get("scope") or {}),
+                created_at=now.isoformat(),
+                expires_at=expires_at,
+            )
+            configured_report_state_store().save_message_reference(reference)
+        except Exception as exc:
+            # Delivery remains successful when local reference persistence fails;
+            # quoting that card will fail closed and direct users to the selector.
+            self.logger.warning(
+                "Failed to save Feishu report reference: message_id={} error_type={}",
+                message_id,
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _interactive_content_to_text(content: str) -> str | None:
@@ -4191,10 +4254,11 @@ class FeishuChannel(BaseChannel):
             )
             in_topic = bool(msg.metadata.get("thread_id"))
             mention_open_id = self._thread_mention_open_id(msg.metadata)
+            report_reference = msg.metadata.get(OUTBOUND_META_REPORT_REFERENCE)
 
             first_send = True  # tracks whether the reply has already been used
 
-            def _do_send(m_type: str, content: str) -> None:
+            def _do_send(m_type: str, content: str) -> str | None:
                 """Send via reply (first message) or create (subsequent).
 
                 Group chats only set reply_in_thread=True when
@@ -4202,24 +4266,59 @@ class FeishuChannel(BaseChannel):
                 existing topic must not create a new topic.
                 """
                 nonlocal first_send
+                capture_message_id = m_type == "interactive" and isinstance(
+                    report_reference, dict
+                )
                 if reply_message_id:
                     # If we're in a topic, always use reply to stay in the topic
                     if in_topic:
-                        ok = self._reply_message_sync(
-                            reply_message_id, m_type, content,
-                            reply_in_thread=self._should_use_reply_in_thread(msg.metadata),
-                        )
-                        if ok:
-                            return
+                        if capture_message_id:
+                            succeeded, message_id = self._reply_message_result_sync(
+                                reply_message_id,
+                                m_type,
+                                content,
+                                reply_in_thread=self._should_use_reply_in_thread(
+                                    msg.metadata
+                                ),
+                            )
+                            if succeeded:
+                                return message_id
+                        else:
+                            ok = self._reply_message_sync(
+                                reply_message_id,
+                                m_type,
+                                content,
+                                reply_in_thread=self._should_use_reply_in_thread(
+                                    msg.metadata
+                                ),
+                            )
+                            if ok:
+                                return None
                     elif first_send:
                         # If we're not in a topic but replying to message, only first uses reply
                         first_send = False
-                        ok = self._reply_message_sync(
-                            reply_message_id, m_type, content,
-                            reply_in_thread=self._should_use_reply_in_thread(msg.metadata),
-                        )
-                        if ok:
-                            return
+                        if capture_message_id:
+                            succeeded, message_id = self._reply_message_result_sync(
+                                reply_message_id,
+                                m_type,
+                                content,
+                                reply_in_thread=self._should_use_reply_in_thread(
+                                    msg.metadata
+                                ),
+                            )
+                            if succeeded:
+                                return message_id
+                        else:
+                            ok = self._reply_message_sync(
+                                reply_message_id,
+                                m_type,
+                                content,
+                                reply_in_thread=self._should_use_reply_in_thread(
+                                    msg.metadata
+                                ),
+                            )
+                            if ok:
+                                return None
                     # Fall back to regular send if reply fails
                 message_id = self._send_message_sync(
                     receive_id_type,
@@ -4229,6 +4328,7 @@ class FeishuChannel(BaseChannel):
                 )
                 if not message_id:
                     raise RuntimeError(f"Feishu {m_type} message was not delivered")
+                return message_id
 
             for file_path in msg.media:
                 if not os.path.isfile(file_path):
@@ -4267,12 +4367,23 @@ class FeishuChannel(BaseChannel):
             structured_cards = self._build_agent_ui_cards(agent_ui, msg)
             if structured_cards:
                 for card in structured_cards:
-                    await loop.run_in_executor(
+                    sent_message_id = await loop.run_in_executor(
                         None,
                         _do_send,
                         "interactive",
                         json.dumps(card, ensure_ascii=False),
                     )
+                    if sent_message_id and isinstance(report_reference, dict):
+                        await loop.run_in_executor(
+                            None,
+                            lambda message_id=sent_message_id: (
+                                self._save_report_message_reference_sync(
+                                    chat_id=msg.chat_id,
+                                    message_id=message_id,
+                                    payload=report_reference,
+                                )
+                            ),
+                        )
                 return
 
             if msg.content and msg.content.strip():

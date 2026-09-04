@@ -66,6 +66,11 @@ from nanobot.reporting.store import (
     create_report_state_store,
     get_report_state_store,
 )
+from nanobot.reporting.subscriptions import (
+    CompiledSubscriptionForm,
+    ReportSubscriptionService,
+    SubscriptionServiceError,
+)
 
 __all__ = [
     "DataQuality",
@@ -123,4 +128,7 @@ __all__ = [
     "configured_report_state_store",
     "create_report_state_store",
     "get_report_state_store",
+    "CompiledSubscriptionForm",
+    "ReportSubscriptionService",
+    "SubscriptionServiceError",
 ]

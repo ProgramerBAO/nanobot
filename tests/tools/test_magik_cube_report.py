@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+import nanobot.agent.tools.magik_cube as magik_cube_module
 from nanobot.agent.tools.magik_cube import (
     MagikCubeApiError,
     MagikCubeClient,
@@ -1199,6 +1200,47 @@ async def test_scope_selector_uses_only_cube_catalog_entries(tmp_path: Path) -> 
     options = scope.metadata[OUTBOUND_META_AGENT_UI]["tenant_options"]
 
     assert options == [{"value": "t1", "label": "甲方别名（甲客户）", "selected": False}]
+
+
+@pytest.mark.asyncio
+async def test_management_catalog_can_exceed_report_selection_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A large live catalog must not be rejected as a >20-tenant report."""
+
+    class _CatalogClient:
+        async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+            assert method == "GET"
+            assert path == "tenants"
+            return {
+                "list": [
+                    {"tenantId": f"tenant-{index}", "tenantName": f"客户-{index}"}
+                    for index in range(21)
+                ],
+                "total": 21,
+            }
+
+    class _ClientContext:
+        async def __aenter__(self) -> _CatalogClient:
+            return _CatalogClient()
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(
+        magik_cube_module,
+        "MagikCubeClient",
+        lambda *_args, **_kwargs: _ClientContext(),
+    )
+    tool = MagikCubeDailyReportTool(
+        config=MagikCubeToolConfig(base_url="https://cube.example"),
+        snapshot_path=tmp_path / "proxy.json",
+    )
+
+    catalog = await tool.list_tenant_catalog()
+
+    assert len(catalog) == 21
+    assert catalog[-1] == {"tenant_id": "tenant-20", "display_name": "客户-20"}
 
 
 def test_direct_route_uses_cards_only_to_fill_missing_slots(tmp_path: Path) -> None:

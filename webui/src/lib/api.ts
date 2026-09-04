@@ -57,6 +57,7 @@ const CHANNEL_VALUES_HEADER = "X-Nanobot-Channel-Values";
 const API_SERVICE_VALUES_HEADER = "X-Nanobot-API-Service-Values";
 const OAUTH_CODE_HEADER = "X-Nanobot-OAuth-Code";
 const PROVIDER_VALUES_HEADER = "X-Nanobot-Provider-Values";
+const REPORTING_VALUES_HEADER = "X-Nanobot-Reporting-Values";
 
 export class ApiError extends Error {
   status: number;
@@ -120,6 +121,10 @@ function mcpValuesHeader(values: Record<string, unknown>): HeadersInit | undefin
 
 function automationValuesHeader(values: AutomationUpdatePayload): HeadersInit {
   return { "X-Nanobot-Automation-Values": encodeURIComponent(JSON.stringify(values)) };
+}
+
+function reportingValuesHeader(values: Record<string, unknown>): HeadersInit {
+  return { [REPORTING_VALUES_HEADER]: encodeURIComponent(JSON.stringify(values)) };
 }
 
 function splitKey(key: string): { channel: string; chatId: string } {
@@ -647,14 +652,51 @@ export async function runReportingSettingsAction(
     | "subscription_enable"
     | "subscription_disable"
     | "subscription_schedule"
-    | "subscription_delete",
-  values: Record<string, string>,
+    | "subscription_delete"
+    | "subscription_preview"
+    | "subscription_create_guided"
+    | "subscription_update"
+    | "subscription_options",
+  values: Record<string, unknown>,
   base: string = "",
 ): Promise<ReportingSettingsPayload> {
-  const query = new URLSearchParams(values);
+  const query = new URLSearchParams();
+  const guidedActions = new Set([
+    "subscription_preview",
+    "subscription_create_guided",
+    "subscription_update",
+    "subscription_enable",
+    "subscription_disable",
+    "subscription_delete",
+  ]);
+  const useStructuredHeader = guidedActions.has(action)
+    || Object.values(values).some((value) => Array.isArray(value) || typeof value === "object");
+  if (!useStructuredHeader) {
+    Object.entries(values).forEach(([key, value]) => {
+      if (value === null || value === undefined) return;
+      query.set(key, String(value));
+    });
+  }
+  const init: RequestInit | undefined = useStructuredHeader
+    ? { headers: reportingValuesHeader(values) }
+    : undefined;
+  const suffix = query.toString() ? `?${query}` : "";
   return request<ReportingSettingsPayload>(
-    `${base}/api/settings/reporting/${action}?${query}`,
+    `${base}/api/settings/reporting/${action}${suffix}`,
     token,
+    init,
+  );
+}
+
+export async function fetchReportingSubscriptionOptions(
+  token: string,
+  base: string = "",
+): Promise<ReportingSettingsPayload> {
+  return request<ReportingSettingsPayload>(
+    `${base}/api/settings/reporting/options`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
   );
 }
 

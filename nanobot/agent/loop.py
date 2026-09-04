@@ -26,6 +26,9 @@ from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
 from nanobot.agent.memory import Consolidator
 from nanobot.agent.model_runtime import ModelRuntimeResolver
+from nanobot.agent.reporting.cube_subscription_intent import (
+    is_subscription_intent_candidate,
+)
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.base import ToolResult
@@ -1544,24 +1547,82 @@ class AgentLoop:
         direct_raw = metadata.get("direct_request_text")
         if not isinstance(direct_raw, str) or not direct_raw.strip():
             direct_raw = raw
-        # Fixed Cube requests should use the unified report runner. Keep the
-        # legacy matcher available for compatibility callers and old tests.
+        # Fixed Cube requests should use the unified report runner. Subscription
+        # candidates are handled before the legacy matcher even when the new
+        # runner is disabled: otherwise a long natural-language schedule can be
+        # misclassified as a one-tenant daily report and silently lose scope.
         if result is None and direct is None:
             report_center = self.tools.get("report_center")
-            if report_center is not None and getattr(
-                report_center, "fixed_cube_reports_enabled", False
-            ):
-                report_params = report_center.match_direct_request(direct_raw)
+            if report_center is not None:
+                fixed_cube_reports = bool(
+                    getattr(report_center, "fixed_cube_reports_enabled", False)
+                )
+                parent_id = metadata.get("parent_id")
+                report_params = None
+                subscription_preempted = False
+                # Keep the lexical guard independent from feature-flag state.
+                # A disabled classifier must fail closed instead of allowing a
+                # long scheduled request to fall through to a one-tenant report.
+                subscription_signal = is_subscription_intent_candidate(direct_raw)
+                classifier_enabled = bool(
+                    getattr(report_center, "is_direct_intent_candidate", lambda _text: False)(
+                        direct_raw
+                    )
+                )
+                is_subscription_candidate = subscription_signal or classifier_enabled
+                if isinstance(parent_id, str) and parent_id and is_subscription_candidate:
+                    # A quoted report is resolved from a server-side message
+                    # reference. The model receives only a safe template/period
+                    # summary and cannot infer scope from rendered card text.
+                    classify_reference = getattr(
+                        report_center, "classify_referenced_subscription", None
+                    )
+                    if callable(classify_reference):
+                        report_params = await classify_reference(
+                            direct_raw,
+                            self.runtime_for_session(ctx.session),
+                            channel=ctx.msg.channel,
+                            chat_id=ctx.msg.chat_id,
+                            reference_message_id=parent_id,
+                        )
+                    # A quoted subscription message is handled exclusively by
+                    # the reference resolver. Do not reinterpret its text as a
+                    # new ordinary report if the reference is missing/expired.
+                    if report_params is None:
+                        report_params = {
+                            "action": "subscription_reference_missing",
+                            "reference_message_id": parent_id,
+                        }
+                    subscription_preempted = True
+                elif is_subscription_candidate:
+                    classify_subscription = getattr(
+                        report_center, "classify_direct_request", None
+                    )
+                    if classifier_enabled and callable(classify_subscription):
+                        report_params = await classify_subscription(
+                            direct_raw,
+                            self.runtime_for_session(ctx.session),
+                        )
+                    if report_params is None:
+                        fallback = getattr(report_center, "fallback_direct_request", None)
+                        report_params = fallback(direct_raw) if callable(fallback) else None
+                    if report_params is None:
+                        # Fail closed instead of allowing the old one-tenant
+                        # matcher to create a misleading report.
+                        report_params = {"action": "subscription_reference_missing"}
+                    subscription_preempted = True
+                if report_params is None and fixed_cube_reports and not subscription_preempted:
+                    report_params = report_center.match_direct_request(direct_raw)
                 if report_params is not None:
                     direct = ("report_center", report_params)
-            elif report_center is not None:
-                # In minimal/legacy deployments the center has no real Cube
-                # connector; preserve an explicitly registered compatibility Tool.
-                legacy_tool = self.tools.get("magik_cube_daily_report")
-                if legacy_tool is not None:
-                    legacy_params = legacy_tool.match_direct_request(direct_raw)
-                    if legacy_params is not None:
-                        direct = ("magik_cube_daily_report", legacy_params)
+                elif not fixed_cube_reports and not subscription_preempted:
+                    # In minimal/legacy deployments the center has no real Cube
+                    # connector; preserve an explicitly registered compatibility Tool.
+                    legacy_tool = self.tools.get("magik_cube_daily_report")
+                    if legacy_tool is not None:
+                        legacy_params = legacy_tool.match_direct_request(direct_raw)
+                        if legacy_params is not None:
+                            direct = ("magik_cube_daily_report", legacy_params)
         if result is None and direct is None:
             direct = await self.tools.resolve_direct_request(
                 direct_raw,

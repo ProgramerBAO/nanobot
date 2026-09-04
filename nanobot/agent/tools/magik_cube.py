@@ -21,6 +21,9 @@ import yaml
 from loguru import logger
 from pydantic import Field
 
+from nanobot.agent.reporting.cube_subscription_intent import (
+    is_subscription_intent_candidate,
+)
 from nanobot.agent.reporting.magik_cube_intent import (
     IntentCandidateStore,
     classify_report_intent,
@@ -175,6 +178,7 @@ class MagikCubeTenantResolutionError(MagikCubeApiError):
 # 密码登录唯一允许的路径。登录是唯一一个非 api_prefix 下的 POST 请求。
 _PASSWORD_LOGIN_PATH = "token-api/v1/accounts/login/with-password"
 _REPORT_TIMEZONE = "Asia/Shanghai"
+_MAX_TENANT_CATALOG_ITEMS = 5_000
 _CONTEXT_TENANT_REFERENCE_RE = re.compile(
     r"(?:这个|这一个|该|上述|上面(?:提到)?的|刚才(?:提到)?的|前面(?:提到)?的)"
     r"\s*(?:租户|客户|用户)|(?<![A-Za-z0-9_])它(?![A-Za-z0-9_])"
@@ -3036,10 +3040,263 @@ class MagikCubeDailyReportTool(Tool):
 
         return True
 
+    async def resolve_tenant_queries(
+        self, queries: list[str]
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """Resolve user-facing tenant names against the live Cube catalog.
+
+        Returns uniquely matched tenants and unresolved entries without exposing
+        catalog records outside the requested names. Callers may offer a partial
+        confirmation, but must never silently drop unresolved tenants.
+        """
+
+        unique_queries = list(
+            dict.fromkeys(query.strip() for query in queries if query.strip())
+        )
+        if len(unique_queries) > 20:
+            raise ValueError("tenant resolution supports at most 20 queries")
+        resolved: list[dict[str, str]] = []
+        unresolved: list[dict[str, str]] = []
+        async with MagikCubeClient(self._config) as client:
+            reporter = MagikCubeReporter(
+                client,
+                self._config,
+                self._snapshot_path,
+                self._timezone,
+                self._cache,
+                self._reporting_actions_enabled,
+            )
+            for query in unique_queries:
+                matches = await reporter._list_matching_tenants(query)
+                if len(matches) != 1:
+                    unresolved.append(
+                        {
+                            "query": query,
+                            "reason": "匹配到多个客户" if matches else "未找到客户",
+                        }
+                    )
+                    continue
+                tenant = matches[0]
+                display_name = next(
+                    (
+                        alias
+                        for alias, tenant_id in self._config.tenant_mappings.items()
+                        if tenant_id == tenant.tenant_id
+                    ),
+                    tenant.name,
+                )
+                resolved.append(
+                    {
+                        "query": query,
+                        "tenant_id": tenant.tenant_id,
+                        "display_name": display_name,
+                    }
+                )
+        return resolved, unresolved
+
+    async def list_tenant_catalog(
+        self, *, limit: int = _MAX_TENANT_CATALOG_ITEMS
+    ) -> list[dict[str, str]]:
+        """Return a bounded live tenant catalog for guided management forms.
+
+        The caller stores only stable tenant IDs and display labels. It must
+        still perform RBAC before using this catalog to execute a report.  The
+        catalog bound is intentionally independent from the per-report tenant
+        fan-out limit: a management form may need to display hundreds of
+        selectable customers while a single report remains capped at 20.
+        """
+
+        if not 1 <= limit <= _MAX_TENANT_CATALOG_ITEMS:
+            raise ValueError(
+                "tenant catalog limit must be between 1 and "
+                f"{_MAX_TENANT_CATALOG_ITEMS}"
+            )
+        async with MagikCubeClient(self._config) as client:
+            reporter = MagikCubeReporter(
+                client,
+                self._config,
+                self._snapshot_path,
+                self._timezone,
+                self._cache,
+                self._reporting_actions_enabled,
+            )
+            tenants = await reporter._list_all_tenants()
+        if len(tenants) > limit:
+            raise ValueError(f"Cube 客户数量超过 {limit} 个，请改为指定客户范围")
+        aliases_by_id = {
+            tenant_id: alias
+            for alias, tenant_id in self._config.tenant_mappings.items()
+        }
+        return [
+            {
+                "tenant_id": tenant.tenant_id,
+                "display_name": aliases_by_id.get(tenant.tenant_id, tenant.name),
+            }
+            for tenant in tenants[:limit]
+        ]
+
+    async def find_tenant_mentions(
+        self, text: str, *, limit: int = 20
+    ) -> list[dict[str, str]]:
+        """Find explicitly named tenants in a live catalog without truncating matches.
+
+        The selector intentionally caps the displayed catalog at ``limit``.
+        Natural-language subscription input is different: a named customer may
+        be beyond that first page, so the resolver scans the already bounded
+        Cube catalog pagination and returns only labels actually present in the
+        input.  No arbitrary text is promoted to a tenant identity.
+        """
+
+        if not 1 <= limit <= 20:
+            raise ValueError("tenant mention limit must be between 1 and 20")
+        if len(text) > 2_000:
+            raise ValueError("tenant mention text is too long")
+        async with MagikCubeClient(self._config) as client:
+            reporter = MagikCubeReporter(
+                client,
+                self._config,
+                self._snapshot_path,
+                self._timezone,
+                self._cache,
+                self._reporting_actions_enabled,
+            )
+            tenants = await reporter._list_all_tenants()
+        aliases_by_id = {
+            str(tenant_id): str(alias).strip()
+            for alias, tenant_id in self._config.tenant_mappings.items()
+            if str(alias).strip() and str(tenant_id).strip()
+        }
+        folded = text.casefold()
+        matches: list[tuple[int, int, _Tenant, str]] = []
+        for tenant in tenants:
+            labels = [
+                aliases_by_id.get(tenant.tenant_id, ""),
+                tenant.name,
+                tenant.tenant_id,
+                *tenant.tags,
+            ]
+            occurrences: list[tuple[int, int, str]] = []
+            for label in dict.fromkeys(str(item).strip() for item in labels if str(item).strip()):
+                start = folded.find(label.casefold())
+                if start >= 0:
+                    occurrences.append((start, -len(label), label))
+            if occurrences:
+                start, negative_length, label = min(occurrences)
+                matches.append((start, negative_length, tenant, label))
+        matches.sort(key=lambda item: (item[0], item[1], item[2].tenant_id))
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for _start, _negative_length, tenant, label in matches:
+            if tenant.tenant_id in seen:
+                continue
+            seen.add(tenant.tenant_id)
+            result.append(
+                {
+                    "tenant_id": tenant.tenant_id,
+                    "display_name": aliases_by_id.get(tenant.tenant_id, tenant.name),
+                    "matched_label": label,
+                }
+            )
+            if len(result) >= limit:
+                break
+        return result
+
+    async def resolve_models_for_tenants(
+        self,
+        tenant_ids: list[str],
+        model_queries: list[str],
+    ) -> tuple[dict[str, list[str]], list[dict[str, str]]]:
+        """Validate explicitly requested models against each live tenant catalog."""
+
+        unique_tenants = list(
+            dict.fromkeys(item.strip() for item in tenant_ids if item.strip())
+        )
+        unique_models = list(
+            dict.fromkeys(item.strip() for item in model_queries if item.strip())
+        )
+        if len(unique_tenants) > 20 or len(unique_models) > 20:
+            raise ValueError("model resolution supports at most 20 tenants and 20 models")
+        resolved: dict[str, list[str]] = {}
+        unresolved: list[dict[str, str]] = []
+        async with MagikCubeClient(self._config) as client:
+            reporter = MagikCubeReporter(
+                client,
+                self._config,
+                self._snapshot_path,
+                self._timezone,
+                self._cache,
+                self._reporting_actions_enabled,
+            )
+            for tenant_id in unique_tenants:
+                tenant = await reporter._require_single_tenant(tenant_id)
+                available = await reporter._list_tenant_models(tenant)
+                by_name = {item.casefold(): item for item in available}
+                matched: list[str] = []
+                for query in unique_models:
+                    canonical = _resolve_model_alias(query, self._config.model_aliases)
+                    actual = by_name.get(canonical.casefold())
+                    if actual is None:
+                        unresolved.append(
+                            {
+                                "tenant_id": tenant_id,
+                                "model": query,
+                                "reason": "该客户实时模型目录中不存在此模型",
+                            }
+                        )
+                        continue
+                    matched.append(actual)
+                resolved[tenant_id] = list(dict.fromkeys(matched))
+        return resolved, unresolved
+
+    async def list_models_for_tenants(
+        self, tenant_ids: list[str]
+    ) -> dict[str, list[str]]:
+        """Load the current model catalog for each tenant without opening a UI.
+
+        Scheduled reports cannot depend on the interactive selector's
+        ``agent_ui`` payload: Cron has no user interface to complete a second
+        selection step.  This bounded adapter therefore returns only the
+        allowlisted model names needed to expand an ``all models`` scope.  An
+        empty catalog is treated as an error by the caller because it is not
+        distinguishable from a failed catalog request at this boundary.
+        """
+
+        unique_tenants = list(
+            dict.fromkeys(item.strip() for item in tenant_ids if item.strip())
+        )
+        if not unique_tenants:
+            raise ValueError("at least one tenant is required for model discovery")
+        if len(unique_tenants) > 20:
+            raise ValueError("model discovery supports at most 20 tenants")
+        result: dict[str, list[str]] = {}
+        async with MagikCubeClient(self._config) as client:
+            reporter = MagikCubeReporter(
+                client,
+                self._config,
+                self._snapshot_path,
+                self._timezone,
+                self._cache,
+                self._reporting_actions_enabled,
+            )
+            for tenant_id in unique_tenants:
+                tenant = await reporter._require_single_tenant(tenant_id)
+                models = await reporter._list_tenant_models(tenant)
+                if not models:
+                    raise MagikCubeApiError(
+                        f"Cube model catalog is empty for tenant {tenant_id}",
+                        failure_code="upstream_failed",
+                    )
+                result[tenant_id] = models
+        return result
+
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
         """把明确的中文用量问题直接路由为结构化参数，绕过一次 LLM tool 选择。"""
 
         raw = text.strip()
+        # ReportCenter owns subscription parsing. Returning a usage report here
+        # would silently discard customers from a natural-language schedule.
+        if is_subscription_intent_candidate(raw):
+            return None
         if _CONTEXT_TENANT_REFERENCE_RE.search(raw):
             return None
         # 原因解释和业务建议需要 LLM；让 Agent 调用一次范围 Tool 后只解释确定性摘要。
@@ -3321,6 +3578,11 @@ class MagikCubeDailyReportTool(Tool):
         return (
             self._config.intent_fallback_enabled
             and not _CONTEXT_TENANT_REFERENCE_RE.search(text)
+            # Subscription language belongs to ReportCenter.  Prevent the
+            # legacy semantic fallback from turning a multi-customer schedule
+            # into a narrowed daily-report intent when the new classifier is
+            # disabled or unavailable.
+            and not is_subscription_intent_candidate(text)
             and is_report_intent_candidate(text)
         )
 

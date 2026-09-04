@@ -15,6 +15,11 @@ OUTBOUND_META_AGENT_UI = "_agent_ui"
 # Internal report-delivery state. Channels must never render this metadata.
 OUTBOUND_META_REPORT_DELIVERY = "_report_delivery"
 
+# Internal-only description of a report's subscribable scope. Channel adapters
+# may bind this payload to the delivered message ID, but must never render it or
+# trust it without a same-chat lookup and a fresh authorization check.
+OUTBOUND_META_REPORT_REFERENCE = "_report_reference"
+
 # Trusted in-process channels may use this to resume a validated, read-only
 # tool interaction without routing the callback payload through the LLM.
 INBOUND_META_DIRECT_TOOL = "_direct_tool_request"

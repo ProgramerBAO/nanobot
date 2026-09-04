@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from datetime import date
+import sqlite3
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
+from nanobot.agent.tools.magik_cube import MagikCubeToolConfig
+from nanobot.cron.service import CronService
 from nanobot.reporting import (
     ReportDataset,
     ReportDocument,
@@ -27,6 +32,8 @@ from nanobot.reporting.registry import (
     TemplatePlugin,
 )
 from nanobot.reporting.renderer import document_to_markdown
+from nanobot.reporting.store import ReportMessageReference
+from nanobot.reporting.subscriptions import ReportSubscriptionService, SubscriptionServiceError
 from nanobot.reporting.templates import (
     load_builtin_template_specs,
     parse_template_spec,
@@ -737,3 +744,233 @@ async def test_report_runner_persists_safe_context_only(tmp_path) -> None:
     ]
     assert "raw_response" not in run["request"]
     assert "must-not-persist" not in str(run)
+
+
+def test_report_message_reference_is_chat_bound_and_expires(tmp_path) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    now = datetime.now(UTC)
+    reference = ReportMessageReference(
+        channel="feishu",
+        chat_id="chat-a",
+        message_id="om-report-1",
+        run_id="run-1",
+        document_id="usage_customer_model_daily_brief",
+        connector_id="magik_cube",
+        template_id="usage_customer_model_daily_brief",
+        period="day",
+        scope={
+            "tenants": ["tenant-a"],
+            "model_scope": "all",
+            "models": [],
+        },
+        created_at=now.isoformat(),
+        expires_at=(now + timedelta(days=1)).isoformat(),
+    )
+
+    store.save_message_reference(reference)
+
+    assert store.message_reference(
+        channel="feishu", chat_id="chat-a", message_id="om-report-1"
+    ) == reference
+    assert (
+        store.message_reference(
+            channel="feishu", chat_id="chat-b", message_id="om-report-1"
+        )
+        is None
+    )
+
+    store.save_message_reference(
+        replace(
+            reference,
+            message_id="om-expired",
+            expires_at=(now - timedelta(seconds=1)).isoformat(),
+        )
+    )
+    assert (
+        store.message_reference(
+            channel="feishu", chat_id="chat-a", message_id="om-expired"
+        )
+        is None
+    )
+
+
+def test_guided_subscription_resolves_display_alias_to_live_cube_id(tmp_path) -> None:
+    """The guided control plane stores the live Cube ID, never a synthetic alias."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    cube_config = MagikCubeToolConfig(
+        enable=True,
+        base_url="https://cube.example.internal",
+        access_token="fixture-token",
+    )
+    registry = build_default_registry(
+        discover_external=False,
+        magik_enabled=True,
+        cube_config=cube_config,
+        cube_multi_scope_brief_enabled=True,
+    )
+    config = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(
+                report_management_v1=False,
+                timezone="Asia/Shanghai",
+            )
+        ),
+        agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+    )
+
+    def resolve_tenants(values: list[str]):
+        assert values == ["佛跳墙"]
+        return (
+            [{"query": "佛跳墙", "tenant_id": "tenant-fo", "display_name": "佛跳墙"}],
+            [],
+        )
+
+    service = ReportSubscriptionService(
+        config=config,
+        store=store,
+        registry=registry,
+        cron=CronService(tmp_path / "cron" / "jobs.json"),
+        tenant_resolver=resolve_tenants,
+    )
+    compiled = service.compile_form(
+        {
+            "template_id": "usage_customer_model_daily_brief",
+            "channel": "feishu",
+            "chat_id": "chat-a",
+            "user_id": "ou-a",
+            "tenant_scope": "selected",
+            "tenants": ["佛跳墙"],
+            "model_scope": "all",
+            "models": [],
+            "period": "day",
+            "recurrence": "every_day",
+            "send_time": "10:00",
+            "weekday": 1,
+            "month_day": 1,
+            "timezone": "Asia/Shanghai",
+        }
+    )
+
+    assert compiled.report_params["tenants"] == ["tenant-fo"]
+    assert compiled.report_params["tenant_query"] == "tenant-fo"
+    assert compiled.tenant_names == ("佛跳墙",)
+
+
+def test_guided_subscription_rejects_incomplete_model_catalog_response(tmp_path) -> None:
+    """A missing tenant key cannot silently broaden or narrow a model scope."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    registry = build_default_registry(discover_external=False, magik_enabled=True)
+    config = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(
+                report_management_v1=False,
+                timezone="Asia/Shanghai",
+            )
+        ),
+        agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+    )
+
+    def resolve_tenants(values: list[str]):
+        return (
+            [
+                {"query": value, "tenant_id": value, "display_name": value}
+                for value in values
+            ],
+            [],
+        )
+
+    def resolve_models(tenant_ids: list[str], models: list[str]):
+        assert tenant_ids == ["tenant-a", "tenant-b"]
+        assert models == ["Kimi-K3"]
+        return {"tenant-a": ["Kimi-K3"]}, []
+
+    service = ReportSubscriptionService(
+        config=config,
+        store=store,
+        registry=registry,
+        tenant_resolver=resolve_tenants,
+        model_resolver=resolve_models,
+    )
+
+    with pytest.raises(SubscriptionServiceError, match="完整验证"):
+        service.compile_form(
+            {
+                "template_id": "usage_daily_brief",
+                "channel": "feishu",
+                "chat_id": "chat-a",
+                "user_id": "ou-a",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-a", "tenant-b"],
+                "model_scope": "selected",
+                "models": ["Kimi-K3"],
+                "period": "day",
+                "recurrence": "workdays",
+                "send_time": "10:00",
+                "timezone": "Asia/Shanghai",
+            }
+        )
+
+
+def test_sqlite_reporting_migration_adds_cas_columns_without_rewriting_rows(tmp_path) -> None:
+    """Existing subscription/policy rows survive the additive schema migration."""
+
+    path = tmp_path / "legacy-reporting.db"
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE report_subscriptions (
+                subscription_id TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                connector_id TEXT NOT NULL,
+                template_id TEXT NOT NULL,
+                template_version TEXT NOT NULL,
+                schedule TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                report_params_json TEXT NOT NULL,
+                cron_job_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(channel, user_id, fingerprint)
+            );
+            CREATE TABLE report_template_policies (
+                template_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL,
+                subscription_mode TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL
+            );
+            INSERT INTO report_subscriptions VALUES (
+                'legacy-sub', 'feishu', 'chat-a', 'ou-a', 'magik_cube',
+                'usage_daily_brief', '1.0', '0 9 * * *', 'Asia/Shanghai',
+                '{"report_template":"brief"}', 'job-a', 1, 'fp-a',
+                '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00'
+            );
+            INSERT INTO report_template_policies VALUES (
+                'usage_daily_brief', 1, 'all_authorized', 3,
+                '2026-09-01T00:00:00+00:00', 'legacy-admin'
+            );
+            """
+        )
+
+    store = ReportStateStore(path)
+    with sqlite3.connect(path) as db:
+        subscription_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(report_subscriptions)")
+        }
+        policy_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(report_template_policies)")
+        }
+    assert "revision" in subscription_columns
+    assert "show_subscription_button" in policy_columns
+    assert store.subscription("legacy-sub").revision == 0
+    assert store.template_policy("usage_daily_brief")["revision"] == 3
+    assert store.template_policy("usage_daily_brief")["show_subscription_button"] is True

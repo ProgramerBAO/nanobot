@@ -17,7 +17,11 @@ except ImportError:
 if not FEISHU_AVAILABLE:
     pytest.skip("Feishu dependencies not installed (lark-oapi)", allow_module_level=True)
 
-from nanobot.bus.events import OutboundMessage
+from nanobot.bus.events import (
+    OUTBOUND_META_AGENT_UI,
+    OUTBOUND_META_REPORT_REFERENCE,
+    OutboundMessage,
+)
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu.runtime import FeishuChannel, FeishuConfig
@@ -633,6 +637,47 @@ async def test_send_multiple_messages_only_first_uses_reply_when_reply_to_messag
     # Only first send uses reply, rest use create
     assert len(reply_calls) == 1
     assert len(create_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_each_structured_report_card_saves_the_same_reference_scope() -> None:
+    """A user may quote the main card or any continuation page."""
+
+    channel = _make_feishu_channel()
+    reference = {
+        "run_id": "run-a",
+        "document_id": "usage_customer_model_daily_brief",
+        "connector_id": "magik_cube",
+        "template_id": "usage_customer_model_daily_brief",
+        "period": "day",
+        "expires_at": "2099-09-02T00:00:00+00:00",
+        "scope": {"tenants": ["tenant-a"], "model_scope": "all"},
+    }
+
+    with (
+        patch.object(channel, "_build_agent_ui_cards", return_value=[{"page": 1}, {"page": 2}]),
+        patch.object(channel, "_send_message_sync", side_effect=["om-page-1", "om-page-2"]),
+        patch.object(channel, "_save_report_message_reference_sync") as save_reference,
+    ):
+        await channel.send(
+            OutboundMessage(
+                channel="feishu",
+                chat_id="oc-report",
+                content="fallback",
+                metadata={
+                    OUTBOUND_META_AGENT_UI: {"kind": "report_document"},
+                    OUTBOUND_META_REPORT_REFERENCE: reference,
+                },
+            )
+        )
+
+    assert [call.kwargs["message_id"] for call in save_reference.call_args_list] == [
+        "om-page-1",
+        "om-page-2",
+    ]
+    assert all(
+        call.kwargs["payload"] == reference for call in save_reference.call_args_list
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,15 @@ def test_template_policy_action_enforces_revision(monkeypatch, tmp_path) -> None
     assert exc_info.value.status == 409
 
 
+def test_guided_form_accepts_legacy_zero_revision() -> None:
+    """Revision zero is valid for subscriptions created before CAS migration."""
+
+    assert reporting_api._form_integer({"revision": 0}, "revision") == 0
+    assert reporting_api._form_integer({"revision": "0"}, "revision") == 0
+    with pytest.raises(reporting_api.ReportingSettingsError, match="missing revision"):
+        reporting_api._form_integer({}, "revision")
+
+
 def test_subscription_disable_updates_cron_and_database(monkeypatch, tmp_path) -> None:
     store = ReportStateStore(tmp_path / "reporting.db")
     config = _config(tmp_path)

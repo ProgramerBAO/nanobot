@@ -18,6 +18,26 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+_REPORT_REFERENCE_SCOPE_KEYS = frozenset(
+    {
+        "report_variant",
+        "tenant_scope",
+        "tenant_query",
+        "tenants",
+        "tenant_labels",
+        "all_tenants",
+        "model_scope",
+        "models",
+        "report_selections",
+        "project",
+        "endpoint",
+        "provider",
+        "report_template",
+        "breakdown",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ReportSubscription:
     subscription_id: str
@@ -34,6 +54,31 @@ class ReportSubscription:
     enabled: bool
     created_at: str
     updated_at: str
+    # Incremented on every mutable update. A default keeps old in-process and
+    # test constructors source-compatible while the database migration adds the
+    # durable column for existing installations.
+    revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReportMessageReference:
+    """Safe report scope bound to one delivered channel message.
+
+    The reference deliberately excludes report values and upstream payloads. It
+    exists only to rebuild a subscription scope after a user quotes a report.
+    """
+
+    channel: str
+    chat_id: str
+    message_id: str
+    run_id: str
+    document_id: str
+    connector_id: str
+    template_id: str
+    period: str
+    scope: dict[str, Any]
+    created_at: str
+    expires_at: str
 
 
 class ReportStateStore:
@@ -114,10 +159,27 @@ class ReportStateStore:
                     fingerprint TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(channel, user_id, fingerprint)
                 );
                 CREATE INDEX IF NOT EXISTS report_subscriptions_user
                     ON report_subscriptions(channel, user_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS report_message_references (
+                    channel TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL,
+                    connector_id TEXT NOT NULL,
+                    template_id TEXT NOT NULL,
+                    period TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (channel, message_id)
+                );
+                CREATE INDEX IF NOT EXISTS report_message_references_expiry
+                    ON report_message_references(expires_at);
                 CREATE TABLE IF NOT EXISTS report_deliveries (
                     idempotency_key TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
@@ -138,6 +200,7 @@ class ReportStateStore:
                     enabled INTEGER NOT NULL,
                     subscription_mode TEXT NOT NULL,
                     revision INTEGER NOT NULL,
+                    show_subscription_button INTEGER NOT NULL DEFAULT 1,
                     updated_at TEXT NOT NULL,
                     updated_by TEXT NOT NULL
                 );
@@ -155,6 +218,31 @@ class ReportStateStore:
                     ON report_admin_audit(created_at DESC);
                 """
             )
+            # Existing deployments were created before policy/button and
+            # subscription CAS fields existed. SQLite has no portable
+            # ``ADD COLUMN IF NOT EXISTS``, so inspect the schema while holding
+            # the same initialization lock and add only missing columns.
+            self._migrate_sqlite_columns(db)
+
+    @staticmethod
+    def _migrate_sqlite_columns(db: sqlite3.Connection) -> None:
+        """Apply additive reporting-state migrations without rewriting rows."""
+
+        migrations = (
+            ("report_subscriptions", "revision", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "report_template_policies",
+                "show_subscription_button",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
+        )
+        for table, column, definition in migrations:
+            columns = {
+                str(row[1])
+                for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in columns:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def setting(self, key: str, default: str = "") -> str:
         with self._lock, self._connect() as db:
@@ -209,6 +297,7 @@ class ReportStateStore:
                 "enabled": bool(row["enabled"]),
                 "subscription_mode": str(row["subscription_mode"]),
                 "revision": int(row["revision"]),
+                "show_subscription_button": bool(row["show_subscription_button"]),
                 "updated_at": str(row["updated_at"]),
                 "updated_by": str(row["updated_by"]),
             }
@@ -230,6 +319,7 @@ class ReportStateStore:
             "enabled": bool(row["enabled"]),
             "subscription_mode": str(row["subscription_mode"]),
             "revision": int(row["revision"]),
+            "show_subscription_button": bool(row["show_subscription_button"]),
             "updated_at": str(row["updated_at"]),
             "updated_by": str(row["updated_by"]),
         }
@@ -242,6 +332,7 @@ class ReportStateStore:
         subscription_mode: str,
         updated_by: str,
         expected_revision: int | None = None,
+        show_subscription_button: bool | None = None,
     ) -> dict[str, Any]:
         """Persist an exposure policy with optimistic concurrency and safe audit."""
 
@@ -262,24 +353,43 @@ class ReportStateStore:
                 {
                     "enabled": bool(row["enabled"]),
                     "subscription_mode": str(row["subscription_mode"]),
+                    "show_subscription_button": bool(row["show_subscription_button"]),
                     "revision": revision,
                 }
                 if row
                 else {}
             )
+            effective_show_button = (
+                bool(row["show_subscription_button"])
+                if row is not None and show_subscription_button is None
+                else True
+                if show_subscription_button is None
+                else bool(show_subscription_button)
+            )
             after = {
                 "enabled": bool(enabled),
                 "subscription_mode": subscription_mode,
+                "show_subscription_button": effective_show_button,
                 "revision": revision + 1,
             }
             db.execute(
                 """INSERT INTO report_template_policies(
-                    template_id, enabled, subscription_mode, revision, updated_at, updated_by
-                ) VALUES(?, ?, ?, ?, ?, ?)
+                    template_id, enabled, subscription_mode, revision,
+                    show_subscription_button, updated_at, updated_by
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(template_id) DO UPDATE SET enabled=excluded.enabled,
                     subscription_mode=excluded.subscription_mode, revision=excluded.revision,
+                    show_subscription_button=excluded.show_subscription_button,
                     updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
-                (template_id, int(enabled), subscription_mode, revision + 1, now, updated_by),
+                (
+                    template_id,
+                    int(enabled),
+                    subscription_mode,
+                    revision + 1,
+                    int(effective_show_button),
+                    now,
+                    updated_by,
+                ),
             )
             db.execute(
                 """INSERT INTO report_admin_audit(
@@ -319,6 +429,7 @@ class ReportStateStore:
         *,
         schedule: str,
         timezone_name: str,
+        expected_revision: int | None = None,
     ) -> ReportSubscription | None:
         """Update only scheduling metadata after the corresponding Cron job succeeds."""
 
@@ -327,10 +438,19 @@ class ReportStateStore:
         if not timezone_name.strip() or len(timezone_name) > 64:
             raise ValueError("invalid report subscription timezone")
         with self._lock, self._connect() as db:
+            current = db.execute(
+                "SELECT revision FROM report_subscriptions WHERE subscription_id=?",
+                (subscription_id,),
+            ).fetchone()
+            if current is None or (
+                expected_revision is not None
+                and int(current["revision"]) != expected_revision
+            ):
+                return None
             cursor = db.execute(
-                """UPDATE report_subscriptions SET schedule=?, timezone=?, updated_at=?
-                WHERE subscription_id=?""",
-                (schedule, timezone_name, _utc_now(), subscription_id),
+                """UPDATE report_subscriptions SET schedule=?, timezone=?,
+                revision=revision+1, updated_at=? WHERE subscription_id=? AND revision=?""",
+                (schedule, timezone_name, _utc_now(), subscription_id, int(current["revision"])),
             )
         return self.subscription(subscription_id) if cursor.rowcount else None
 
@@ -465,21 +585,97 @@ class ReportStateStore:
         with self._lock, self._connect() as db:
             try:
                 db.execute(
-                    """INSERT INTO report_subscriptions VALUES(
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    )""",
+                    """INSERT INTO report_subscriptions(
+                        subscription_id, channel, chat_id, user_id, connector_id,
+                        template_id, template_version, schedule, timezone,
+                        report_params_json, cron_job_id, enabled, fingerprint,
+                        created_at, updated_at, revision
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         values["subscription_id"], values["channel"], values["chat_id"],
                         values["user_id"], values["connector_id"], values["template_id"],
                         values["template_version"], values["schedule"], values["timezone"],
                         json.dumps(values["report_params"], ensure_ascii=False, separators=(",", ":")),
                         values["cron_job_id"], int(values["enabled"]), fingerprint,
-                        values["created_at"], values["updated_at"],
+                        values["created_at"], values["updated_at"], values.get("revision", 0),
                     ),
                 )
             except sqlite3.IntegrityError:
                 return False
         return True
+
+    def save_message_reference(self, reference: ReportMessageReference) -> None:
+        """Persist a bounded, channel-local reference for quoted-report actions."""
+
+        if not reference.channel or not reference.chat_id or not reference.message_id:
+            raise ValueError("report message reference requires channel, chat_id, and message_id")
+        if not reference.connector_id or not reference.template_id or not reference.period:
+            raise ValueError("report message reference requires connector, template, and period")
+        if not isinstance(reference.scope, dict) or set(reference.scope) - _REPORT_REFERENCE_SCOPE_KEYS:
+            raise ValueError("report message reference contains unsupported scope fields")
+        encoded_scope = json.dumps(
+            reference.scope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        if len(encoded_scope) > 32_768:
+            raise ValueError("report message reference scope is too large")
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO report_message_references(
+                    channel, chat_id, message_id, run_id, document_id, connector_id,
+                    template_id, period, scope_json, created_at, expires_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel, message_id) DO UPDATE SET
+                    chat_id=excluded.chat_id, run_id=excluded.run_id,
+                    document_id=excluded.document_id, connector_id=excluded.connector_id,
+                    template_id=excluded.template_id, period=excluded.period,
+                    scope_json=excluded.scope_json, created_at=excluded.created_at,
+                    expires_at=excluded.expires_at""",
+                (
+                    reference.channel,
+                    reference.chat_id,
+                    reference.message_id,
+                    reference.run_id,
+                    reference.document_id,
+                    reference.connector_id,
+                    reference.template_id,
+                    reference.period,
+                    encoded_scope,
+                    reference.created_at,
+                    reference.expires_at,
+                ),
+            )
+
+    def message_reference(
+        self, *, channel: str, chat_id: str, message_id: str
+    ) -> ReportMessageReference | None:
+        """Return an unexpired reference only inside its original channel chat."""
+
+        now = _utc_now()
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM report_message_references WHERE expires_at <= ?", (now,))
+            row = db.execute(
+                """SELECT * FROM report_message_references
+                WHERE channel=? AND chat_id=? AND message_id=? AND expires_at>?""",
+                (channel, chat_id, message_id, now),
+            ).fetchone()
+        if row is None:
+            return None
+        scope = json.loads(str(row["scope_json"]))
+        if not isinstance(scope, dict) or set(scope) - _REPORT_REFERENCE_SCOPE_KEYS:
+            return None
+        return ReportMessageReference(
+            channel=str(row["channel"]),
+            chat_id=str(row["chat_id"]),
+            message_id=str(row["message_id"]),
+            run_id=str(row["run_id"]),
+            document_id=str(row["document_id"]),
+            connector_id=str(row["connector_id"]),
+            template_id=str(row["template_id"]),
+            period=str(row["period"]),
+            scope=scope,
+            created_at=str(row["created_at"]),
+            expires_at=str(row["expires_at"]),
+        )
 
     def subscriptions(self, channel: str, user_id: str) -> list[ReportSubscription]:
         with self._lock, self._connect() as db:
@@ -499,24 +695,118 @@ class ReportStateStore:
         return self._subscription_from_row(row) if row else None
 
     def set_subscription_enabled(
-        self, subscription_id: str, *, channel: str, user_id: str, enabled: bool
+        self,
+        subscription_id: str,
+        *,
+        channel: str,
+        user_id: str,
+        enabled: bool,
+        expected_revision: int | None = None,
     ) -> ReportSubscription | None:
         with self._lock, self._connect() as db:
-            cursor = db.execute(
-                """UPDATE report_subscriptions SET enabled=?, updated_at=?
+            current = db.execute(
+                """SELECT revision FROM report_subscriptions
                 WHERE subscription_id=? AND channel=? AND user_id=?""",
-                (int(enabled), _utc_now(), subscription_id, channel, user_id),
+                (subscription_id, channel, user_id),
+            ).fetchone()
+            if current is None or (
+                expected_revision is not None
+                and int(current["revision"]) != expected_revision
+            ):
+                return None
+            cursor = db.execute(
+                """UPDATE report_subscriptions SET enabled=?, revision=revision+1,
+                updated_at=? WHERE subscription_id=? AND channel=? AND user_id=?
+                AND revision=?""",
+                (
+                    int(enabled),
+                    _utc_now(),
+                    subscription_id,
+                    channel,
+                    user_id,
+                    int(current["revision"]),
+                ),
             )
         return self.subscription(subscription_id) if cursor.rowcount else None
 
-    def remove_subscription(self, subscription_id: str, *, channel: str, user_id: str) -> bool:
+    def remove_subscription(
+        self,
+        subscription_id: str,
+        *,
+        channel: str,
+        user_id: str,
+        expected_revision: int | None = None,
+    ) -> bool:
         with self._lock, self._connect() as db:
+            predicate = "subscription_id=? AND channel=? AND user_id=?"
+            values: list[Any] = [subscription_id, channel, user_id]
+            if expected_revision is not None:
+                predicate += " AND revision=?"
+                values.append(expected_revision)
             cursor = db.execute(
-                """DELETE FROM report_subscriptions
-                WHERE subscription_id=? AND channel=? AND user_id=?""",
-                (subscription_id, channel, user_id),
+                f"DELETE FROM report_subscriptions WHERE {predicate}",
+                tuple(values),
             )
         return cursor.rowcount > 0
+
+    def update_subscription(
+        self,
+        subscription_id: str,
+        *,
+        channel: str,
+        chat_id: str,
+        user_id: str,
+        connector_id: str,
+        template_id: str,
+        template_version: str,
+        schedule: str,
+        timezone_name: str,
+        report_params: dict[str, Any],
+        fingerprint: str,
+        expected_revision: int,
+    ) -> ReportSubscription | None:
+        """Atomically replace editable subscription fields under a CAS revision.
+
+        The Cron service is updated by the caller first and rolled back when
+        this method returns ``None`` or raises. The database never accepts raw
+        JSON credentials because callers pass only the already allowlisted
+        report parameter object.
+        """
+
+        if not subscription_id or not schedule.strip() or len(schedule) > 128:
+            raise ValueError("invalid report subscription update")
+        if not timezone_name.strip() or len(timezone_name) > 64:
+            raise ValueError("invalid report subscription timezone")
+        encoded = json.dumps(report_params, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) > 32_768:
+            raise ValueError("report subscription parameters are too large")
+        now = _utc_now()
+        with self._lock, self._connect() as db:
+            try:
+                cursor = db.execute(
+                    """UPDATE report_subscriptions SET channel=?, chat_id=?, user_id=?,
+                    connector_id=?, template_id=?, template_version=?, schedule=?,
+                    timezone=?, report_params_json=?, fingerprint=?, revision=revision+1,
+                    updated_at=? WHERE subscription_id=? AND revision=?""",
+                    (
+                        channel,
+                        chat_id,
+                        user_id,
+                        connector_id,
+                        template_id,
+                        template_version,
+                        schedule,
+                        timezone_name,
+                        encoded,
+                        fingerprint,
+                        now,
+                        subscription_id,
+                        expected_revision,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("an identical report subscription already exists") from exc
+        return self.subscription(subscription_id) if cursor.rowcount else None
 
     def prune_runs(self, retention_days: int = 30) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=max(1, retention_days))).isoformat()
@@ -596,6 +886,7 @@ class ReportStateStore:
             enabled=bool(row["enabled"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            revision=int(row["revision"]) if "revision" in row.keys() else 0,
         )
 
 
@@ -680,9 +971,18 @@ class PostgresReportStateStore(ReportStateStore):
                 template_version TEXT NOT NULL, schedule TEXT NOT NULL, timezone TEXT NOT NULL,
                 report_params_json TEXT NOT NULL, cron_job_id TEXT NOT NULL, enabled INTEGER NOT NULL,
                 fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(channel, user_id, fingerprint))""",
             """CREATE INDEX IF NOT EXISTS report_subscriptions_user
                 ON report_subscriptions(channel, user_id, updated_at DESC)""",
+            """CREATE TABLE IF NOT EXISTS report_message_references (
+                channel TEXT NOT NULL, chat_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                run_id TEXT NOT NULL, document_id TEXT NOT NULL, connector_id TEXT NOT NULL,
+                template_id TEXT NOT NULL, period TEXT NOT NULL, scope_json TEXT NOT NULL,
+                created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+                PRIMARY KEY (channel, message_id))""",
+            """CREATE INDEX IF NOT EXISTS report_message_references_expiry
+                ON report_message_references(expires_at)""",
             """CREATE TABLE IF NOT EXISTS report_deliveries (
                 idempotency_key TEXT PRIMARY KEY, status TEXT NOT NULL,
                 claimed_at TEXT NOT NULL, completed_at TEXT NOT NULL)""",
@@ -694,6 +994,7 @@ class PostgresReportStateStore(ReportStateStore):
             """CREATE TABLE IF NOT EXISTS report_template_policies (
                 template_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
                 subscription_mode TEXT NOT NULL, revision INTEGER NOT NULL,
+                show_subscription_button INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL, updated_by TEXT NOT NULL)""",
             """CREATE TABLE IF NOT EXISTS report_admin_audit (
                 audit_id TEXT PRIMARY KEY, action TEXT NOT NULL, target_type TEXT NOT NULL,
@@ -706,21 +1007,34 @@ class PostgresReportStateStore(ReportStateStore):
         with self._lock, self._connect() as db:
             for statement in statements:
                 db.execute(statement)
+            # PostgreSQL installations may already have the pre-CAS schema;
+            # additive migrations keep rolling Gateway upgrades compatible.
+            db.execute(
+                "ALTER TABLE report_subscriptions ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0"
+            )
+            db.execute(
+                "ALTER TABLE report_template_policies ADD COLUMN IF NOT EXISTS "
+                "show_subscription_button INTEGER NOT NULL DEFAULT 1"
+            )
 
     def add_subscription(self, subscription: ReportSubscription, fingerprint: str) -> bool:
         values = asdict(subscription)
         with self._lock, self._connect() as db:
             row = db.execute(
-                """INSERT INTO report_subscriptions VALUES(
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                ) ON CONFLICT DO NOTHING RETURNING subscription_id""",
+                """INSERT INTO report_subscriptions(
+                    subscription_id, channel, chat_id, user_id, connector_id,
+                    template_id, template_version, schedule, timezone,
+                    report_params_json, cron_job_id, enabled, fingerprint,
+                    created_at, updated_at, revision
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING RETURNING subscription_id""",
                 (
                     values["subscription_id"], values["channel"], values["chat_id"],
                     values["user_id"], values["connector_id"], values["template_id"],
                     values["template_version"], values["schedule"], values["timezone"],
                     json.dumps(values["report_params"], ensure_ascii=False, separators=(",", ":")),
                     values["cron_job_id"], int(values["enabled"]), fingerprint,
-                    values["created_at"], values["updated_at"],
+                    values["created_at"], values["updated_at"], values.get("revision", 0),
                 ),
             ).fetchone()
         return row is not None

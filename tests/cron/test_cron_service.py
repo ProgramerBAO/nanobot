@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from copy import deepcopy
 
 import pytest
 
@@ -128,6 +129,31 @@ def test_add_job_accepts_valid_timezone(tmp_path) -> None:
 
     assert job.schedule.tz == "America/Vancouver"
     assert job.state.next_run_at_ms is not None
+
+
+def test_restore_job_reinstates_exact_job_and_is_idempotent(tmp_path) -> None:
+    """Cron compensation restores the complete snapshot after a CAS failure."""
+
+    service = CronService(tmp_path / "cron" / "jobs.json")
+    job = service.add_job(
+        name="Daily report",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="执行固定报表订阅",
+        **_bound_chat(),
+    )
+    snapshot = deepcopy(job)
+
+    assert service.remove_job(job.id) == "removed"
+    assert service.restore_job(snapshot) == "restored"
+    assert service.restore_job(snapshot) == "already_present"
+
+    restored = service.get_job(job.id)
+    assert restored is not None
+    assert restored.id == snapshot.id
+    assert restored.name == snapshot.name
+    assert restored.schedule == snapshot.schedule
+    assert restored.payload == snapshot.payload
+    assert restored.enabled == snapshot.enabled
 
 
 def test_write_run_record_uses_cron_runs_dir(tmp_path) -> None:

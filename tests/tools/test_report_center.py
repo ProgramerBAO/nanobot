@@ -16,12 +16,15 @@ from nanobot.bus.events import (
     INBOUND_META_DIRECT_TOOL,
     OUTBOUND_META_AGENT_UI,
     OUTBOUND_META_REPORT_DELIVERY,
+    OUTBOUND_META_REPORT_REFERENCE,
     InboundMessage,
 )
 from nanobot.bus.queue import MessageBus
+from nanobot.cron.service import CronService
 from nanobot.cron.session_turns import CRON_TRIGGER_META
+from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.reporting import CubeConnector, ReportDataset, ReportStateStore
-from nanobot.reporting.store import ReportSubscription
+from nanobot.reporting.store import ReportMessageReference, ReportSubscription
 
 
 class _FakeCron:
@@ -75,6 +78,99 @@ def test_new_capacity_and_multi_scope_phrases_use_report_center(monkeypatch, tmp
         "interactive": True,
         "period": "day",
     }
+
+
+@pytest.mark.asyncio
+async def test_deterministic_subscription_compiles_all_live_tenants_without_llm(
+    monkeypatch, tmp_path
+) -> None:
+    """The complete schedule phrase must retain all catalog-matched tenants."""
+
+    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+    tool._magik_tool.find_tenant_mentions.return_value = [
+        {"tenant_id": "tenant-noodle", "display_name": "阳春面"},
+        {"tenant_id": "tenant-douzhi", "display_name": "豆汁"},
+        {"tenant_id": "tenant-fo", "display_name": "佛跳墙"},
+    ]
+
+    result = await tool.classify_direct_request(
+        "每天上午十点发送阳春面、豆汁、佛跳墙全部模型的多客户日报简报",
+        MagicMock(),
+    )
+
+    assert result is not None
+    assert result["action"] == "subscription_preview"
+    assert result["report_type"] == "usage_customer_model_daily_brief"
+    assert result["tenant_aliases"] == ["阳春面", "豆汁", "佛跳墙"]
+    assert result["model_scope"] == "all"
+
+
+@pytest.mark.asyncio
+async def test_reference_scope_is_found_even_when_subscription_nlu_fails(
+    monkeypatch, tmp_path
+) -> None:
+    """A valid reference must produce a parser error, never a missing-card error."""
+
+    tool, store, _cron = _tool(monkeypatch, tmp_path)
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-report",
+            run_id="run-a",
+            document_id="doc-a",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_daily_brief",
+            period="day",
+            scope={"tenants": ["tenant-fo"], "model_scope": "all"},
+            created_at="2026-09-02T00:00:00+00:00",
+            expires_at="2099-09-02T00:00:00+00:00",
+        )
+    )
+    monkeypatch.setattr(
+        report_center_module,
+        "classify_subscription_intent",
+        AsyncMock(return_value=None),
+    )
+
+    result = await tool.classify_referenced_subscription(
+        "请订阅这个报表，按一个无法识别的时间发送给我",
+        MagicMock(),
+        channel="feishu",
+        chat_id="chat-a",
+        reference_message_id="om-report",
+    )
+
+    assert result == {
+        "action": "subscription_parse_failed",
+        "subscription_error": "nlu_unavailable",
+        "reference_message_id": "om-report",
+    }
+
+
+@pytest.mark.asyncio
+async def test_subscription_parse_error_does_not_claim_reference_is_missing(
+    monkeypatch, tmp_path
+) -> None:
+    """The user-facing recovery card must preserve the parser failure cause."""
+
+    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+    )
+
+    with request_context(context):
+        result = await tool.execute(
+            action="subscription_parse_failed",
+            reference_message_id="om-report",
+            subscription_error="nlu_unavailable",
+        )
+
+    assert "发送计划未能识别" in str(result)
+    assert "卡片恢复" not in str(result)
     assert tool.match_direct_request("Kimi-K3 单机 TPM 峰值") == {
         "action": "machine_tpm_report",
         "period": "day",
@@ -175,6 +271,8 @@ async def test_examples_expose_selected_model_all_customer_report(monkeypatch, t
         result = await tool.execute(action="examples")
 
     assert "Kimi-K3模型的日报（全部客户）" in str(result)
+    assert "每天上午十点发送阳春面、豆汁、佛跳墙" in str(result)
+    assert "引用日报卡片并回复" in str(result)
 
 
 @pytest.mark.asyncio
@@ -205,6 +303,117 @@ async def test_help_direct_route_binds_request_context(monkeypatch, tmp_path) ->
     assert "报表中心" in response.content
     assert response.metadata[OUTBOUND_META_AGENT_UI]["kind"] == "report_document"
     assert current_request_context() is None
+    provider.chat_with_retry.assert_not_called()
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_routes_quoted_report_to_subscription_confirmation(
+    monkeypatch, tmp_path
+) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-report",
+            run_id="run-a",
+            document_id="usage_customer_model_daily_brief",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_daily_brief",
+            period="day",
+            scope={
+                "report_variant": "customer_model_daily_brief",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-fo"],
+                "model_scope": "all",
+                "models": [],
+                "report_selections": [
+                    {"tenant_query": "tenant-fo", "model_scope": "all", "models": []}
+                ],
+                "report_template": "brief",
+            },
+            created_at="2026-09-02T00:00:00+00:00",
+            expires_at="2099-09-02T00:00:00+00:00",
+        )
+    )
+    magik = AsyncMock()
+    magik.resolve_tenant_queries.return_value = (
+        [
+            {
+                "query": "tenant-fo",
+                "tenant_id": "tenant-fo",
+                "display_name": "佛跳墙",
+            }
+        ],
+        [],
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        magik,
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.estimate_prompt_tokens.return_value = (10_000, "test")
+    provider.chat = AsyncMock(
+        return_value=LLMResponse(
+            content=None,
+            finish_reason="tool_calls",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call-1",
+                    name="emit_cube_subscription_intent",
+                    arguments={
+                        "report_type": "inherit",
+                        "tenant_scope": "inherit",
+                        "tenant_aliases": [],
+                        "model_scope": "inherit",
+                        "models": [],
+                        "recurrence": "workdays",
+                        "send_time": "10:00",
+                        "weekday": 1,
+                        "month_day": 1,
+                        "inherit_report_scope": True,
+                    },
+                )
+            ],
+        )
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        context_window_tokens=128_000,
+    )
+    loop.tools.register(tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou-a",
+            chat_id="chat-a",
+            content="我要订阅该报表，工作日上午十点发送给我",
+            metadata={
+                "parent_id": "om-report",
+                "direct_request_text": "我要订阅该报表，工作日上午十点发送给我",
+            },
+        )
+    )
+
+    assert response is not None
+    assert response.metadata[OUTBOUND_META_AGENT_UI]["title"] == "确认 Cube 报表订阅"
+    assert "佛跳墙" in response.content
+    # The unambiguous schedule is parsed deterministically; the LLM is only a
+    # fallback for incomplete or ambiguous subscription language.
+    provider.chat.assert_not_awaited()
     provider.chat_with_retry.assert_not_called()
     await loop.close_mcp()
 
@@ -252,6 +461,49 @@ async def test_subscription_is_idempotent_and_uses_direct_cron(monkeypatch, tmp_
     assert direct["name"] == "report_center"
     assert direct["params"]["action"] == "run_subscription"
     assert cron.jobs[0].schedule.expr == "0 10 * * 1"
+
+
+@pytest.mark.asyncio
+async def test_structured_subscription_control_uses_revision_cas(
+    monkeypatch, tmp_path
+) -> None:
+    """A stale card action cannot overwrite a newer subscription state."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    cron = CronService(tmp_path / "cron" / "jobs.json")
+    tool = ReportCenterTool(ReportCenterToolConfig(), cron, AsyncMock())
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou_a",
+        session_key="feishu:chat-a",
+    )
+    with request_context(context):
+        await tool.execute(
+            action="subscribe",
+            period="day",
+            report_params={"tenant_query": "tenant-a", "breakdown": "model"},
+        )
+    subscription = store.subscriptions("feishu", "ou_a")[0]
+
+    with request_context(context):
+        disabled = await tool.execute(
+            action="subscription_disable",
+            subscription_id=subscription.subscription_id,
+            revision=subscription.revision,
+        )
+        stale = await tool.execute(
+            action="subscription_enable",
+            subscription_id=subscription.subscription_id,
+            revision=subscription.revision,
+        )
+
+    assert not disabled.is_error
+    assert store.subscription(subscription.subscription_id).enabled is False
+    assert store.subscription(subscription.subscription_id).revision == 1
+    assert stale.is_error
+    assert "another operator" in str(stale)
 
 
 @pytest.mark.asyncio
@@ -1296,3 +1548,664 @@ async def test_health_subscription_supports_day_and_week_but_not_recent15m(
     assert subscriptions[0].template_id == "health_sre"
     assert subscriptions[0].report_params["report_family"] == "health"
     assert "订阅已创建" in str(created)
+
+
+@pytest.mark.asyncio
+async def test_nlu_preview_preserves_three_customers_and_all_models(
+    monkeypatch, tmp_path
+) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        AsyncMock(),
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    tool._magik_tool.resolve_tenant_queries = AsyncMock(
+        return_value=(
+            [
+                {"query": "阳春面", "tenant_id": "tenant-noodle", "display_name": "阳春面"},
+                {"query": "豆汁", "tenant_id": "tenant-douzhi", "display_name": "豆汁"},
+                {"query": "佛跳墙", "tenant_id": "tenant-fo", "display_name": "佛跳墙"},
+            ],
+            [],
+        )
+    )
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+    )
+
+    with request_context(context):
+        preview = await tool.execute(
+            action="subscription_preview",
+            report_type="usage_customer_model_daily_brief",
+            tenant_scope="selected",
+            tenant_aliases=["阳春面", "豆汁", "佛跳墙"],
+            model_scope="all",
+            recurrence="every_day",
+            send_time="10:00",
+        )
+        action = next(
+            item
+            for block in preview.metadata[OUTBOUND_META_AGENT_UI]["blocks"]
+            if block["kind"] == "actions"
+            for item in block["data"]["actions"]
+            if item["action_id"] == "subscription_confirm"
+        )
+        created = await tool.execute(**action["params"])
+
+    assert not created.is_error
+    subscription = store.subscriptions("feishu", "ou-a")[0]
+    assert subscription.template_id == "usage_customer_model_daily_brief"
+    assert subscription.report_params["subscription_period"] == "day"
+    assert subscription.report_params["model_scope"] == "all"
+    assert subscription.report_params["tenants"] == [
+        "tenant-noodle",
+        "tenant-douzhi",
+        "tenant-fo",
+    ]
+    assert all(
+        item["model_scope"] == "all" and item["models"] == []
+        for item in subscription.report_params["report_selections"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_subscription_phrase_cannot_fall_back_to_one_tenant_daily(
+    monkeypatch, tmp_path
+) -> None:
+    """Protect the production route ordering for a long multi-tenant phrase."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = AsyncMock()
+    catalog = [
+        {"tenant_id": "tenant-noodle", "display_name": "阳春面"},
+        {"tenant_id": "tenant-douzhi", "display_name": "豆汁"},
+        {"tenant_id": "tenant-fo", "display_name": "佛跳墙"},
+    ]
+    magik.find_tenant_mentions.return_value = catalog
+    magik.resolve_tenant_queries.return_value = (
+        [
+            {"query": item["display_name"], **item}
+            for item in catalog
+        ],
+        [],
+    )
+    monkeypatch.setattr(
+        report_center_module,
+        "classify_subscription_intent",
+        AsyncMock(
+            return_value=report_center_module.CubeSubscriptionIntent(
+                report_type="usage_daily_brief",
+                tenant_scope="selected",
+                # Simulate the model returning only the last customer.
+                tenant_aliases=("佛跳墙",),
+                model_scope="selected",
+                models=("Kimi-K3",),
+                recurrence="every_day",
+                send_time="10:00",
+            )
+        ),
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        magik,
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.estimate_prompt_tokens.return_value = (10_000, "test")
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        context_window_tokens=128_000,
+    )
+    loop.tools.register(tool)
+
+    phrase = "每天上午十点发送阳春面、豆汁、佛跳墙全部模型的多客户日报简报"
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou-a",
+            chat_id="chat-a",
+            content=phrase,
+        )
+    )
+
+    assert response is not None
+    action = next(
+        item
+        for block in response.metadata[OUTBOUND_META_AGENT_UI]["blocks"]
+        if block["kind"] == "actions"
+        for item in block["data"]["actions"]
+        if item["action_id"] == "subscription_confirm"
+    )
+    params = action["params"]["report_params"]
+    assert action["params"]["period"] == "day"
+    assert params["report_variant"] == "customer_model_daily_brief"
+    assert params["tenants"] == ["tenant-noodle", "tenant-douzhi", "tenant-fo"]
+    assert params["model_scope"] == "all"
+    assert params["models"] == []
+    assert provider.chat.call_count == 0
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
+async def test_quoted_report_preview_revalidates_scope_without_history_date(
+    monkeypatch, tmp_path
+) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        AsyncMock(),
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-report",
+            run_id="run-a",
+            document_id="usage_customer_model_daily_brief",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_daily_brief",
+            period="day",
+            scope={
+                "report_variant": "customer_model_daily_brief",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-fo"],
+                "model_scope": "all",
+                "models": [],
+                "report_selections": [
+                    {
+                        "tenant_query": "tenant-fo",
+                        "model_scope": "all",
+                        "models": [],
+                    }
+                ],
+                "report_template": "brief",
+            },
+            created_at="2026-09-02T00:00:00+00:00",
+            expires_at="2099-09-02T00:00:00+00:00",
+        )
+    )
+    tool._magik_tool.resolve_tenant_queries = AsyncMock(
+        return_value=(
+            [
+                {
+                    "query": "tenant-fo",
+                    "tenant_id": "tenant-fo",
+                    "display_name": "佛跳墙",
+                }
+            ],
+            [],
+        )
+    )
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+        metadata={"parent_id": "om-report"},
+    )
+
+    with request_context(context):
+        preview = await tool.execute(
+            action="subscription_preview",
+            report_type="inherit",
+            tenant_scope="inherit",
+            model_scope="inherit",
+            recurrence="workdays",
+            send_time="10:00",
+            inherit_report_scope=True,
+            reference_message_id="om-report",
+        )
+
+    action = next(
+        item
+        for block in preview.metadata[OUTBOUND_META_AGENT_UI]["blocks"]
+        if block["kind"] == "actions"
+        for item in block["data"]["actions"]
+        if item["action_id"] == "subscription_confirm"
+    )
+    report_params = action["params"]["report_params"]
+    assert action["params"]["period"] == "day"
+    assert action["params"]["daily_mode"] == "workdays"
+    assert report_params["tenants"] == ["tenant-fo"]
+    assert report_params["model_scope"] == "all"
+    assert "start_date" not in report_params
+    assert "end_date" not in report_params
+    assert "历史日期不会固化" in str(preview)
+
+
+@pytest.mark.asyncio
+async def test_quoted_schedule_forces_reference_scope_when_classifier_defaults_to_daily(
+    monkeypatch, tmp_path
+) -> None:
+    """A schedule-only quote must inherit the stored multi-scope report.
+
+    This regression protects the trust boundary between the quoted card and
+    the one-shot classifier: the classifier may return a generic daily intent,
+    but it must not narrow a verified customer/model scope when the user did
+    not explicitly mention a replacement entity.
+    """
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        AsyncMock(),
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-grouped-report",
+            run_id="run-grouped",
+            document_id="usage_customer_model_daily_brief",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_daily_brief",
+            period="day",
+            scope={
+                "report_variant": "customer_model_daily_brief",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-noodle", "tenant-douzhi", "tenant-fo"],
+                "tenant_labels": ["阳春面", "豆汁", "佛跳墙"],
+                "model_scope": "all",
+                "models": [],
+                "report_template": "brief",
+            },
+            created_at="2026-09-02T00:00:00+00:00",
+            expires_at="2099-09-02T00:00:00+00:00",
+        )
+    )
+    monkeypatch.setattr(
+        report_center_module,
+        "classify_subscription_intent",
+        AsyncMock(
+            return_value=report_center_module.CubeSubscriptionIntent(
+                report_type="usage_daily_brief",
+                tenant_scope="selected",
+                tenant_aliases=("佛跳墙",),
+                model_scope="selected",
+                models=("Kimi-K3",),
+                recurrence="workdays",
+                send_time="10:00",
+            )
+        ),
+    )
+
+    result = await tool.classify_referenced_subscription(
+        "工作日上午十点发送给我",
+        MagicMock(),
+        channel="feishu",
+        chat_id="chat-a",
+        reference_message_id="om-grouped-report",
+    )
+
+    assert result is not None
+    assert result["report_type"] == "inherit"
+    assert result["tenant_scope"] == "inherit"
+    assert result["model_scope"] == "inherit"
+    assert result["tenant_aliases"] == []
+    assert result["models"] == []
+    assert result["inherit_report_scope"] is True
+
+
+@pytest.mark.asyncio
+async def test_subscription_preview_validates_selected_models_against_live_catalog(
+    monkeypatch, tmp_path
+) -> None:
+    """Protect explicit model overrides from bypassing the live Cube catalog."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = AsyncMock()
+    magik.resolve_tenant_queries.return_value = (
+        [
+            {
+                "query": "佛跳墙",
+                "tenant_id": "tenant-fo",
+                "display_name": "佛跳墙",
+            }
+        ],
+        [],
+    )
+    magik.resolve_models_for_tenants.return_value = (
+        {"tenant-fo": ["Kimi-K3"]},
+        [],
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        magik,
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+    )
+
+    with request_context(context):
+        preview = await tool.execute(
+            action="subscription_preview",
+            report_type="usage_customer_model_daily_brief",
+            tenant_scope="selected",
+            tenant_aliases=["佛跳墙"],
+            model_scope="selected",
+            models=["K3"],
+            recurrence="workdays",
+            send_time="10:00",
+        )
+
+    action = next(
+        item
+        for block in preview.metadata[OUTBOUND_META_AGENT_UI]["blocks"]
+        if block["kind"] == "actions"
+        for item in block["data"]["actions"]
+        if item["action_id"] == "subscription_confirm"
+    )
+    report_params = action["params"]["report_params"]
+    magik.resolve_models_for_tenants.assert_awaited_once_with(
+        ["tenant-fo"],
+        ["K3"],
+    )
+    assert report_params["models"] == ["Kimi-K3"]
+    assert report_params["report_selections"] == [
+        {
+            "tenant_query": "tenant-fo",
+            "model_scope": "selected",
+            "models": ["Kimi-K3"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subscription_preview_rejects_models_missing_from_live_catalog(
+    monkeypatch, tmp_path
+) -> None:
+    """A catalog miss must fail closed instead of creating a guessed subscription."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = AsyncMock()
+    magik.resolve_tenant_queries.return_value = (
+        [
+            {
+                "query": "佛跳墙",
+                "tenant_id": "tenant-fo",
+                "display_name": "佛跳墙",
+            }
+        ],
+        [],
+    )
+    magik.resolve_models_for_tenants.return_value = (
+        {"tenant-fo": []},
+        [
+            {
+                "tenant_id": "tenant-fo",
+                "model": "不存在模型",
+                "reason": "该客户实时模型目录中不存在此模型",
+            }
+        ],
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        magik,
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+    )
+
+    with request_context(context):
+        preview = await tool.execute(
+            action="subscription_preview",
+            report_type="usage_customer_model_daily_brief",
+            tenant_scope="selected",
+            tenant_aliases=["佛跳墙"],
+            model_scope="selected",
+            models=["不存在模型"],
+            recurrence="workdays",
+            send_time="10:00",
+        )
+
+    assert "指定模型无法通过实时目录校验" in str(preview)
+    assert all(
+        item["action_id"] != "subscription_confirm"
+        for block in preview.metadata[OUTBOUND_META_AGENT_UI]["blocks"]
+        if block["kind"] == "actions"
+        for item in block["data"]["actions"]
+    )
+    assert store.subscriptions("feishu", "ou-a") == []
+
+
+@pytest.mark.asyncio
+async def test_all_model_multi_scope_subscription_refreshes_catalog_before_run(
+    monkeypatch, tmp_path
+) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = AsyncMock()
+    magik.execute.return_value = ToolResult(
+        "models",
+        metadata={
+            OUTBOUND_META_AGENT_UI: {
+                "kind": "magik_report_form",
+                "phase": "models",
+                "tenant_models": [
+                    {"tenant_query": "tenant-fo", "models": ["Kimi-K3", "GLM-5.2"]}
+                ],
+            }
+        },
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        magik,
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="fixture-token",
+        ),
+    )
+    queries = []
+
+    async def fake_query(_connector, query):
+        queries.append(query)
+        return ReportDataset(rows=(), quality="complete", source="magik_cube")
+
+    monkeypatch.setattr(CubeConnector, "query", fake_query)
+    subscription = ReportSubscription(
+        subscription_id="sub-all-models",
+        channel="feishu",
+        chat_id="chat-a",
+        user_id="ou-a",
+        connector_id="magik_cube",
+        template_id="usage_customer_model_daily_brief",
+        template_version="1.0",
+        schedule="0 10 * * 1-5",
+        timezone="Asia/Shanghai",
+        report_params={
+            "report_variant": "customer_model_daily_brief",
+            "subscription_period": "day",
+            "tenant_scope": "selected",
+            "tenants": ["tenant-fo"],
+            "model_scope": "all",
+            "models": [],
+            "report_selections": [
+                {"tenant_query": "tenant-fo", "model_scope": "all", "models": []}
+            ],
+            "report_template": "brief",
+        },
+        cron_job_id="job-a",
+        enabled=True,
+        created_at="2026-09-02T00:00:00+00:00",
+        updated_at="2026-09-02T00:00:00+00:00",
+    )
+
+    result = await tool._run_cube_subscription(
+        subscription,
+        run_id="run-all-models",
+        idempotency_key="delivery-all-models",
+    )
+
+    magik.execute.assert_awaited_once()
+    assert queries
+    assert queries[0].filters["model_scope"] == "all"
+    assert queries[0].filters["tenant_models"] == {
+        "tenant-fo": ["Kimi-K3", "GLM-5.2"]
+    }
+    assert OUTBOUND_META_REPORT_REFERENCE in result.metadata
+
+
+@pytest.mark.asyncio
+async def test_subscription_classifier_truncation_is_repaired_from_live_catalog(
+    monkeypatch, tmp_path
+) -> None:
+    """The original sentence must win when the LLM returns only one customer."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_multi_scope_brief=True),
+        _FakeCron(),
+        AsyncMock(),
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            tenant_mappings={"佛跳墙": "tenant-fo"},
+        ),
+    )
+    monkeypatch.setattr(
+        report_center_module,
+        "classify_subscription_intent",
+        AsyncMock(
+            return_value=report_center_module.CubeSubscriptionIntent(
+                report_type="usage_daily_brief",
+                tenant_scope="selected",
+                tenant_aliases=("佛跳墙",),
+                model_scope="all",
+                models=(),
+                recurrence="every_day",
+                send_time="10:00",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        tool,
+        "_load_catalog_tenant_mentions",
+        AsyncMock(
+            return_value=(
+                [
+                    {"tenant_id": "tenant-noodle", "display_name": "阳春面", "matched_label": "阳春面"},
+                    {"tenant_id": "tenant-douzhi", "display_name": "豆汁", "matched_label": "豆汁"},
+                    {"tenant_id": "tenant-fo", "display_name": "佛跳墙", "matched_label": "佛跳墙"},
+                ],
+                True,
+            )
+        ),
+    )
+
+    result = await tool.classify_direct_request(
+        "每天上午十点发送阳春面、豆汁、佛跳墙全部模型的多客户日报简报",
+        MagicMock(),
+    )
+
+    assert result is not None
+    assert result["report_type"] == "usage_customer_model_daily_brief"
+    assert result["tenant_aliases"] == ["阳春面", "豆汁", "佛跳墙"]
+    assert result["model_scope"] == "all"
+
+
+@pytest.mark.asyncio
+async def test_subscription_tenant_ambiguity_fails_closed(monkeypatch, tmp_path) -> None:
+    """A shared display label cannot select an arbitrary live tenant."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(),
+        _FakeCron(),
+        AsyncMock(),
+        MagikCubeToolConfig(enable=True, base_url="https://cube.example.internal"),
+    )
+    monkeypatch.setattr(
+        report_center_module,
+        "classify_subscription_intent",
+        AsyncMock(
+            return_value=report_center_module.CubeSubscriptionIntent(
+                report_type="usage_daily_brief",
+                tenant_scope="selected",
+                tenant_aliases=("同名客户",),
+                model_scope="all",
+                models=(),
+                recurrence="every_day",
+                send_time="10:00",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        tool,
+        "_load_catalog_tenant_mentions",
+        AsyncMock(
+            return_value=(
+                [
+                    {"tenant_id": "tenant-a", "display_name": "同名客户", "matched_label": "同名客户"},
+                    {"tenant_id": "tenant-b", "display_name": "同名客户", "matched_label": "同名客户"},
+                ],
+                True,
+            )
+        ),
+    )
+
+    result = await tool.classify_direct_request("每天发送同名客户日报", MagicMock())
+
+    assert result == {
+        "action": "subscription_scope_failed",
+        "subscription_error": "tenant_ambiguous",
+        "tenant_ambiguous": True,
+        "unresolved_tenants": ["同名客户"],
+    }

@@ -7,6 +7,7 @@ import os
 import time
 import uuid
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -699,6 +700,41 @@ class CronService:
 
         return "not_found"
 
+    def restore_job(
+        self, job: CronJob
+    ) -> Literal["restored", "already_present", "protected"]:
+        """Restore an exact user job after a failed external state transition.
+
+        Reporting mutations update Cron before the database so the scheduler
+        cannot run a row that has no executable job.  If the following database
+        CAS fails, callers use this compensating operation to put the original
+        job (including its ID, schedule, enabled state, and run metadata) back.
+        The method is idempotent for an already-restored ID and never accepts a
+        protected system job.
+        """
+
+        if job.payload.kind == "system_event":
+            logger.info("Cron: refused to restore protected system job {}", job.id)
+            return "protected"
+        store = self._require_store()
+        if any(existing.id == job.id for existing in store.jobs):
+            return "already_present"
+
+        restored = deepcopy(job)
+        _validate_schedule_for_add(restored.schedule)
+        _normalize_agent_turn_job(restored)
+        self._enforce_agent_binding(restored)
+        store.jobs.append(restored)
+        if self._running:
+            self._save_store()
+            self._arm_timer()
+        else:
+            # Preserve action ordering for an offline/multi-process Cron
+            # service: the compensating add follows the prior delete record.
+            self._append_action("add", asdict(restored))
+        logger.info("Cron: restored job '{}' ({})", restored.name, restored.id)
+        return "restored"
+
     def enable_job(self, job_id: str, enabled: bool = True) -> CronJob | None:
         """Enable or disable a job."""
         store = self._require_store()
@@ -730,11 +766,18 @@ class CronService:
         channel: str | None = ...,
         to: str | None = ...,
         delete_after_run: bool | None = None,
+        session_key: str | None = ...,
+        origin_channel: str | None = ...,
+        origin_chat_id: str | None = ...,
+        origin_metadata: dict[str, Any] | None = ...,
     ) -> CronJob | Literal["not_found", "protected"]:
         """Update mutable fields of an existing job. System jobs cannot be updated.
 
-        For ``channel`` and ``to``, pass an explicit value (including ``None``)
-        to update; omit (sentinel ``...``) to leave unchanged.
+        For optional delivery fields, pass an explicit value (including
+        ``None``) to update; omit (sentinel ``...``) to leave unchanged. The
+        origin fields are used by session-bound report subscriptions so an
+        administrative recipient change updates the actual execution target,
+        not just its database summary.
         """
         store = self._require_store()
         job = next((j for j in store.jobs if j.id == job_id), None)
@@ -758,6 +801,14 @@ class CronService:
             job.payload.to = to
         if delete_after_run is not None:
             job.delete_after_run = delete_after_run
+        if session_key is not ...:
+            job.payload.session_key = session_key
+        if origin_channel is not ...:
+            job.payload.origin_channel = origin_channel
+        if origin_chat_id is not ...:
+            job.payload.origin_chat_id = origin_chat_id
+        if origin_metadata is not ...:
+            job.payload.origin_metadata = dict(origin_metadata or {})
         _normalize_agent_turn_job(job)
         self._enforce_agent_binding(job)
 

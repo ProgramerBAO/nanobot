@@ -9,6 +9,8 @@ from nanobot.reporting.store import ReportStateStore
 
 
 def template_id_for_magik_params(params: dict[str, Any]) -> str:
+    if str(params.get("report_variant") or "") == "customer_model_daily_brief":
+        return "usage_customer_model_daily_brief"
     if str(params.get("report_family") or "") == "cost":
         return "cost_account"
     if str(params.get("report_family") or "") == "health":
@@ -53,6 +55,20 @@ def authorize_magik_params(
         checks.append(("tenant", tenant))
     if params.get("all_tenants") is True:
         checks.append(("tenant", "*"))
+    # Guided and multi-scope subscriptions store normalized IDs in the
+    # top-level fields.  The older authorization path only inspected
+    # ``tenant_query`` and nested selections, which allowed a form to appear
+    # authorized while its actual fan-out scope was never checked.
+    if params.get("all_tenants") is not True:
+        for tenant_id in params.get("tenants") or []:
+            normalized_tenant = str(tenant_id).strip()
+            if normalized_tenant:
+                checks.append(("tenant", normalized_tenant))
+    if params.get("model_scope") == "selected":
+        for model in params.get("models") or []:
+            model_name = str(model).strip()
+            if model_name:
+                checks.append(("model", model_name))
     selections = params.get("report_selections")
     if isinstance(selections, list):
         for selection in selections:

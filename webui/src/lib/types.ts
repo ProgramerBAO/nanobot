@@ -970,7 +970,31 @@ export interface ReportingTemplatePolicy extends ReportingCatalogTemplate {
   enabled: boolean;
   subscription_mode: "all_authorized" | "allowlist" | "disabled";
   revision: number;
+  show_subscription_button: boolean;
   updated_at: string;
+}
+
+export interface ReportingSubscriptionForm {
+  template_id: string;
+  channel: string;
+  chat_id: string;
+  user_id: string;
+  tenant_scope: "all" | "selected";
+  tenants: string[];
+  tenant_names?: string[];
+  model_scope: "all" | "selected" | "summary";
+  models: string[];
+  period: string;
+  recurrence: "every_day" | "workdays" | "weekly" | "monthly";
+  send_time: string;
+  weekday: number;
+  month_day: number;
+  timezone: string;
+  project?: string;
+  endpoint?: string;
+  provider?: string;
+  cluster?: string;
+  revision?: number;
 }
 
 export interface ReportingSubscription {
@@ -984,8 +1008,33 @@ export interface ReportingSubscription {
   schedule: string;
   timezone: string;
   enabled: boolean;
+  revision: number;
   report_params: Record<string, unknown>;
+  scope_summary: string;
+  schedule_label: string;
+  /** Older subscriptions may not have a normalized snapshot until reloaded. */
+  form?: ReportingSubscriptionForm;
   updated_at: string;
+}
+
+export interface ReportingSubscriptionOptions {
+  templates: Array<{
+    id: string;
+    name: string;
+    version: string;
+    periods: string[];
+    subscribable: boolean;
+    enabled?: boolean;
+    subscription_mode?: "all_authorized" | "allowlist" | "disabled";
+    show_subscription_button?: boolean;
+    revision?: number;
+  }>;
+  tenants: Array<{
+    tenant_id: string;
+    display_name: string;
+    tag?: string;
+  }>;
+  timezones: string[];
 }
 
 export interface ReportingSettingsPayload {
@@ -997,6 +1046,8 @@ export interface ReportingSettingsPayload {
   policy: {
     rbac_enabled: boolean;
     management_enabled: boolean;
+    guided_ui_enabled: boolean;
+    button_policy_enabled: boolean;
     resource_types: string[];
   };
   storage: { backend: string; retention_days: number };
@@ -1005,7 +1056,14 @@ export interface ReportingSettingsPayload {
   recent_runs: Array<Record<string, unknown>>;
   subscriptions: ReportingSubscription[];
   template_policies: ReportingTemplatePolicy[];
+  subscription_options?: ReportingSubscriptionOptions;
   last_action?: { ok: boolean; action: string; path?: string };
+  subscription_preview?: {
+    form: ReportingSubscriptionForm;
+    schedule_label: string;
+    template_id: string;
+    template_version: string;
+  };
 }
 
 export type ChannelConnectStatus = "pending" | "succeeded" | "expired" | "cancelled" | "failed";
