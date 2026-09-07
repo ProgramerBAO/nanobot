@@ -139,7 +139,16 @@ _MODEL_CUBE_PERIOD_RE = re.compile(
     re.IGNORECASE,
 )
 _MULTI_SCOPE_BRIEF_RE = re.compile(
-    r"^(?:请)?(?:打开|查看|生成)?(?:Cube\s*)?多客户多模型(?:日报)?简报[？?。！!]*$",
+    r"^(?:请)?(?:打开|查看|生成)?(?:Cube\s*)?多客户多模型(?P<period>日报|周报)?简报[？?。！!]*$",
+    re.IGNORECASE,
+)
+_MULTI_SCOPE_WEEKLY_RE = re.compile(
+    r"^(?:请)?(?:打开|查看|生成)?(?:Cube\s*)?各客户模型周报(?:简报)?[？?。！!]*$",
+    re.IGNORECASE,
+)
+_MULTI_SCOPE_NAMED_RE = re.compile(
+    r"^(?P<tenants>.+?)(?:的)?(?:全部|所有|全量)模型(?:的)?多客户(?:多模型)?"
+    r"(?P<period>日报|周报)简报[？?。！!]*$",
     re.IGNORECASE,
 )
 _MACHINE_TPM_RE = re.compile(
@@ -248,6 +257,7 @@ class ReportCenterToolConfig(Base):
     # These wider-scope capabilities are independently gated because they can
     # fan out across tenants or expose platform-level capacity information.
     cube_multi_scope_brief: bool = False
+    cube_multi_scope_weekly_brief: bool = False
     cube_machine_tpm_report: bool = False
     report_management_v1: bool = False
     # Guided WebUI subscription editing and result-card policy are independent
@@ -323,6 +333,7 @@ _REPORT_CENTER_PARAMETERS = {
                 "cost_report",
                 "provider_quality_report",
                 "multi_scope_brief",
+                "multi_scope_weekly_brief",
                 "machine_tpm_report",
                 "examples",
                 "recent",
@@ -496,6 +507,7 @@ class ReportCenterTool(Tool):
             cube_usage_semantics_v2=config.cube_usage_semantics_v2,
             cube_usage_brief_template_enabled=config.cube_usage_brief_template,
             cube_multi_scope_brief_enabled=config.cube_multi_scope_brief,
+            cube_multi_scope_weekly_brief_enabled=config.cube_multi_scope_weekly_brief,
             cube_machine_tpm_template_enabled=config.cube_machine_tpm_report,
             cube_cost_template_enabled=(config.cube_cost_connector and config.cube_cost_template),
             cube_provider_quality_connector_enabled=config.cube_provider_quality_connector,
@@ -1216,8 +1228,34 @@ class ReportCenterTool(Tool):
             }
         if _HOME_RE.fullmatch(raw):
             return {"action": "home"}
+        named_multi = _MULTI_SCOPE_NAMED_RE.fullmatch(raw)
+        if named_multi:
+            tenant_values = [
+                item.strip()
+                for item in re.split(r"[、，,；;和与及]+", named_multi.group("tenants"))
+                if item.strip()
+            ]
+            if tenant_values:
+                period = "week" if named_multi.group("period") == "周报" else "day"
+                return {
+                    "action": "multi_scope_brief",
+                    "period": period,
+                    "interactive": False,
+                    "tenants": tenant_values,
+                    "report_selections": [
+                        {"tenant_query": tenant, "model_scope": "all", "models": []}
+                        for tenant in tenant_values
+                    ],
+                }
         if _MULTI_SCOPE_BRIEF_RE.fullmatch(raw):
-            return {"action": "multi_scope_brief", "interactive": True, "period": "day"}
+            period_text = _MULTI_SCOPE_BRIEF_RE.fullmatch(raw).group("period")
+            return {
+                "action": "multi_scope_brief",
+                "interactive": True,
+                "period": "week" if period_text == "周报" else "day",
+            }
+        if _MULTI_SCOPE_WEEKLY_RE.fullmatch(raw):
+            return {"action": "multi_scope_brief", "interactive": True, "period": "week"}
         machine_tpm_match = _MACHINE_TPM_RE.fullmatch(raw)
         if machine_tpm_match:
             return {
@@ -2003,19 +2041,21 @@ class ReportCenterTool(Tool):
     ) -> ToolResult:
         """Run the explicit multi-customer/model brief after scope selection."""
 
-        if not self._config.cube_multi_scope_brief:
+        if period == "day" and not self._config.cube_multi_scope_brief:
             return ToolResult.error("Error: multi-customer model brief is not enabled")
-        if period != "day":
-            return ToolResult.error("Error: multi-customer model brief supports day only")
+        if period not in {"day", "week"}:
+            return ToolResult.error("Error: multi-customer model brief supports day and week")
+        if period == "week" and not self._config.cube_multi_scope_weekly_brief:
+            return ToolResult.error("Error: multi-customer weekly brief is not enabled")
         channel, chat_id, user_id, _session_key, metadata = self._request_identity()
         if interactive and not tenants and not report_selections:
             if self._magik_tool is None:
                 return ToolResult.error("Error: Cube scope selector is unavailable")
             today = datetime.now(ZoneInfo(self._config.timezone)).date()
-            selected_day, _ = self._cube_period_dates("day", today)
+            selected_day, selected_end = self._cube_period_dates(period, today)
             result = await self._magik_tool.execute(
                 start_date=selected_day.isoformat(),
-                end_date=selected_day.isoformat(),
+                end_date=selected_end.isoformat(),
                 comparison="none",
                 include_tpm=False,
                 report_template="matrix_card",
@@ -2028,10 +2068,10 @@ class ReportCenterTool(Tool):
                 ui["title"] = "选择多客户多模型日报范围"
                 ui["base_params"] = {
                     "action": "multi_scope_brief",
-                    "period": "day",
+                    "period": period,
                     "interactive": False,
                     "start_date": selected_day.isoformat(),
-                    "end_date": selected_day.isoformat(),
+                    "end_date": selected_end.isoformat(),
                     # The form UI comes from the legacy Cube tool, but every callback
                     # in this workflow must resume the multi-scope ReportRunner action.
                     "_report_center_selector": True,
@@ -2063,10 +2103,10 @@ class ReportCenterTool(Tool):
             )
             ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
             if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
-                ui["title"] = "选择多客户日报模型"
+                ui["title"] = "选择多客户日报模型" if period == "day" else "选择多客户周报模型"
                 ui["base_params"] = {
                     "action": "multi_scope_brief",
-                    "period": "day",
+                    "period": period,
                     "interactive": False,
                     "start_date": start_date,
                     "end_date": end_date,
@@ -2097,6 +2137,41 @@ class ReportCenterTool(Tool):
             tenant_models = {}
             all_model_tenants = []
             all_models = False
+        # Resolve display aliases to authoritative Cube tenant IDs before model
+        # discovery. The connector and the live model catalog both key by tenant
+        # ID; passing aliases here silently produces aggregate rows without model
+        # names for an all-model report.
+        resolver = getattr(self._magik_tool, "resolve_tenant_queries", None)
+        native_resolver = getattr(type(self._magik_tool), "resolve_tenant_queries", None)
+        if callable(resolver) and native_resolver is not None and tenants:
+            try:
+                resolved_tenants, unresolved_tenants = await resolver(tenants)
+            except Exception as exc:
+                return ToolResult.error(f"Cube 客户目录当前不可用，请稍后重试：{type(exc).__name__}")
+            if unresolved_tenants:
+                unresolved = "、".join(
+                    str(item.get("query") or "")
+                    for item in unresolved_tenants
+                    if isinstance(item, dict) and str(item.get("query") or "")
+                )
+                return ToolResult.error(
+                    f"以下客户无法在 Cube 实时目录中确认：{unresolved or '未知客户'}。"
+                )
+            tenant_id_by_query = {
+                str(item.get("query") or "").strip(): str(item.get("tenant_id") or "").strip()
+                for item in resolved_tenants
+                if isinstance(item, dict)
+                and str(item.get("query") or "").strip()
+                and str(item.get("tenant_id") or "").strip()
+            }
+            if len(tenant_id_by_query) != len(set(tenants)):
+                return ToolResult.error("Cube 客户目录返回的客户映射不完整，请重新选择客户。")
+            tenants = [tenant_id_by_query.get(item, item) for item in tenants]
+            all_model_tenants = [tenant_id_by_query.get(item, item) for item in all_model_tenants]
+            tenant_models = {
+                tenant_id_by_query.get(str(tenant_id).strip(), str(tenant_id).strip()): values
+                for tenant_id, values in tenant_models.items()
+            }
         if not tenants and not all_tenants:
             return ToolResult.error("请选择至少一个客户")
         if not all_models and not models and not tenant_models:
@@ -2108,10 +2183,11 @@ class ReportCenterTool(Tool):
             return ToolResult.error("报表日期需要使用 YYYY-MM-DD 格式。")
         if target_start is None or target_end is None:
             target_start, target_end = self._cube_period_dates(
-                "day", datetime.now(ZoneInfo(self._config.timezone)).date()
+                period, datetime.now(ZoneInfo(self._config.timezone)).date()
             )
-        if target_start != target_end:
-            return ToolResult.error("多客户多模型简报只支持单日")
+        expected_days = 1 if period == "day" else 7
+        if (target_end - target_start).days + 1 != expected_days:
+            return ToolResult.error("多客户多模型简报需要完整的日报或自然周周期")
         if all_model_tenants:
             try:
                 catalog_models = await self._load_tenant_model_catalog(
@@ -2126,7 +2202,12 @@ class ReportCenterTool(Tool):
             tenant_models.update(
                 {tenant_id: catalog_models[tenant_id] for tenant_id in all_model_tenants}
             )
-        template = self._registry.template("usage_customer_model_daily_brief")
+        template_id = (
+            "usage_customer_model_daily_brief"
+            if period == "day"
+            else "usage_customer_model_weekly_brief"
+        )
+        template = self._registry.template(template_id)
         if template is None:
             return ToolResult.error("Error: multi-customer model brief template is unavailable")
         scoped_model_values = tuple(
@@ -2159,7 +2240,7 @@ class ReportCenterTool(Tool):
         intent = ReportIntent(
             connector_id="magik_cube",
             template_id=template.manifest.template_id,
-            period="day",
+            period=period,
             tenant_scope="all" if all_tenants else "selected",
             tenants=tuple(dict.fromkeys(tenants)),
             models=intent_models,
@@ -4313,7 +4394,9 @@ class ReportCenterTool(Tool):
                 end_date=end_date,
                 report_selections=report_selections,
             )
-        if action == "multi_scope_brief":
+        if action in {"multi_scope_brief", "multi_scope_weekly_brief"}:
+            if action == "multi_scope_weekly_brief":
+                period = "week"
             return await self._run_multi_scope_brief(
                 period=period,
                 tenants=tenants or [],

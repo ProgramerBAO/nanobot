@@ -287,12 +287,21 @@ class CubeConnector(ConnectorPlugin):
                 raise ValueError("Cube multi-customer report returned more than 200 tenant/model pairs")
 
         unique_warnings = tuple(dict.fromkeys(warnings))
-        if unique_warnings and rows:
-            quality = "partial"
-        elif unique_warnings:
-            quality = "missing"
-        else:
+        only_no_data_warnings = bool(unique_warnings) and all(
+            warning.endswith("no_data") for warning in unique_warnings
+        )
+        # A catalog-expanded all-model report is expected to contain models that
+        # have no rows in one named comparison window. That is not an upstream
+        # failure and must not downgrade the whole report to partial; the model
+        # line still carries the missing-baseline/no-usage semantics. Actual
+        # transport, auth, or upstream warnings remain partial when other rows
+        # were returned.
+        if rows and (not unique_warnings or only_no_data_warnings):
             quality = "complete"
+        elif unique_warnings and rows:
+            quality = "partial"
+        else:
+            quality = "missing"
         rows.sort(
             key=lambda row: (
                 str(row.get("period")),

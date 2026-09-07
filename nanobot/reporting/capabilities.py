@@ -144,6 +144,29 @@ def capability_catalog(
                     ReportAction("multi_scope_brief", "多客户多模型简报", style="default"),
                 )
             )
+        weekly_multi_template = registry.template("usage_customer_model_weekly_brief")
+        if (
+            weekly_multi_template is not None
+            and weekly_multi_template in registry.compatible_templates("magik_cube")
+            and store.allowed(channel, user_id, "template", weekly_multi_template.manifest.template_id)
+            and _template_enabled(
+                store,
+                weekly_multi_template.manifest.template_id,
+                policy_enforced=template_policy_enforced,
+            )
+        ):
+            items.append(
+                Capability(
+                    "multi_scope_weekly_brief",
+                    "多客户多模型周报简报",
+                    "按客户分组查看完整自然周模型 Token 和环比",
+                    ReportAction(
+                        "multi_scope_weekly_brief",
+                        "多客户多模型周报简报",
+                        style="default",
+                    ),
+                )
+            )
         matrix_actions = {
             "usage_daily_matrix": ("day", "日报", "昨天对比前天"),
             "usage_weekly_matrix": ("week", "周报", "上周对比上上周"),

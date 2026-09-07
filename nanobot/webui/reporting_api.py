@@ -304,6 +304,7 @@ def _reporting_registry_kwargs(config: Any) -> dict[str, Any]:
         "cube_usage_semantics_v2": flag("cube_usage_semantics_v2"),
         "cube_usage_brief_template_enabled": flag("cube_usage_brief_template", True),
         "cube_multi_scope_brief_enabled": flag("cube_multi_scope_brief"),
+        "cube_multi_scope_weekly_brief_enabled": flag("cube_multi_scope_weekly_brief"),
         "cube_machine_tpm_template_enabled": flag("cube_machine_tpm_report"),
         "cube_cost_template_enabled": flag("cube_cost_connector")
         and flag("cube_cost_template"),

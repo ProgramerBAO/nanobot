@@ -164,8 +164,15 @@ def _format_grouped_metrics(data: dict[str, Any]) -> str:
                 if isinstance(value, dict)
             )
             status = str(item.get("status") or "")
+            current_value = str(item.get("current_value") or item.get("value") or "暂无数据")
+            current_unit = str(item.get("current_unit") or "").strip()
+            value_text = (
+                f"{current_unit} {current_value}" if current_unit else current_value
+            )
             suffix = "｜暂无用量" if status == "no_usage" else ""
-            lines.append(f"- {item.get('label') or '未命名模型'}｜{comparisons}{suffix}")
+            lines.append(
+                f"- {item.get('label') or '未命名模型'}｜{value_text}｜{comparisons}{suffix}"
+            )
         sections.append("\n".join(lines))
     if hidden_groups:
         sections.append(f"无用量客户 {len(hidden_groups)} 个（默认收起）：" + "、".join(hidden_groups))

@@ -2556,6 +2556,9 @@ def report_plugins_list() -> None:
         cube_multi_scope_brief_enabled=bool(
             getattr(config.tools.reporting, "cube_multi_scope_brief", False)
         ),
+        cube_multi_scope_weekly_brief_enabled=bool(
+            getattr(config.tools.reporting, "cube_multi_scope_weekly_brief", False)
+        ),
         cube_machine_tpm_template_enabled=bool(
             getattr(config.tools.reporting, "cube_machine_tpm_report", False)
         ),

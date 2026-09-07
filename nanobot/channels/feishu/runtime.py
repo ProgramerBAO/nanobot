@@ -2360,6 +2360,16 @@ class FeishuChannel(BaseChannel):
                 "params": {"action": "multi_scope_brief", "period": "day", "interactive": True},
                 "content": "生成多客户多模型日报简报",
             }
+        if action_id == "multi_scope_weekly_brief":
+            return {
+                "tool_name": "report_center",
+                "params": {
+                    "action": "multi_scope_brief",
+                    "period": "week",
+                    "interactive": True,
+                },
+                "content": "生成多客户多模型周报简报",
+            }
         if action_id == "machine_tpm_report":
             return {
                 "tool_name": "report_center",
@@ -2548,8 +2558,18 @@ class FeishuChannel(BaseChannel):
                             if isinstance(value, dict)
                         )
                         status = "  暂无用量" if item.get("status") == "no_usage" else ""
+                        current_value = str(
+                            item.get("current_value") or item.get("value") or "暂无数据"
+                        )
+                        current_unit = str(item.get("current_unit") or "").strip()
+                        value_text = (
+                            f"{current_unit} {current_value}"
+                            if current_unit
+                            else current_value
+                        )
                         lines.append(
-                            f"{item.get('label') or '未命名模型'}  {comparisons}{status}"
+                            f"{item.get('label') or '未命名模型'}  {value_text}  "
+                            f"{comparisons}{status}"
                         )
                     elements.append(
                         {
@@ -5080,6 +5100,9 @@ class FeishuChannel(BaseChannel):
             ),
             cube_multi_scope_brief_enabled=bool(
                 getattr(reporting_config, "cube_multi_scope_brief", False)
+            ),
+            cube_multi_scope_weekly_brief_enabled=bool(
+                getattr(reporting_config, "cube_multi_scope_weekly_brief", False)
             ),
             cube_machine_tpm_template_enabled=bool(
                 getattr(reporting_config, "cube_machine_tpm_report", False)

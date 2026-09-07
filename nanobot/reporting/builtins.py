@@ -84,7 +84,7 @@ class MagikCubeConnector(ConnectorPlugin):
 
 
 class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
-    """Compact daily brief grouped by catalog-backed tenant display name and model."""
+    """Compact customer/model usage brief with a period-specific comparison policy."""
 
     manifest = TemplateManifest(
         template_id="usage_customer_model_daily_brief",
@@ -98,14 +98,18 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
         description="按客户别名分组展示模型 Token 用量的同比和环比",
     )
 
-    def __init__(self, *, timezone: str = "Asia/Shanghai") -> None:
+    def __init__(self, *, timezone: str = "Asia/Shanghai", period_mode: str = "day") -> None:
         self.timezone = timezone
+        self.period_mode = period_mode
 
     def plan(self, intent: ReportIntent) -> tuple[ReportQuery, ...]:
-        if intent.period != "day" or intent.start_date is None or intent.end_date is None:
-            raise ValueError("multi-customer model brief requires one concrete day")
-        if intent.start_date != intent.end_date:
-            raise ValueError("multi-customer model brief only supports a single day")
+        if intent.period != self.period_mode or intent.start_date is None or intent.end_date is None:
+            raise ValueError(f"multi-customer model brief requires a {self.period_mode} window")
+        window_days = (intent.end_date - intent.start_date).days + 1
+        if (self.period_mode == "day" and window_days != 1) or (
+            self.period_mode == "week" and window_days != 7
+        ):
+            raise ValueError("multi-customer model brief requires a complete period window")
         tenant_models = intent.filters.get("tenant_models")
         has_tenant_models = isinstance(tenant_models, Mapping) and bool(tenant_models)
         if not intent.models and not has_tenant_models:
@@ -121,14 +125,26 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                 dimensions=("tenant", "model", "date"),
                 start_date=intent.start_date,
                 end_date=intent.end_date,
-                comparison_start=intent.start_date - timedelta(days=1),
-                comparison_end=intent.end_date - timedelta(days=1),
+                comparison_start=(
+                    intent.start_date - timedelta(days=1)
+                    if self.period_mode == "day"
+                    else intent.start_date - timedelta(days=7)
+                ),
+                comparison_end=(
+                    intent.end_date - timedelta(days=1)
+                    if self.period_mode == "day"
+                    else intent.end_date - timedelta(days=7)
+                ),
                 additional_comparisons=(
-                    ReportQueryComparison(
-                        key="previous_week_same_day",
-                        start_date=intent.start_date - timedelta(days=7),
-                        end_date=intent.end_date - timedelta(days=7),
-                    ),
+                    (
+                        ReportQueryComparison(
+                            key="previous_week_same_day",
+                            start_date=intent.start_date - timedelta(days=7),
+                            end_date=intent.end_date - timedelta(days=7),
+                        ),
+                    )
+                    if self.period_mode == "day"
+                    else ()
                 ),
                 filters={
                     "tenants": tenants,
@@ -196,16 +212,13 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                     continue
                 current = self._token_total(rows, pair_tenant, model, "current")
                 previous = self._token_total(rows, pair_tenant, model, "comparison")
-                weekly = self._token_total(
-                    rows, pair_tenant, model, "previous_week_same_day"
-                )
+                weekly = self._token_total(rows, pair_tenant, model, "previous_week_same_day")
                 # Catalog-backed "all" scope can contain many configured but idle
                 # models. Hide only when all three named windows prove zero/empty;
                 # an upstream failure disables filtering so unavailable data is not
                 # misrepresented as no usage.
-                if filter_unused_models and all(
-                    value in {None, 0} for value in (current, previous, weekly)
-                ):
+                comparison_values = (current, previous, weekly) if self.period_mode == "day" else (current, previous)
+                if filter_unused_models and all(value in {None, 0} for value in comparison_values):
                     hidden_model_count += 1
                     continue
                 tenant_status = str(tenant_statuses.get(tenant) or "")
@@ -219,12 +232,17 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                 comparisons = (
                     [{"key": "status", "label": "状态", "change": "查询失败"}]
                     if status == "unavailable"
-                    else [
+                    else (
+                        [
                         {
                             "key": "previous_week_same_day",
                             "label": "同比",
                             "change": _format_metric_change(current, weekly),
                         },
+                        ]
+                        if self.period_mode == "day"
+                        else []
+                    ) + [
                         {
                             "key": "previous_period",
                             "label": "环比",
@@ -236,6 +254,8 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                     "label": model,
                     "metric": "ai.usage.tokens",
                     "value": _format_compact(current),
+                    "current_value": _format_compact(current),
+                    "current_unit": "Token",
                     "status": status,
                     "comparisons": comparisons,
                 }
@@ -270,7 +290,11 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                 ),
             )
             for item in windows
-            if item.get("period") in {"comparison", "previous_week_same_day"}
+            if item.get("period") in (
+                {"comparison", "previous_week_same_day"}
+                if self.period_mode == "day"
+                else {"comparison"}
+            )
         )
         # Empty catalog models are expected in all-model mode, not an upstream
         # failure. Preserve genuine query failures while preventing hidden idle
@@ -325,17 +349,21 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
             f"{len(displayed_models)} 个模型"
         )
         hidden_note = (
-            f"已自动隐藏 {hidden_model_count} 个当前日、前一日和上周同期均无用量的模型。"
+            f"已自动隐藏 {hidden_model_count} 个当前周期和环比基准均无用量的模型。"
             if hidden_model_count
             else ""
         )
+        if self.period_mode == "day":
+            semantics = "每个客户、模型的 Token 按自然日求和；同比对比上周同日，环比对比前一日。"
+        else:
+            semantics = "每个客户、模型的 Token 按完整自然周求和；环比对比前一完整自然周。"
         blocks = (
             ReportBlock("grouped_metrics", {"groups": groups, "collapse_no_usage": False}),
             ReportBlock(
                 "note",
                 {
                     "content": (
-                        "口径：每个客户、模型的 Token 按日求和；同比对比上周同日，环比对比前一日。"
+                        f"口径：{semantics}"
                         "只展示百分比变化，客户身份来自 Cube 实时目录。"
                         f"{hidden_note}"
                     ),
@@ -379,6 +407,24 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
         ]
         return sum(values) if values else None
 
+
+class MultiCustomerModelWeeklyBriefTemplate(MultiCustomerModelDailyBriefTemplate):
+    """Weekly multi-customer brief; the base class owns shared grouping semantics."""
+
+    manifest = TemplateManifest(
+        template_id="usage_customer_model_weekly_brief",
+        display_name="多客户多模型周报简报",
+        version="1.0",
+        category="usage",
+        periods=frozenset({"week"}),
+        required_metrics=frozenset({"ai.usage.tokens"}),
+        required_dimensions=frozenset({"tenant", "model", "date"}),
+        connector_ids=frozenset({"magik_cube"}),
+        description="按客户分组展示完整自然周模型 Token 用量及环比",
+    )
+
+    def __init__(self, *, timezone: str = "Asia/Shanghai") -> None:
+        super().__init__(timezone=timezone, period_mode="week")
 
 class UsageMatrixTemplate(TemplatePlugin):
     """Build Cube usage reports with shared calculations and selectable presentation depth."""
@@ -1610,6 +1656,7 @@ def build_default_registry(
     cube_usage_semantics_v2: bool = False,
     cube_usage_brief_template_enabled: bool = True,
     cube_multi_scope_brief_enabled: bool = False,
+    cube_multi_scope_weekly_brief_enabled: bool = False,
     cube_machine_tpm_template_enabled: bool = False,
     cube_cost_template_enabled: bool = False,
     cube_provider_quality_connector_enabled: bool = False,
@@ -1661,6 +1708,10 @@ def build_default_registry(
         registry.connector("magik_cube"), CubeConnector
     ):
         registry.register_template(MultiCustomerModelDailyBriefTemplate(timezone=timezone))
+    if cube_multi_scope_weekly_brief_enabled and isinstance(
+        registry.connector("magik_cube"), CubeConnector
+    ):
+        registry.register_template(MultiCustomerModelWeeklyBriefTemplate(timezone=timezone))
     if cube_machine_tpm_template_enabled and isinstance(
         registry.connector("magik_cube"), CubeConnector
     ):

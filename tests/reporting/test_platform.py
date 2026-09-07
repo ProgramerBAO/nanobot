@@ -20,7 +20,11 @@ from nanobot.reporting import (
     create_report_state_store,
 )
 from nanobot.reporting.authorization import authorize_magik_params, template_id_for_magik_params
-from nanobot.reporting.builtins import MultiCustomerModelDailyBriefTemplate, UsageMatrixTemplate
+from nanobot.reporting.builtins import (
+    MultiCustomerModelDailyBriefTemplate,
+    MultiCustomerModelWeeklyBriefTemplate,
+    UsageMatrixTemplate,
+)
 from nanobot.reporting.capabilities import capability_catalog
 from nanobot.reporting.contracts import ReportContext, ReportSource, ReportWindow
 from nanobot.reporting.registry import (
@@ -209,6 +213,9 @@ def test_multi_customer_model_brief_groups_aliases_and_named_changes() -> None:
         {"key": "previous_week_same_day", "label": "同比", "change": "↑25.0%"},
         {"key": "previous_period", "label": "环比", "change": "↓20.0%"},
     ]
+    assert grouped.data["groups"][0]["items"][0]["current_value"] == "80"
+    assert grouped.data["groups"][0]["items"][0]["current_unit"] == "Token"
+    assert "Token 80" in document_to_markdown(document)
     markdown = document_to_markdown(document)
     assert "## 佛跳墙" in markdown
     assert "同比：↑25.0%" in markdown
@@ -223,6 +230,54 @@ def test_multi_customer_model_brief_groups_aliases_and_named_changes() -> None:
     assert note.data["include_context"] is True
     assert document.quality == "complete"
     assert document.warnings == ()
+
+
+def test_multi_customer_weekly_brief_sums_tokens_and_only_shows_weekly_change() -> None:
+    template = MultiCustomerModelWeeklyBriefTemplate()
+    intent = ReportIntent(
+        connector_id="magik_cube",
+        template_id="usage_customer_model_weekly_brief",
+        period="week",
+        tenants=("tenant-fo",),
+        models=("Kimi-K3",),
+        start_date=date(2026, 8, 24),
+        end_date=date(2026, 8, 30),
+        filters={
+            "tenant_scope": "selected",
+            "tenant_models": {"tenant-fo": ["Kimi-K3"]},
+            "model_scope": "selected",
+        },
+    )
+    query = template.plan(intent)[0]
+    assert query.comparison_start == date(2026, 8, 17)
+    assert query.comparison_end == date(2026, 8, 23)
+    document = template.analyze(
+        (
+            ReportDataset(
+                rows=(
+                    {"period": "current", "tenant": "佛跳墙", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 60},
+                    {"period": "current", "tenant": "佛跳墙", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 40},
+                    {"period": "comparison", "tenant": "佛跳墙", "model": "Kimi-K3", "metric": "ai.usage.tokens", "value": 50},
+                ),
+                metadata={
+                    "query_windows": [
+                        {"period": "current", "start": "2026-08-24 00:00", "end": "2026-08-31 00:00"},
+                        {"period": "comparison", "start": "2026-08-17 00:00", "end": "2026-08-24 00:00"},
+                    ],
+                    "scope": {
+                        "tenant_names": ["佛跳墙"],
+                        "models": ["Kimi-K3"],
+                        "tenant_models": {"佛跳墙": ["Kimi-K3"]},
+                        "model_scope": "selected",
+                    },
+                },
+            ),
+        )
+    )
+    item = document.blocks[0].data["groups"][0]["items"][0]
+    assert item["current_value"] == "100"
+    assert item["comparisons"] == [{"key": "previous_period", "label": "环比", "change": "↑100.0%"}]
+    assert "同比" not in document_to_markdown(document)
 
 
 def test_multi_customer_model_brief_keeps_explicit_or_historical_models() -> None:

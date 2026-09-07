@@ -78,6 +78,23 @@ def test_new_capacity_and_multi_scope_phrases_use_report_center(monkeypatch, tmp
         "interactive": True,
         "period": "day",
     }
+    assert tool.match_direct_request("多客户多模型周报简报") == {
+        "action": "multi_scope_brief",
+        "interactive": True,
+        "period": "week",
+    }
+    assert tool.match_direct_request("查看各客户模型周报") == {
+        "action": "multi_scope_brief",
+        "interactive": True,
+        "period": "week",
+    }
+    named_weekly = tool.match_direct_request(
+        "阳春面、豆汁、佛跳墙全部模型的多客户周报简报"
+    )
+    assert named_weekly["action"] == "multi_scope_brief"
+    assert named_weekly["period"] == "week"
+    assert named_weekly["tenants"] == ["阳春面", "豆汁", "佛跳墙"]
+    assert len(named_weekly["report_selections"]) == 3
 
 
 @pytest.mark.asyncio
