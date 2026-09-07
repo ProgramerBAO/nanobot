@@ -2840,7 +2840,10 @@ class ReportCenterTool(Tool):
                 "usage_customer_model_daily_brief",
             }:
                 return self._result(
-                    self._subscription_unavailable_document("该报表类型当前不允许创建订阅。")
+                    self._subscription_unavailable_document(
+                        "该报表类型当前不允许创建订阅。请在 Report platform → 报表类型中，"
+                        "将订阅策略设为“全部授权用户”或“指定用户”；“显示订阅按钮”只控制按钮显示。"
+                    )
                 )
             data_period = reference.period
             params = {
