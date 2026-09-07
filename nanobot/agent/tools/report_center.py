@@ -2602,10 +2602,7 @@ class ReportCenterTool(Tool):
                 return "Error: no permission to subscribe to this report template"
 
         policy = self._store.template_policy(template_id)
-        if policy is None and template_id in {
-            "usage_customer_model_daily_brief",
-            "machine_tpm_peak",
-        }:
+        if policy is None and template_id in {"machine_tpm_peak"}:
             return "Error: this report template does not allow subscriptions"
         if policy is None:
             return None

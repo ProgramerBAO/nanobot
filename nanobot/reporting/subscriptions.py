@@ -305,10 +305,7 @@ class ReportSubscriptionService:
         if not self._management_enabled():
             return
         policy = self.store.template_policy(template_id)
-        default_disabled = template_id in {
-            "usage_customer_model_daily_brief",
-            "machine_tpm_peak",
-        }
+        default_disabled = template_id in {"machine_tpm_peak"}
         if policy is None:
             if default_disabled:
                 raise SubscriptionServiceError(

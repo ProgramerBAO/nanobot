@@ -15,7 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from nanobot.bus.events import INBOUND_META_DIRECT_TOOL
-from nanobot.config.loader import load_config
+from nanobot.config.loader import load_config, resolve_config_env_vars
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
@@ -54,6 +54,20 @@ class ReportingSettingsError(Exception):
         super().__init__(message)
         self.message = message
         self.status = status
+
+
+def _load_reporting_config() -> Any:
+    """Load the same environment-resolved config used by the Gateway.
+
+    The reporting settings API runs in a WebUI request handler, while the
+    Gateway resolves ``${ENV_VAR}`` references during startup.  Keeping this
+    boundary consistent is required for live Cube catalog access: otherwise a
+    guided subscription can fail even though the running report tool has a
+    valid credential.  The resolved object is used only in memory and is
+    never serialized into the management response.
+    """
+
+    return resolve_config_env_vars(load_config())
 
 
 def _required(query: QueryParams, name: str, *, max_length: int = 256) -> str:
@@ -477,7 +491,7 @@ def _pagination_value(
 
 def reporting_settings_payload(query: QueryParams | None = None) -> dict[str, Any]:
     query = query or {}
-    config = load_config()
+    config = _load_reporting_config()
     store = get_report_state_store(
         config.tools.reporting.state_backend,
         config.tools.reporting.postgres_dsn_env,
@@ -488,9 +502,7 @@ def reporting_settings_payload(query: QueryParams | None = None) -> dict[str, An
     persisted_policies = {
         item["template_id"]: item for item in store.template_policies()
     }
-    default_non_subscribable = {
-        "usage_customer_model_daily_brief", "machine_tpm_peak"
-    }
+    default_non_subscribable = {"machine_tpm_peak"}
     template_policies = []
     for item in registry.public_catalog().get("templates", []):
         stored = persisted_policies.get(str(item.get("id") or ""))
@@ -583,7 +595,7 @@ def _export_catalog() -> Path:
 def reporting_settings_action(action: str | None, query: QueryParams) -> dict[str, Any]:
     if action is None:
         return reporting_settings_payload(query)
-    config = load_config()
+    config = _load_reporting_config()
     store = get_report_state_store(
         config.tools.reporting.state_backend,
         config.tools.reporting.postgres_dsn_env,
@@ -609,10 +621,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
         persisted_policies = {
             item["template_id"]: item for item in store.template_policies()
         }
-        default_non_subscribable = {
-            "usage_customer_model_daily_brief",
-            "machine_tpm_peak",
-        }
+        default_non_subscribable = {"machine_tpm_peak"}
 
         def template_subscription_view(template_id: str) -> dict[str, Any]:
             """Keep editor options consistent with the persisted policy view."""
@@ -956,9 +965,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
             (item for item in store.template_policies() if item["template_id"] == template_id),
             None,
         )
-        default_disabled = template_id in {
-            "usage_customer_model_daily_brief", "machine_tpm_peak"
-        }
+        default_disabled = template_id in {"machine_tpm_peak"}
         if (
             policy
             and (not policy["enabled"] or policy["subscription_mode"] == "disabled")

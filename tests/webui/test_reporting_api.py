@@ -67,6 +67,44 @@ def test_template_policy_action_enforces_revision(monkeypatch, tmp_path) -> None
     assert exc_info.value.status == 409
 
 
+def test_default_subscription_policy_allows_daily_brief_but_not_machine_peak(
+    monkeypatch, tmp_path
+) -> None:
+    """Daily multi-scope briefs remain subscribable until an admin disables them."""
+
+    store = ReportStateStore(tmp_path / "reporting.db")
+    monkeypatch.setattr(reporting_api, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *_args, **_kwargs: store)
+
+    payload = reporting_api.reporting_settings_payload()
+    policies = {item["id"]: item for item in payload["template_policies"]}
+
+    assert policies["usage_customer_model_daily_brief"]["subscription_mode"] == (
+        "all_authorized"
+    )
+    assert policies["machine_tpm_peak"]["subscription_mode"] == "disabled"
+
+
+def test_reporting_settings_resolves_environment_references_before_building_payload(
+    monkeypatch, tmp_path
+) -> None:
+    """The WebUI control plane must use the Gateway's resolved config boundary."""
+
+    config = _config(tmp_path)
+    calls = []
+    monkeypatch.setattr(reporting_api, "load_config", lambda: config)
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *_args, **_kwargs: ReportStateStore(tmp_path / "reporting.db"))
+
+    def resolve(value):
+        calls.append(value)
+        return value
+
+    monkeypatch.setattr(reporting_api, "resolve_config_env_vars", resolve)
+    reporting_api.reporting_settings_payload()
+
+    assert calls == [config]
+
+
 def test_guided_form_accepts_legacy_zero_revision() -> None:
     """Revision zero is valid for subscriptions created before CAS migration."""
 
