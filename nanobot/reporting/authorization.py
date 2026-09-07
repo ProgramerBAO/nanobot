@@ -9,8 +9,16 @@ from nanobot.reporting.store import ReportStateStore
 
 
 def template_id_for_magik_params(params: dict[str, Any]) -> str:
-    if str(params.get("report_variant") or "") == "customer_model_daily_brief":
-        return "usage_customer_model_daily_brief"
+    if str(params.get("report_variant") or "") in {
+        "customer_model_daily_brief",
+        "customer_model_weekly_brief",
+    }:
+        period = str(params.get("subscription_period") or params.get("period") or "day")
+        return (
+            "usage_customer_model_weekly_brief"
+            if period == "week"
+            else "usage_customer_model_daily_brief"
+        )
     if str(params.get("report_family") or "") == "cost":
         return "cost_account"
     if str(params.get("report_family") or "") == "health":

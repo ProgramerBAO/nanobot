@@ -684,10 +684,17 @@ class ReportSubscriptionService:
                 for tenant_id in tenant_ids
             ],
         }
-        if template_id == "usage_customer_model_daily_brief":
+        if template_id in {
+            "usage_customer_model_daily_brief",
+            "usage_customer_model_weekly_brief",
+        }:
             params.update(
                 {
-                    "report_variant": "customer_model_daily_brief",
+                    "report_variant": (
+                        "customer_model_weekly_brief"
+                        if template_id == "usage_customer_model_weekly_brief"
+                        else "customer_model_daily_brief"
+                    ),
                     "multi_scope": True,
                     "report_template": "brief",
                 }

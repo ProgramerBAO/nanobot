@@ -14,6 +14,7 @@ REPORT_TEMPLATE_LABELS = {
     "health_sre": "Cube 健康报告",
     "cost_account": "Cube 成本与账户报表",
     "usage_customer_model_daily_brief": "多客户多模型日报简报",
+    "usage_customer_model_weekly_brief": "多客户多模型周报简报",
     "machine_tpm_peak": "单机折算 TPM 峰值",
 }
 
@@ -27,6 +28,7 @@ REPORT_DATA_PERIODS = {
     "health_sre": "发送时生成平台级健康日/周趋势",
     "cost_account": "上月账单归属月，对比前一自然月；余额为发送时快照",
     "usage_customer_model_daily_brief": "前一自然日，对比前一日和上周同期",
+    "usage_customer_model_weekly_brief": "上一完整自然周，对比此前一完整自然周",
     "machine_tpm_peak": "发送时按订阅周期计算单机折算 TPM 峰值",
 }
 

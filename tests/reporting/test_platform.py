@@ -401,6 +401,19 @@ def test_brief_subscription_authorization_uses_period_template() -> None:
     ) == "usage_weekly_brief"
 
 
+def test_multi_scope_weekly_subscription_uses_weekly_template() -> None:
+    """Weekly multi-scope subscriptions must retain their dedicated template."""
+
+    params = {
+        "report_variant": "customer_model_weekly_brief",
+        "subscription_period": "week",
+        "tenants": ["tenant-a", "tenant-b"],
+        "model_scope": "all",
+    }
+
+    assert template_id_for_magik_params(params) == "usage_customer_model_weekly_brief"
+
+
 def test_report_store_onboarding_rbac_runs_and_subscriptions(tmp_path) -> None:
     store = ReportStateStore(tmp_path / "state.db")
     assert not store.onboarding_seen("feishu", "ou_a", 1)

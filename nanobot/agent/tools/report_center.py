@@ -2765,6 +2765,7 @@ class ReportCenterTool(Tool):
             "usage_weekly_brief": ("week", "usage_brief"),
             "usage_monthly_brief": ("month", "usage_brief"),
             "usage_customer_model_daily_brief": ("day", "customer_model_daily_brief"),
+            "usage_customer_model_weekly_brief": ("week", "customer_model_weekly_brief"),
         }
         unresolved: list[dict[str, str]] = []
         display_names: list[str] = []
@@ -2838,6 +2839,7 @@ class ReportCenterTool(Tool):
                 "usage_weekly_brief",
                 "usage_monthly_brief",
                 "usage_customer_model_daily_brief",
+                "usage_customer_model_weekly_brief",
             }:
                 return self._result(
                     self._subscription_unavailable_document(
@@ -2925,18 +2927,19 @@ class ReportCenterTool(Tool):
             # must use the grouped template; otherwise the legacy one-tenant
             # brief silently drops all but the last selection.
             multi_scope_requested = (
-                report_type == "usage_customer_model_daily_brief"
+                report_type in {
+                    "usage_customer_model_daily_brief",
+                    "usage_customer_model_weekly_brief",
+                }
                 or (tenant_scope == "selected" and len(tenant_aliases) > 1)
                 or (tenant_scope == "all" and model_scope == "all")
             )
-            if multi_scope_requested and data_period != "day":
-                return self._result(
-                    self._subscription_unavailable_document(
-                        "多客户多模型订阅当前仅支持日报，请改为日报或分别创建周期订阅。"
-                    )
-                )
             if multi_scope_requested:
-                report_type = "usage_customer_model_daily_brief"
+                report_type = (
+                    "usage_customer_model_weekly_brief"
+                    if data_period == "week"
+                    else "usage_customer_model_daily_brief"
+                )
                 data_period, report_variant = safe_report_types[report_type]
             params = {
                 "report_variant": report_variant,
@@ -3040,8 +3043,17 @@ class ReportCenterTool(Tool):
                     selection["models"] = list(tenant_models.get(tenant_id, []))
 
         params["subscription_period"] = data_period
-        if str(params.get("report_variant") or "") == "customer_model_daily_brief":
-            if not self._config.cube_multi_scope_brief:
+        if str(params.get("report_variant") or "") in {
+            "customer_model_daily_brief",
+            "customer_model_weekly_brief",
+        }:
+            variant = str(params["report_variant"])
+            enabled = (
+                self._config.cube_multi_scope_brief
+                if variant == "customer_model_daily_brief"
+                else self._config.cube_multi_scope_weekly_brief
+            )
+            if not enabled:
                 return ToolResult.error("Error: multi-customer model brief is not enabled")
             params["report_template"] = "brief"
         try:
@@ -3057,6 +3069,8 @@ class ReportCenterTool(Tool):
         template_id = (
             "usage_customer_model_daily_brief"
             if str(params.get("report_variant") or "") == "customer_model_daily_brief"
+            else "usage_customer_model_weekly_brief"
+            if str(params.get("report_variant") or "") == "customer_model_weekly_brief"
             else _BRIEF_PERIOD_TEMPLATES[data_period]
         )
         policy_denial = self._subscription_policy_denial(
@@ -3274,6 +3288,8 @@ class ReportCenterTool(Tool):
     ) -> str:
         if report_variant == "customer_model_daily_brief":
             return "usage_customer_model_daily_brief"
+        if report_variant == "customer_model_weekly_brief":
+            return "usage_customer_model_weekly_brief"
         if report_template == "brief":
             return _BRIEF_PERIOD_TEMPLATES[data_period]
         return _PERIOD_TEMPLATES[data_period]
@@ -3604,8 +3620,21 @@ class ReportCenterTool(Tool):
                     "cluster": str(params.get("cluster") or "").strip(),
                 },
             )
-        if subscription.template_id == "usage_customer_model_daily_brief":
-            if not self._config.cube_multi_scope_brief or period != "day":
+        if subscription.template_id in {
+            "usage_customer_model_daily_brief",
+            "usage_customer_model_weekly_brief",
+        }:
+            expected_period = (
+                "day"
+                if subscription.template_id == "usage_customer_model_daily_brief"
+                else "week"
+            )
+            enabled = (
+                self._config.cube_multi_scope_brief
+                if expected_period == "day"
+                else self._config.cube_multi_scope_weekly_brief
+            )
+            if not enabled or period != expected_period:
                 return None
             try:
                 start_date = date.fromisoformat(str(params["start_date"]))
@@ -3653,7 +3682,7 @@ class ReportCenterTool(Tool):
             return ReportIntent(
                 connector_id="magik_cube",
                 template_id="usage_customer_model_daily_brief",
-                period="day",
+                period=expected_period,  # type: ignore[arg-type]
                 tenant_scope=(
                     "all" if params.get("all_tenants") is True else "selected"
                 ),
@@ -3815,7 +3844,10 @@ class ReportCenterTool(Tool):
         params = self._dynamic_magik_params(subscription)
         tenant_models: dict[str, list[str]] | None = None
         if (
-            subscription.template_id == "usage_customer_model_daily_brief"
+            subscription.template_id in {
+                "usage_customer_model_daily_brief",
+                "usage_customer_model_weekly_brief",
+            }
             and str(params.get("model_scope") or "") == "all"
         ):
             tenants = [
@@ -4167,12 +4199,27 @@ class ReportCenterTool(Tool):
         elif params.get("report_template") == "brief":
             params["subscription_period"] = period
         report_variant = str(params.get("report_variant") or "")
-        if report_variant == "customer_model_daily_brief":
-            if not self._config.cube_multi_scope_brief or period != "day":
+        if report_variant in {
+            "customer_model_daily_brief",
+            "customer_model_weekly_brief",
+        }:
+            expected_period = (
+                "day" if report_variant == "customer_model_daily_brief" else "week"
+            )
+            enabled = (
+                self._config.cube_multi_scope_brief
+                if report_variant == "customer_model_daily_brief"
+                else self._config.cube_multi_scope_weekly_brief
+            )
+            if not enabled or period != expected_period:
                 return ToolResult.error(
-                    "Error: multi-customer model subscriptions require the daily brief"
+                    "Error: multi-customer model subscription period is not enabled"
                 )
-            template_id = "usage_customer_model_daily_brief"
+            template_id = (
+                "usage_customer_model_daily_brief"
+                if expected_period == "day"
+                else "usage_customer_model_weekly_brief"
+            )
         else:
             template_id = (
                 "health_sre"
@@ -4247,7 +4294,10 @@ class ReportCenterTool(Tool):
             cube_family_enabled
             and isinstance(connector, (CubeConnector, CubeProviderQualityConnector))
             and (
-                subscription.template_id == "usage_customer_model_daily_brief"
+            subscription.template_id in {
+                "usage_customer_model_daily_brief",
+                "usage_customer_model_weekly_brief",
+            }
                 or self._subscription_cube_intent(subscription) is not None
             )
         ):
