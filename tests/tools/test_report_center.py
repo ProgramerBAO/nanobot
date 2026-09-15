@@ -1231,6 +1231,28 @@ async def test_multi_scope_subscription_falls_back_to_legacy_tool(
     magik.execute.assert_awaited_once()
 
 
+def test_with_delivery_metadata_wraps_plain_string_result() -> None:
+    """Regression for the live 2026-09-15 server crash.
+
+    The legacy Magik tool legally returns plain strings (ToolResult is a str
+    subclass), so the delivery wrapper must normalize instead of assuming a
+    ToolResult and raising AttributeError on ``metadata``.
+    """
+
+    result = ReportCenterTool._with_delivery_metadata(
+        "legacy plain text",
+        idempotency_key="sub-a:1:1",
+        run_id="run-a",
+        report_attempts=1,
+    )
+
+    assert str(result) == "legacy plain text"
+    delivery = result.metadata[OUTBOUND_META_REPORT_DELIVERY]
+    assert delivery["run_id"] == "run-a"
+    assert delivery["report_attempts"] == 1
+    assert delivery["idempotency_key"] == "sub-a:1:1"
+
+
 @pytest.mark.asyncio
 async def test_cube_subscription_retries_one_transient_failure_with_same_run_id(
     monkeypatch, tmp_path

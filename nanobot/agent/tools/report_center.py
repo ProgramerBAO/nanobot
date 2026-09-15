@@ -2140,11 +2140,7 @@ class ReportCenterTool(Tool):
             save_snapshot=False,
             _trusted_selection_limit=20,
         )
-        catalog_ui = (
-            catalog_result.metadata.get(OUTBOUND_META_AGENT_UI)
-            if catalog_result.metadata
-            else None
-        )
+        catalog_ui = self._agent_ui_of(catalog_result)
         catalog_entries = (
             catalog_ui.get("tenant_models", [])
             if isinstance(catalog_ui, dict) and catalog_ui.get("phase") == "models"
@@ -2204,7 +2200,7 @@ class ReportCenterTool(Tool):
                 interactive=True,
                 save_snapshot=False,
             )
-            ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+            ui = self._agent_ui_of(result)
             if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
                 ui["title"] = "选择多客户多模型日报范围"
                 ui["base_params"] = {
@@ -2242,7 +2238,7 @@ class ReportCenterTool(Tool):
                 # multi-scope workflow; ordinary compatibility calls keep their cap.
                 _trusted_selection_limit=20,
             )
-            ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+            ui = self._agent_ui_of(result)
             if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
                 ui["title"] = "选择多客户日报模型" if period == "day" else "选择多客户周报模型"
                 ui["base_params"] = {
@@ -2468,7 +2464,7 @@ class ReportCenterTool(Tool):
                 interactive=True,
                 save_snapshot=False,
             )
-            ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+            ui = self._agent_ui_of(result)
             if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
                 ui["title"] = "选择小时 TPM 客户与模型范围"
                 ui["base_params"] = {
@@ -2785,7 +2781,7 @@ class ReportCenterTool(Tool):
             and not self._config.cube_scope_selector_v2
         ):
             return result
-        ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+        ui = self._agent_ui_of(result)
         if not isinstance(ui, dict) or ui.get("kind") != "magik_report_form":
             return result
         ui["title"] = "选择成本账户范围" if report_family == "cost" else "选择 Cube 报表范围"
@@ -2829,7 +2825,7 @@ class ReportCenterTool(Tool):
             ],
             save_snapshot=False,
         )
-        ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+        ui = self._agent_ui_of(result)
         if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
             ui["base_params"] = {
                 "action": "cube_report",
@@ -2949,19 +2945,39 @@ class ReportCenterTool(Tool):
         )
 
     @staticmethod
+    def _agent_ui_of(result: Any) -> dict[str, Any] | None:
+        """Extract the agent-ui payload from a tool result without assuming shape.
+
+        The legacy Magik tool legally returns plain strings (``ToolResult`` is
+        a ``str`` subclass, so both shapes flow through the Tool contract);
+        accessing ``result.metadata`` directly raises AttributeError on the
+        plain-string paths (observed live 2026-09-15 on a scheduled legacy
+        subscription).
+        """
+
+        metadata = getattr(result, "metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        ui = metadata.get(OUTBOUND_META_AGENT_UI)
+        return ui if isinstance(ui, dict) else None
+
+    @staticmethod
     def _with_delivery_metadata(
-        result: ToolResult,
+        result: ToolResult | str,
         *,
         idempotency_key: str,
         run_id: str,
         report_attempts: int,
     ) -> ToolResult:
-        result.metadata[OUTBOUND_META_REPORT_DELIVERY] = {
+        # Plain-string returns from the legacy compatibility tool are part of
+        # the Tool contract; normalize before attaching delivery bookkeeping.
+        normalized = result if isinstance(result, ToolResult) else ToolResult(str(result))
+        normalized.metadata[OUTBOUND_META_REPORT_DELIVERY] = {
             "idempotency_key": idempotency_key,
             "run_id": run_id,
             "report_attempts": report_attempts,
         }
-        return result
+        return normalized
 
     def _authorized_for_magik(self, channel: str, user_id: str) -> bool:
         return self._magik_tool is not None and self._store.allowed(
