@@ -3289,6 +3289,88 @@ class MagikCubeDailyReportTool(Tool):
                 result[tenant_id] = models
         return result
 
+    async def list_active_models_for_tenants(
+        self,
+        tenant_ids: list[str],
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[str]]:
+        """Return models with successful, positive usage in the requested dates.
+
+        The model-config endpoint is only a configured-model catalog. It cannot
+        answer an all-model report's business question because configured models
+        may have no traffic. This adapter reuses the same daily usage query as
+        the existing daily/weekly reports after loading each tenant's configured
+        model names. The result is bounded to 20 tenants and 200 probes.
+        """
+
+        unique_tenants = list(
+            dict.fromkeys(item.strip() for item in tenant_ids if item.strip())
+        )
+        if not unique_tenants:
+            raise ValueError("at least one tenant is required for active model discovery")
+        if len(unique_tenants) > 20:
+            raise ValueError("active model discovery supports at most 20 tenants")
+        if end_date < start_date:
+            raise ValueError("active model discovery date range is invalid")
+
+        result: dict[str, list[str]] = {tenant_id: [] for tenant_id in unique_tenants}
+        successful_probes = 0
+        async with MagikCubeClient(self._config) as client:
+            reporter = MagikCubeReporter(
+                client,
+                self._config,
+                self._snapshot_path,
+                self._timezone,
+                self._cache,
+                self._reporting_actions_enabled,
+            )
+            tenants = [
+                await reporter._require_single_tenant(tenant_id)
+                for tenant_id in unique_tenants
+            ]
+            model_pairs: list[tuple[_Tenant, str]] = []
+            for tenant in tenants:
+                models = await reporter._list_tenant_models(tenant)
+                model_pairs.extend((tenant, model) for model in models)
+            if len(model_pairs) > 200:
+                raise ValueError("客户模型组合超过 200 个，请缩小范围")
+
+            semaphore = asyncio.Semaphore(4)
+
+            async def probe(tenant: _Tenant, model_name: str) -> tuple[str, str, bool, bool]:
+                async with semaphore:
+                    try:
+                        metrics = await reporter._tenant_metrics_for_windows(
+                            tenant,
+                            (_DateWindow(start_date, end_date),),
+                            model=model_name,
+                            include_tpm=False,
+                        )
+                    except Exception:
+                        return tenant.tenant_id, model_name, False, False
+                has_usage = any(value > 0 for value in metrics.tokens.values()) or any(
+                    value > 0 for value in metrics.requests.values()
+                )
+                return tenant.tenant_id, model_name, has_usage, metrics.token_complete
+
+            probe_results = await asyncio.gather(
+                *(probe(tenant, model_name) for tenant, model_name in model_pairs)
+            )
+            for tenant_id, model_name, has_usage, complete in probe_results:
+                if complete:
+                    successful_probes += 1
+                if has_usage and complete:
+                    result[tenant_id].append(model_name)
+
+        if model_pairs and successful_probes == 0:
+            raise MagikCubeApiError(
+                "Cube 客户模型用量查询失败",
+                failure_code="upstream_failed",
+            )
+        return {tenant_id: list(dict.fromkeys(models)) for tenant_id, models in result.items()}
+
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
         """把明确的中文用量问题直接路由为结构化参数，绕过一次 LLM tool 选择。"""
 
@@ -3296,6 +3378,15 @@ class MagikCubeDailyReportTool(Tool):
         # ReportCenter owns subscription parsing. Returning a usage report here
         # would silently discard customers from a natural-language schedule.
         if is_subscription_intent_candidate(raw):
+            return None
+        # ReportCenter owns hourly TPM planning and exact-hour filtering.  The
+        # legacy usage matcher is date-based; accepting this phrase here would
+        # silently turn an hourly request into a daily report.
+        if re.search(
+            r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时.*(?:TPM|tpm)",
+            raw,
+            re.IGNORECASE,
+        ):
             return None
         if _CONTEXT_TENANT_REFERENCE_RE.search(raw):
             return None

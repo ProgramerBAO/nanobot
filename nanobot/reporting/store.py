@@ -21,6 +21,10 @@ def _utc_now() -> str:
 _REPORT_REFERENCE_SCOPE_KEYS = frozenset(
     {
         "report_variant",
+        # Server-owned template id for hourly subscriptions; same safety
+        # class as report_variant and required so quoted hourly cards can
+        # restore their cron-run compile branch.
+        "report_template_id",
         "tenant_scope",
         "tenant_query",
         "tenants",

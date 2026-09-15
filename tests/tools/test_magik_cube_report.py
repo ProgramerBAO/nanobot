@@ -1272,6 +1272,15 @@ def test_direct_route_uses_cards_only_to_fill_missing_slots(tmp_path: Path) -> N
     assert "interactive" not in full
 
 
+def test_legacy_daily_route_rejects_hourly_tpm_requests(tmp_path: Path) -> None:
+    """ReportCenter owns exact-hour filtering; the legacy tool must fail closed."""
+
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+
+    assert tool.match_direct_request("佛跳墙 Kimi-K3 上一小时 TPM 峰值和均值") is None
+    assert tool.match_direct_request("查看阳春面、豆汁、佛跳墙全部模型上一小时 TPM") is None
+
+
 def test_direct_route_normalizes_k3_alias_and_keeps_model_before_chinese_suffix(
     tmp_path: Path,
 ) -> None:

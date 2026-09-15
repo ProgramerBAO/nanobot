@@ -1754,6 +1754,12 @@ class FeishuChannel(BaseChannel):
                 )
             comparison_text = "\n".join(comparison_lines)
             baseline_rule = "已按名称列出"
+        elif not isinstance(context.get("baseline_window"), dict):
+            # Snapshot-style reports (for example hourly TPM) intentionally
+            # have no comparison window; state that instead of implying a
+            # lost baseline.
+            comparison_text = "对比基准：无（本报表为快照口径，不设对比基准）"
+            baseline_rule = "无基准"
         else:
             comparison_text = f"对比基准：{baseline}"
             baseline_rule = "前一等长窗口"
@@ -1870,18 +1876,32 @@ class FeishuChannel(BaseChannel):
         nonce = uuid.uuid4().hex
         options: dict[str, Any] = {}
         schedule_options: list[dict[str, str]] = []
-        schedule_specs: list[tuple[str, dict[str, Any]]] = [
-            ("日报 · 每个工作日", {"period": "day", "daily_mode": "workdays"}),
-            ("日报 · 每天", {"period": "day", "daily_mode": "every_day"}),
-        ]
-        schedule_specs.extend(
-            (f"周报 · 每周{label}", {"period": "week", "weekday": weekday})
-            for weekday, label in enumerate("一二三四五六日", start=1)
+        report_params = dict(ui.get("report_params") or {})
+        # The hourly TPM template is clock-driven and only supports the hourly
+        # cadence; other forms never offer it so a daily brief subscription
+        # cannot be silently rewritten into an hourly one.
+        hourly_form = (
+            str(report_params.get("report_template_id") or "")
+            == "usage_customer_model_hourly_tpm"
         )
-        schedule_specs.extend(
-            (f"月报 · 每月 {month_day} 日", {"period": "month", "month_day": month_day})
-            for month_day in range(1, 29)
-        )
+        schedule_specs: list[tuple[str, dict[str, Any]]] = []
+        if hourly_form:
+            schedule_specs.append(("每小时（整点后 5 分钟）", {"period": "recent1h"}))
+        else:
+            schedule_specs.extend(
+                [
+                    ("日报 · 每个工作日", {"period": "day", "daily_mode": "workdays"}),
+                    ("日报 · 每天", {"period": "day", "daily_mode": "every_day"}),
+                ]
+            )
+            schedule_specs.extend(
+                (f"周报 · 每周{label}", {"period": "week", "weekday": weekday})
+                for weekday, label in enumerate("一二三四五六日", start=1)
+            )
+            schedule_specs.extend(
+                (f"月报 · 每月 {month_day} 日", {"period": "month", "month_day": month_day})
+                for month_day in range(1, 29)
+            )
         for index, (label, params) in enumerate(schedule_specs):
             opaque = f"{nonce}:s{index}"
             options[opaque] = params
@@ -1897,6 +1917,7 @@ class FeishuChannel(BaseChannel):
             "day": {"period": "day", "daily_mode": "workdays"},
             "week": {"period": "week", "weekday": 1},
             "month": {"period": "month", "month_day": 1},
+            "recent1h": {"period": "recent1h"},
         }.get(default_period, {"period": "week", "weekday": 1})
         requested_time = str(ui.get("default_time") or "10:00")
         default_time = requested_time if any(
@@ -1928,7 +1949,13 @@ class FeishuChannel(BaseChannel):
     ) -> dict[str, Any]:
         nonce, _state, schedules, times = self._register_subscription_interaction(ui, msg)
         default_period = str(ui.get("default_period") or "week")
-        default_schedule_index = {"day": 0, "week": 2, "month": 9}.get(default_period, 2)
+        hourly_form = str(
+            (ui.get("report_params") or {}).get("report_template_id") or ""
+        ) == "usage_customer_model_hourly_tpm"
+        default_schedule_index = (
+            ({"recent1h": 0} if hourly_form else {"day": 0, "week": 2, "month": 9})
+            .get(default_period, 0 if hourly_form else 2)
+        )
         default_schedule = schedules[default_schedule_index]["value"]
         default_time_label = str(ui.get("default_time") or "10:00")
         default_time = next(
@@ -2376,6 +2403,18 @@ class FeishuChannel(BaseChannel):
                 "params": {"action": "machine_tpm_report", "period": "day"},
                 "content": "生成单机 TPM 峰值报表",
             }
+        if action_id == "customer_model_hourly_tpm":
+            # The button opens the customer/model selector; scope validation
+            # and hourly window planning stay server-side in report_center.
+            return {
+                "tool_name": "report_center",
+                "params": {
+                    "action": "customer_model_hourly_tpm",
+                    "period": "recent1h",
+                    "interactive": True,
+                },
+                "content": "生成多客户多模型小时 TPM 报告",
+            }
         if action_id == "subscription_setup:health":
             return {
                 "tool_name": "report_center",
@@ -2552,6 +2591,26 @@ class FeishuChannel(BaseChannel):
                         continue
                     lines = [f"**{label}**"]
                     for item in items:
+                        metrics = [
+                            value
+                            for value in item.get("metrics") or []
+                            if isinstance(value, dict)
+                        ]
+                        if metrics:
+                            # Inline metric rows (for example hourly TPM
+                            # peak/avg/machine count) replace the single-value
+                            # layout. Values are template-owned strings so a
+                            # missing metric keeps its explicit 暂不可用 label.
+                            metric_text = "  ".join(
+                                f"{value.get('label') or '指标'} "
+                                f"{value.get('value') if value.get('value') not in (None, '') else '暂不可用'}"
+                                + (f"（{value.get('note')}）" if value.get("note") else "")
+                                for value in metrics
+                            )
+                            lines.append(
+                                f"{item.get('label') or '未命名模型'}  {metric_text}"
+                            )
+                            continue
                         comparisons = "  ".join(
                             f"{value.get('label') or '对比'} {value.get('change') or '暂无可比基准'}"
                             for value in item.get("comparisons") or []
@@ -5106,6 +5165,9 @@ class FeishuChannel(BaseChannel):
             ),
             cube_machine_tpm_template_enabled=bool(
                 getattr(reporting_config, "cube_machine_tpm_report", False)
+            ),
+            cube_customer_model_hourly_tpm_enabled=bool(
+                getattr(reporting_config, "cube_customer_model_hourly_tpm", False)
             ),
             health_thresholds=getattr(reporting_config, "health_thresholds", None),
             timezone=str(getattr(reporting_config, "timezone", "Asia/Shanghai")),

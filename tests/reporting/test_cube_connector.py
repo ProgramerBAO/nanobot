@@ -32,6 +32,8 @@ from nanobot.reporting.contracts import (
     validate_report_intent,
     validate_report_query,
 )
+from nanobot.reporting.cube import CubeCustomerModelHourlyTpmTemplate
+from nanobot.reporting.renderer import document_to_markdown
 
 
 def _query(*metrics: str) -> ReportQuery:
@@ -980,7 +982,6 @@ async def test_cube_connector_resolves_exact_catalog_tenant_id() -> None:
     assert seen_tenants == ["tenant-baowjhsicyf65"]
     assert result.quality == "complete"
 
-
 @pytest.mark.asyncio
 async def test_cube_connector_rejects_ambiguous_name_or_tag() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1245,3 +1246,705 @@ def test_markdown_renderer_uses_structured_column_names_for_cube_tables() -> Non
 
     assert "tenant-a" in rendered.content
     assert "123" in rendered.content
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_hourly_endpoint_tpm_uses_hourly_peak_mean_and_machine_count() -> None:
+    requested: list[dict[str, object]] = []
+    machine_requests: list[dict[str, object]] = []
+    usage_requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+            requested.append(body)
+            # Live contract shape: hourly points carry maxTpm/avgTpm only and
+            # are labelled date="YYYY-MM-DD HH" without a timestamp.
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "model": "Kimi-K3",
+                                "endpoint": "ep-k3",
+                                "points": [
+                                    {"date": "2026-09-13 10", "maxTpm": "900", "avgTpm": "600"},
+                                    {"date": "2026-09-13 11", "maxTpm": "1200", "avgTpm": "800"},
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/model-machine-usage/query"):
+            machine_requests.append(body)
+            # Verified live contract 2026-09-15: the machine-usage route returns
+            # the current per-cluster allocation as a flat list, with no time
+            # dimension and no boundary rows.
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {
+                                "clusterName": "beast02",
+                                "machineCount": 3,
+                                "gpuProduct": "unknown",
+                                "gpuCount": "24",
+                            },
+                            {
+                                "clusterName": "beast01",
+                                "machineCount": 4,
+                                "gpuProduct": "NVIDIA-L20D",
+                                "gpuCount": "32",
+                            },
+                        ]
+                    },
+                },
+            )
+        assert request.url.path.endswith("/analysis/machine-tpm-trend/query")
+        usage_requests.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "points": [
+                        {
+                            "timestamp": "2026-09-13T02:00:00Z",
+                            "machineCount": 5,
+                            "cluster": "beast02",
+                            "gpuProduct": "NVIDIA B30Z",
+                        },
+                        {
+                            "timestamp": "2026-09-13T02:00:00Z",
+                            "machineCount": 1,
+                            "cluster": "beast01",
+                            "gpuProduct": "NVIDIA L20D",
+                        },
+                        {
+                            # The next local hour (11:00 Asia/Shanghai) and the
+                            # zero boundary rows must stay out of the report.
+                            "timestamp": "2026-09-13T03:00:00Z",
+                            "machineCount": 99,
+                            "cluster": "",
+                            "gpuProduct": "",
+                        },
+                    ]
+                },
+            },
+        )
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={"models": ["Kimi-K3"], "tenant_models": {"tenant-a": ["Kimi-K3"]}},
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    assert len(requested) == 1
+    # Verified live contract 2026-09-15: snake-case time_level switches the
+    # route to hourly points and noloading follows the documented body.
+    assert requested[0]["time_level"] == "TIME_LEVEL_HOUR"
+    assert requested[0]["noloading"] is True
+    assert requested[0]["startDate"] == "2026-09-13"
+    assert requested[0]["endDate"] == "2026-09-13"
+    assert {row["metric"] for row in result.rows} == {
+        "ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"
+    }
+    # Only the 10:00 local point belongs to the requested complete hour;
+    # the 11:00 point is the following hour and must be excluded.
+    assert {row["value"] for row in result.rows if row["metric"] == "ai.tpm.peak"} == {900}
+    assert {row["value"] for row in result.rows if row["metric"] == "ai.tpm.avg"} == {600}
+    # Allocation is the current per-cluster snapshot; usage is the target
+    # hour's point-in-time value. Both stay platform-scoped.
+    machine_rows = [row for row in result.rows if row["metric"] == "ai.machine.count"]
+    assert [row["value"] for row in machine_rows] == [7.0]
+    assert machine_rows[0]["tenant_id"] == ""
+    assert machine_rows[0]["metric_scope"] == "platform_model"
+    assert machine_rows[0]["source"] == (
+        "Cube Admin / analysis/model-machine-usage/query"
+    )
+    usage_rows = [row for row in result.rows if row["metric"] == "ai.machine.used"]
+    assert [row["value"] for row in usage_rows] == [6.0]
+    assert usage_rows[0]["metric_scope"] == "platform_model"
+    assert len(machine_requests) == 1
+    assert machine_requests[0]["model"] == "Kimi-K3"
+    assert len(usage_requests) == 1
+    assert usage_requests[0]["model"] == "Kimi-K3"
+    assert result.quality == "complete"
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_hourly_machine_queried_once_per_unique_model() -> None:
+    machine_calls: list[str] = []
+    usage_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "tenantId": body["tenantId"],
+                                "model": body["model"],
+                                "endpoint": "ep-k3",
+                                "points": [
+                                    {"date": "2026-09-13 10", "maxTpm": "500", "avgTpm": "400"}
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/model-machine-usage/query"):
+            machine_calls.append(str(body["model"]))
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {
+                                "clusterName": "beast02",
+                                "machineCount": 7,
+                                "gpuProduct": "unknown",
+                            }
+                        ]
+                    },
+                },
+            )
+        assert request.url.path.endswith("/analysis/machine-tpm-trend/query")
+        usage_calls.append(str(body["model"]))
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "points": [
+                        {
+                            "timestamp": "2026-09-13T02:00:00Z",
+                            "machineCount": 6,
+                            "cluster": "beast02",
+                            "gpuProduct": "NVIDIA B30Z",
+                        }
+                    ]
+                },
+            },
+        )
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={
+            "models": ["Kimi-K3"],
+            "tenant_models": {"tenant-a": ["Kimi-K3"], "tenant-b": ["Kimi-K3"]},
+        },
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    # Two tenant-scoped TPM jobs but a single allocation and a single usage
+    # call for the shared model; the platform values are never duplicated per
+    # customer.
+    assert sorted(machine_calls) == ["Kimi-K3"]
+    assert sorted(usage_calls) == ["Kimi-K3"]
+    machine_rows = [row for row in result.rows if row["metric"] == "ai.machine.count"]
+    assert [row["value"] for row in machine_rows] == [7.0]
+    usage_rows = [row for row in result.rows if row["metric"] == "ai.machine.used"]
+    assert [row["value"] for row in usage_rows] == [6.0]
+    assert {row["tenant_id"] for row in result.rows if row["metric"] == "ai.tpm.peak"} == {
+        "tenant-a",
+        "tenant-b",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_hourly_endpoint_tpm_inherits_outer_scope_and_parses_compact_hour() -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "tenantId": "tenant-a",
+                            "model": "Kimi-K3",
+                            "endpoint": "ep-k3",
+                            "points": [
+                                {
+                                    "date": "2026-09-13 10",
+                                    "maxTpm": "1200.5",
+                                    "avgTpm": "800.25",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=("ai.tpm.peak", "ai.tpm.avg"),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={"models": ["Kimi-K3"], "tenant_models": {"tenant-a": ["Kimi-K3"]}},
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    assert requests[0]["tenantId"] == "tenant-a"
+    assert {(row["tenant_id"], row["timestamp"]) for row in result.rows} == {
+        ("tenant-a", "2026-09-13T10:00:00+08:00")
+    }
+    assert {row["value"] for row in result.rows if row["metric"] == "ai.tpm.peak"} == {1200.5}
+    assert {row["value"] for row in result.rows if row["metric"] == "ai.tpm.avg"} == {800.25}
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_hourly_machine_fallback_does_not_mask_missing_tpm() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "tenantId": "tenant-a",
+                                "model": "Kimi-K3",
+                                "endpoint": "ep-k3",
+                                "points": [
+                                    {
+                                        "date": "2026-09-13 09",
+                                        "maxTpm": "1200",
+                                        "avgTpm": "800",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/model-machine-usage/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {
+                                "clusterName": "cluster-a",
+                                "machineCount": 3.5,
+                                "gpuProduct": "GPU-A",
+                            }
+                        ]
+                    },
+                },
+            )
+        assert request.url.path.endswith("/analysis/machine-tpm-trend/query")
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "points": [
+                        {
+                            "timestamp": "2026-09-13T02:00:00Z",
+                            "machineCount": 2.5,
+                            "cluster": "cluster-a",
+                            "gpuProduct": "GPU-A",
+                        }
+                    ]
+                },
+            },
+        )
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={"models": ["Kimi-K3"], "tenant_models": {"tenant-a": ["Kimi-K3"]}},
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    assert result.quality == "partial"
+    assert any("endpoint TPM point missing" in warning for warning in result.warnings)
+    assert not any(row["metric"] in {"ai.tpm.peak", "ai.tpm.avg"} for row in result.rows)
+    assert {row["value"] for row in result.rows if row["metric"] == "ai.machine.count"} == {3.5}
+    assert {row["value"] for row in result.rows if row["metric"] == "ai.machine.used"} == {2.5}
+    machine_rows = [row for row in result.rows if row["metric"] == "ai.machine.count"]
+    assert machine_rows[0]["tenant_id"] == ""
+    assert machine_rows[0]["metric_scope"] == "platform_model"
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_hourly_machine_usage_missing_does_not_downgrade() -> None:
+    """A not-yet-ingested usage value is informational and stays complete."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "tenantId": "tenant-a",
+                                "model": "Kimi-K3",
+                                "endpoint": "ep-k3",
+                                "points": [
+                                    {"date": "2026-09-13 10", "maxTpm": "900", "avgTpm": "600"}
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/model-machine-usage/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {"clusterName": "beast02", "machineCount": 39, "gpuProduct": "unknown"}
+                        ]
+                    },
+                },
+            )
+        assert request.url.path.endswith("/analysis/machine-tpm-trend/query")
+        # The usage series for the just-completed hour is not aggregated yet.
+        return httpx.Response(200, json={"code": 0, "data": {"points": []}})
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={"models": ["Kimi-K3"], "tenant_models": {"tenant-a": ["Kimi-K3"]}},
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    assert result.quality == "complete"
+    assert result.warnings == ("Kimi-K3: machine_used no_data",)
+    assert {row["value"] for row in result.rows if row["metric"] == "ai.machine.count"} == {39.0}
+    assert not any(row["metric"] == "ai.machine.used" for row in result.rows)
+
+
+def test_hourly_tpm_template_groups_customers_with_inline_metrics() -> None:
+    dataset = ReportDataset(
+        rows=(
+            {
+                "metric": "ai.tpm.peak",
+                "value": 900.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.avg",
+                "value": 600.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.peak",
+                "value": 800.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-b",
+            },
+            {
+                "metric": "ai.tpm.avg",
+                "value": 500.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-b",
+            },
+            {
+                "metric": "ai.machine.count",
+                "value": 42.0,
+                "model": "Kimi-K3",
+                "endpoint": "",
+                "tenant_id": "",
+                "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used",
+                "value": 40.0,
+                "model": "Kimi-K3",
+                "endpoint": "",
+                "tenant_id": "",
+                "metric_scope": "platform_model",
+            },
+        ),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {
+                "tenant-a": ["Kimi-K3"],
+                "tenant-b": ["Kimi-K3"],
+            },
+            "tenant_names": {"tenant-a": "佛跳墙", "tenant-b": "豆汁"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    assert document.version == 2
+    assert document.context is not None
+    assert document.context.current_window is not None
+    assert document.context.current_window.start == "2026-09-13T10:00:00+08:00"
+    # Hourly snapshots intentionally have no comparison baseline.
+    assert document.context.comparison_windows == ()
+    # Compact subtitle: MM-DD window, counts, and the idle machine total.
+    assert document.subtitle == "09-13 10:00–11:00 · 2 客户 / 1 模型 · 2 机器空闲"
+
+    grouped_block = document.blocks[0]
+    assert grouped_block.kind == "grouped_metrics"
+    groups = grouped_block.data["groups"]
+    assert [group["label"] for group in groups] == ["佛跳墙", "豆汁"]
+    for group in groups:
+        assert len(group["items"]) == 1
+        item = group["items"][0]
+        assert item["label"] == "Kimi-K3"
+        metrics = {entry["label"]: entry for entry in item["metrics"]}
+        # Each customer shows its own tenant-scoped TPM values plus the same
+        # platform allocation/usage pair with the idle flag.
+        assert metrics["峰值"] not in ("暂不可用", None)
+        assert metrics["机器"]["value"] == "42/40（闲2）"
+    peak_values = {
+        group["label"]: next(
+            entry["value"]
+            for entry in group["items"][0]["metrics"]
+            if entry["label"] == "峰值"
+        )
+        for group in groups
+    }
+    assert peak_values["佛跳墙"] != peak_values["豆汁"]
+    # The disclosure note stays the last block and carries context flags.
+    assert document.blocks[-1].kind == "note"
+    assert document.blocks[-1].data["include_context"] is True
+    assert "客户 佛跳墙" in document.fallback_text
+    assert "机器 42/40（闲2）" in document.fallback_text
+
+
+def test_hourly_tpm_template_marks_missing_tpm_unavailable() -> None:
+    dataset = ReportDataset(
+        rows=(
+            {
+                "metric": "ai.machine.count",
+                "value": 42.0,
+                "model": "Kimi-K3",
+                "endpoint": "",
+                "tenant_id": "",
+                "metric_scope": "platform_model",
+            },
+        ),
+        quality="partial",
+        warnings=("Kimi-K3: endpoint TPM point missing",),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {
+                "tenant-a": ["Kimi-K3"],
+                "tenant-b": ["Kimi-K3"],
+            },
+            "tenant_names": {"tenant-a": "佛跳墙", "tenant-b": "豆汁"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    grouped_block = document.blocks[0]
+    assert grouped_block.kind == "grouped_metrics"
+    for group in grouped_block.data["groups"]:
+        item = group["items"][0]
+        assert item["status"] == "unavailable"
+        metrics = {entry["label"]: entry["value"] for entry in item["metrics"]}
+        # Missing TPM stays explicitly unavailable; the platform machine
+        # count never turns the report into a successful TPM answer, and a
+        # missing usage value leaves the allocation visible without an idle
+        # guess.
+        assert metrics["峰值"] == "暂不可用"
+        assert metrics["均值"] == "暂不可用"
+        assert metrics["机器"] == "42/-"
+    # No idle machines, so no idle suffix on the subtitle.
+    assert "机器空闲" not in document.subtitle
+    assert document.quality == "partial"
+
+
+def test_hourly_tpm_template_idle_threshold_and_negative_difference() -> None:
+    """Idle is flagged from one machine difference; removals stay unflagged."""
+
+    def machine_row(metric: str, value: float, model: str) -> dict[str, object]:
+        return {
+            "metric": metric,
+            "value": value,
+            "model": model,
+            "endpoint": "",
+            "tenant_id": "",
+            "metric_scope": "platform_model",
+        }
+
+    dataset = ReportDataset(
+        rows=(
+            machine_row("ai.machine.count", 39.0, "Kimi-K3"),
+            machine_row("ai.machine.used", 38.0, "Kimi-K3"),
+            machine_row("ai.machine.count", 45.0, "GLM-5.2"),
+            machine_row("ai.machine.used", 45.0, "GLM-5.2"),
+            machine_row("ai.machine.count", 38.0, "GLM-5.1"),
+            machine_row("ai.machine.used", 39.0, "GLM-5.1"),
+        ),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {"tenant-a": ["Kimi-K3", "GLM-5.2", "GLM-5.1"]},
+            "tenant_names": {"tenant-a": "佛跳墙"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    grouped_block = document.blocks[0]
+    items = {
+        item["label"]: next(
+            entry["value"] for entry in item["metrics"] if entry["label"] == "机器"
+        )
+        for group in grouped_block.data["groups"]
+        for item in group["items"]
+    }
+    # One idle machine already counts as idle (user-confirmed threshold).
+    assert items["Kimi-K3"] == "39/38（闲1）"
+    # Equal usage is not idle.
+    assert items["GLM-5.2"] == "45/45"
+    # A negative difference (machines removed after the hour) stays as the
+    # raw pair without an idle tag.
+    assert items["GLM-5.1"] == "38/39"
+    # The subtitle sums positive idle differences only: 1 idle machine.
+    assert document.subtitle.endswith("· 1 机器空闲")
+
+
+def test_hourly_tpm_template_plan_spans_next_day_for_hourly_points() -> None:
+    template = CubeCustomerModelHourlyTpmTemplate()
+    intent = ReportIntent(
+        connector_id="magik_cube",
+        template_id="usage_customer_model_hourly_tpm",
+        period="recent1h",
+        tenants=("tenant-a",),
+        models=("Kimi-K3",),
+        model_scope="selected",
+        filters={"tenant_models": {"tenant-a": ["Kimi-K3"]}},
+    )
+
+    (query,) = template.plan(intent)
+
+    # Verified live contract 2026-09-15: the route returns hourly points from
+    # startDate 00:00 through endDate 00:00, so endDate must be the day after
+    # the target hour's date or only the midnight point comes back.
+    assert query.start_date == query.start_time.date()
+    assert (query.end_date - query.start_date).days == 1
+    assert query.end_time - query.start_time == timedelta(hours=1)
+    assert query.start_time < query.end_time
+    assert query.filters["models"] == ["Kimi-K3"]
+
+
+def test_markdown_renderer_shows_inline_grouped_metrics_and_no_baseline_context() -> None:
+    document = ReportDocument(
+        title="多客户多模型小时 TPM 报告",
+        document_id="usage_customer_model_hourly_tpm",
+        fallback_text="fallback",
+        quality="complete",
+        blocks=(
+            ReportBlock(
+                "grouped_metrics",
+                {
+                    "groups": [
+                        {
+                            "id": "tenant-a",
+                            "label": "佛跳墙",
+                            "items": [
+                                {
+                                    "label": "Kimi-K3",
+                                    "status": "active",
+                                    "metrics": [
+                                        {"label": "峰值", "value": "6683万"},
+                                        {"label": "均值", "value": "5014万"},
+                                        {"label": "机器", "value": "39/38（闲1）"},
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                    "collapse_no_usage": False,
+                },
+            ),
+        ),
+    )
+
+    rendered = document_to_markdown(document)
+
+    assert isinstance(rendered, str)
+    assert "## 佛跳墙" in rendered
+    assert "- Kimi-K3｜峰值 6683万｜均值 5014万｜机器 39/38（闲1）" in rendered

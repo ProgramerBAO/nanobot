@@ -158,6 +158,22 @@ def _format_grouped_metrics(data: dict[str, Any]) -> str:
             continue
         lines = [f"## {label}"]
         for item in items:
+            metrics = [
+                value for value in item.get("metrics") or [] if isinstance(value, dict)
+            ]
+            if metrics:
+                # Inline metric rows (for example hourly TPM peak/avg/machine
+                # count) replace the single-value layout. Values are
+                # template-owned strings, so missing data keeps its explicit
+                # 暂不可用 label instead of degrading to an empty cell.
+                metric_text = "｜".join(
+                    f"{value.get('label') or '指标'} "
+                    f"{value.get('value') if value.get('value') not in (None, '') else '暂不可用'}"
+                    + (f"（{value.get('note')}）" if value.get("note") else "")
+                    for value in metrics
+                )
+                lines.append(f"- {item.get('label') or '未命名模型'}｜{metric_text}")
+                continue
             comparisons = "｜".join(
                 f"{value.get('label') or '对比'}：{value.get('change') or '暂无可比基准'}"
                 for value in item.get("comparisons") or []
@@ -219,6 +235,12 @@ def _format_report_context(document: ReportDocument) -> str:
             for item in context.comparison_windows
         )
         baseline_policy_text = "对比周期已按名称列出"
+    elif baseline is None:
+        # Snapshot-style reports (for example hourly TPM) intentionally have
+        # no comparison window; state that instead of implying a lost
+        # baseline.
+        comparison_text = "对比基准：无（本报表为快照口径，不设对比基准）"
+        baseline_policy_text = "无基准"
     else:
         comparison_text = f"对比基准：{baseline_text}"
         baseline_policy_text = "前一等长窗口"

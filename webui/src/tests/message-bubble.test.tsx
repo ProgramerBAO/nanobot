@@ -208,6 +208,56 @@ describe("MessageBubble", () => {
     expect(screen.queryByText(/时间桶/)).not.toBeInTheDocument();
   });
 
+  it("renders inline hourly TPM metrics per model row", () => {
+    const message: UIMessage = {
+      id: "hourly-tpm-brief",
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      agentUi: {
+        kind: "report_document",
+        document_id: "usage_customer_model_hourly_tpm",
+        title: "多客户多模型小时 TPM 报告",
+        quality: "complete",
+        blocks: [
+          {
+            kind: "grouped_metrics",
+            data: {
+              collapse_no_usage: false,
+              groups: [
+                {
+                  id: "tenant-fo",
+                  label: "佛跳墙",
+                  items: [
+                    {
+                      label: "Kimi-K3",
+                      status: "active",
+                      metrics: [
+                        { label: "峰值", value: "6683万" },
+                        { label: "均值", value: "5014万" },
+                        { label: "机器", value: "39/38（闲1）" },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText("佛跳墙")).toBeInTheDocument();
+    expect(screen.getByText("Kimi-K3")).toBeInTheDocument();
+    // Inline metric rows replace the comparison layout; the machine cell
+    // carries the allocation/usage pair with the idle flag.
+    expect(screen.getByText("峰值 6683万")).toBeInTheDocument();
+    expect(screen.getByText("均值 5014万")).toBeInTheDocument();
+    expect(screen.getByText("机器 39/38（闲1）")).toBeInTheDocument();
+  });
+
   it("collapses multi-customer report context and quality details", () => {
     const message: UIMessage = {
       id: "multi-customer-context",

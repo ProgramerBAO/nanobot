@@ -62,11 +62,12 @@ _CUBE_MACHINE_METRICS = frozenset(
         "ai.machine.tpm_per_machine",
         "ai.machine.total_tokens",
         "ai.machine.count",
+        "ai.machine.used",
         "ai.machine.gpu_count",
     }
 )
 _CUBE_METRICS = (
-    frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm.avg"})
+    frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm.peak"})
     | _CUBE_HEALTH_METRICS
     | _CUBE_ACCOUNT_METRICS
     | _CUBE_MACHINE_METRICS
@@ -91,6 +92,11 @@ _ALLOWED_FILTERS = frozenset(
         "all_tenants",
         "multi_scope",
         "tenant_models",
+        # Display-only tenant labels are carried through ReportQuery so the
+        # shared template/renderer can keep the live catalog name alongside
+        # the authoritative tenant ID.  They are never serialized into Cube
+        # API requests or used for authorization decisions.
+        "tenant_names",
         "cluster",
     }
 )
@@ -199,6 +205,11 @@ class CubeConnector(ConnectorPlugin):
             return await self._query_health(query)
         if account_metrics:
             return await self._query_account(query)
+        # The hourly endpoint contract returns TPM and, on supported Cube
+        # versions, machineCount in the same point.  Keep these metrics in one
+        # plan so the report cannot accidentally mix hourly and daily data.
+        if "ai.tpm.peak" in query.metrics and query.start_time is not None:
+            return await self._query_hourly_endpoint_tpm(query)
         if machine_metrics:
             if machine_metrics != set(query.metrics):
                 raise ValueError("Cube machine TPM metrics require a separate query plan")
@@ -392,6 +403,307 @@ class CubeConnector(ConnectorPlugin):
         )
         return aliases[0] if aliases else tenant.name
 
+    async def _query_hourly_endpoint_tpm(self, query: ReportQuery) -> ReportDataset:
+        """Read hourly ``maxTpm``/``avgTpm`` from Cube's endpoint TPM API.
+
+        Live contract (verified read-only 2026-09-15): the route returns one
+        point per hour for the span ``startDate`` 00:00 through ``endDate``
+        00:00 inclusive when ``time_level=TIME_LEVEL_HOUR`` is sent. A
+        same-day range yields only the midnight point, so plans must set
+        ``endDate`` to the day after the target hour's date. Hours that have
+        not elapsed yet come back as zero placeholders; the strict
+        complete-hour window filter below keeps them out of the report.
+        """
+
+        tenant_models = query.filters.get("tenant_models")
+        selected_models = self._selected_model_values(query.filters)
+        if isinstance(tenant_models, dict):
+            models = tuple(
+                sorted(
+                    {
+                        str(model).strip()
+                        for values in tenant_models.values()
+                        for model in (values if isinstance(values, (list, tuple, set)) else ())
+                        if str(model).strip()
+                    },
+                    key=str.casefold,
+                )
+            )
+        else:
+            models = selected_models
+        if not models:
+            raise ValueError("Cube hourly TPM report requires at least one model")
+        rows: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        target_start = query.start_time
+        target_end = query.end_time
+        if target_start is None or target_end is None or target_start.tzinfo is None or target_end.tzinfo is None:
+            raise ValueError("hourly TPM report requires a timezone-aware complete-hour window")
+        jobs: list[tuple[str, str]] = []
+        if isinstance(tenant_models, dict) and tenant_models:
+            for tenant_id, tenant_values in tenant_models.items():
+                values = tenant_values if isinstance(tenant_values, (list, tuple, set)) else ()
+                for model_filter in values:
+                    if str(tenant_id).strip() and str(model_filter).strip():
+                        jobs.append((str(tenant_id).strip(), str(model_filter).strip()))
+        else:
+            requested_tenant = str(query.filters.get("tenant_id") or "").strip()
+            jobs = [(requested_tenant, model_filter) for model_filter in models]
+        jobs = list(dict.fromkeys(jobs))
+
+        async with MagikCubeClient(self._config, transport=self._transport) as client:
+            async def run_tpm_job(
+                tenant_id: str, model_filter: str
+            ) -> tuple[list[dict[str, Any]], list[str]]:
+                job_rows: list[dict[str, Any]] = []
+                job_warnings: list[str] = []
+                # Snake-case ``time_level`` plus ``noloading`` follow the
+                # documented Cube contract; camelCase and an empty account
+                # type were also accepted in the live check, so account type
+                # stays a pass-through filter instead of a hard-coded value.
+                body = {
+                    "startDate": query.start_date.isoformat(),
+                    "endDate": query.end_date.isoformat(),
+                    "tenantId": tenant_id,
+                    "accountType": str(query.filters.get("account_type") or ""),
+                    "tenantTag": "",
+                    "model": model_filter,
+                    "endpoint": str(query.filters.get("endpoint") or ""),
+                    "registerChannels": [],
+                    "noloading": True,
+                    "time_level": "TIME_LEVEL_HOUR",
+                }
+                try:
+                    data = await client.request(
+                        "POST", "analysis/endpoint-max-tpm/daily/query", json_body=body
+                    )
+                except Exception as exc:
+                    return [], [f"{model_filter}: {classify_report_failure(exc)}"]
+                matched_tpm_point = False
+                for item in data.get("items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    outer_model = str(_pick(item, "model", "modelName", "model_name", default=model_filter) or model_filter)
+                    outer_endpoint = str(item.get("endpoint") or "")
+                    for point in item.get("points") or []:
+                        if not isinstance(point, dict):
+                            continue
+                        timestamp = self._parse_timestamp(point.get("timestamp"))
+                        point_local: datetime | None = None
+                        if timestamp is not None:
+                            local_timestamp = timestamp.astimezone(target_start.tzinfo)
+                            if not (target_start <= local_timestamp < target_end):
+                                continue
+                        else:
+                            # The live response labels hourly points as
+                            # date="YYYY-MM-DD HH" without a timestamp; only
+                            # points inside the target complete hour may
+                            # enter the report.
+                            point_local = self._parse_hourly_local_point(
+                                point, target_start.tzinfo
+                            )
+                            if point_local is not None:
+                                if not (target_start <= point_local < target_end):
+                                    continue
+                            else:
+                                job_warnings.append(
+                                    f"{model_filter}: hourly point missing date/hour"
+                                )
+                                continue
+                        matched_tpm_point = True
+                        model = str(_pick(point, "model", default=outer_model) or outer_model)
+                        endpoint = str(_pick(point, "endpoint", default=outer_endpoint) or outer_endpoint)
+                        peak = self._as_float(_pick(point, "maxTpm", "max_tpm", default=None))
+                        avg = self._as_float(_pick(point, "avgTpm", "avg_tpm", default=None))
+                        effective_timestamp = timestamp or point_local
+                        common = {
+                            "period": "current", "timestamp": effective_timestamp.isoformat() if effective_timestamp else "",
+                            "date": str(point.get("date") or ""), "hour": str(point.get("hour") or ""),
+                            "model": model, "endpoint": endpoint,
+                            "tenant_id": str(item.get("tenantId") or tenant_id),
+                            "source": "Cube Admin / analysis/endpoint-max-tpm/daily/query",
+                        }
+                        if peak is not None:
+                            job_rows.append({**common, "metric": "ai.tpm.peak", "value": peak, "unit": "tokens/minute", "aggregation": "hourly_max"})
+                        if avg is not None:
+                            job_rows.append({**common, "metric": "ai.tpm.avg", "value": avg, "unit": "tokens/minute", "aggregation": "hourly_avg"})
+                if not matched_tpm_point:
+                    job_warnings.append(
+                        f"{model_filter}: endpoint TPM point missing for the requested complete hour"
+                    )
+                return job_rows, job_warnings
+
+            async def run_allocation_job(
+                model_filter: str,
+            ) -> tuple[list[dict[str, Any]], list[str]]:
+                # model-machine-usage is the designated allocation source
+                # (user-confirmed 2026-09-15): one call per unique model
+                # returns the current per-cluster allocation. The route has
+                # no tenant dimension, so the count stays platform-scoped; it
+                # is a current snapshot, not an hour-window sample, and the
+                # card disclosure states that explicitly. Allocation is
+                # quality-relevant.
+                body = {
+                    "clusterName": "",
+                    "model": model_filter,
+                    "noloading": True,
+                }
+                try:
+                    data = await client.request(
+                        "POST", "analysis/model-machine-usage/query", json_body=body
+                    )
+                except Exception as exc:
+                    return [], [f"{model_filter}: machine_count {classify_report_failure(exc)}"]
+                seen_machine: set[tuple[str, str]] = set()
+                machine_total = 0.0
+                matched_machine = False
+                for item in data.get("list") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    key = (
+                        str(item.get("clusterName") or item.get("cluster") or ""),
+                        str(_pick(item, "gpuProduct", "gpu_product", default="") or ""),
+                    )
+                    if key in seen_machine:
+                        continue
+                    seen_machine.add(key)
+                    machine_count = self._as_float(
+                        _pick(item, "machineCount", "machine_count", default=None)
+                    )
+                    if machine_count is not None:
+                        machine_total += machine_count
+                        matched_machine = True
+                if not matched_machine:
+                    return [], [f"{model_filter}: machine_count no_data"]
+                return [
+                    {
+                        "period": "current", "timestamp": target_start.isoformat(),
+                        "date": target_start.date().isoformat(),
+                        "hour": target_start.strftime("%H:00"),
+                        "model": model_filter, "endpoint": "",
+                        # The machine-usage route has no tenant dimension. Keep
+                        # this row platform-scoped instead of attaching the
+                        # same machine count to every related customer.
+                        "tenant_id": "",
+                        "metric_scope": "platform_model",
+                        "metric": "ai.machine.count", "value": machine_total,
+                        "unit": "machines", "aggregation": "current_allocation_sum",
+                        "source": "Cube Admin / analysis/model-machine-usage/query",
+                    }
+                ], []
+
+            async def run_usage_job(
+                model_filter: str,
+            ) -> tuple[list[dict[str, Any]], list[str]]:
+                # machine-tpm-trend hourly points are the actual machine usage
+                # of the target complete hour (user-confirmed 2026-09-15).
+                # Usage shares the upstream ingestion lag, so a missing value
+                # is informational only and must not downgrade the report.
+                body = {
+                    "startTime": target_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "endTime": target_end.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    "model": model_filter,
+                    "cluster": "",
+                    "timeLevel": "TIME_LEVEL_HOUR",
+                    "registerChannels": [],
+                    "noloading": True,
+                }
+                try:
+                    data = await client.request(
+                        "POST", "analysis/machine-tpm-trend/query", json_body=body
+                    )
+                except Exception as exc:
+                    return [], [f"{model_filter}: machine_used {classify_report_failure(exc)}"]
+                seen_usage: set[tuple[str, str, str]] = set()
+                usage_total = 0.0
+                matched_usage = False
+                for point in data.get("points") or []:
+                    if not isinstance(point, dict):
+                        continue
+                    timestamp = self._parse_timestamp(point.get("timestamp"))
+                    if timestamp is None:
+                        continue
+                    local_timestamp = timestamp.astimezone(target_start.tzinfo)
+                    if not (target_start <= local_timestamp < target_end):
+                        continue
+                    key = (
+                        timestamp.isoformat(),
+                        str(point.get("cluster") or ""),
+                        str(_pick(point, "gpuProduct", "gpu_product", default="") or ""),
+                    )
+                    if key in seen_usage:
+                        continue
+                    seen_usage.add(key)
+                    machine_count = self._as_float(
+                        _pick(point, "machineCount", "machine_count", default=None)
+                    )
+                    if machine_count is not None:
+                        usage_total += machine_count
+                        matched_usage = True
+                if not matched_usage:
+                    return [], [f"{model_filter}: machine_used no_data"]
+                return [
+                    {
+                        "period": "current", "timestamp": target_start.isoformat(),
+                        "date": target_start.date().isoformat(),
+                        "hour": target_start.strftime("%H:00"),
+                        "model": model_filter, "endpoint": "",
+                        "tenant_id": "",
+                        "metric_scope": "platform_model",
+                        "metric": "ai.machine.used", "value": usage_total,
+                        "unit": "machines", "aggregation": "hourly_machine_count",
+                        "source": "Cube Admin / analysis/machine-tpm-trend/query",
+                    }
+                ], []
+
+            # The client enforces its own max_concurrency semaphore per
+            # request, so this fan-out is bounded at the transport layer.
+            for job_rows, job_warnings in await asyncio.gather(
+                *(run_tpm_job(tenant_id, model_filter) for tenant_id, model_filter in jobs)
+            ):
+                rows.extend(job_rows)
+                warnings.extend(job_warnings)
+            unique_models = sorted({model_filter for _tenant_id, model_filter in jobs})
+            for machine_rows, machine_warnings in await asyncio.gather(
+                *(
+                    machine_job(model_filter)
+                    for model_filter in unique_models
+                    for machine_job in (run_allocation_job, run_usage_job)
+                )
+            ):
+                rows.extend(machine_rows)
+                warnings.extend(machine_warnings)
+        metric_names = {str(row.get("metric") or "") for row in rows}
+        has_peak = "ai.tpm.peak" in metric_names
+        has_avg = "ai.tpm.avg" in metric_names
+        has_machine = "ai.machine.count" in metric_names
+        # Actual-usage warnings (machine_used ...) are informational: the
+        # trend source shares the upstream ingestion lag and a missing usage
+        # value must not downgrade the report (user-confirmed 2026-09-15).
+        actionable_warnings = [
+            warning for warning in warnings if ": machine_used" not in warning
+        ]
+        if not has_peak or not has_avg:
+            # Peak and mean are authoritative core metrics. A machine-only
+            # fallback must never make an incomplete report look complete.
+            quality = "partial" if rows else "missing"
+        elif not has_machine or actionable_warnings:
+            quality = "partial"
+        else:
+            quality = "complete"
+        return ReportDataset(
+            rows=tuple(rows),
+            quality=quality,
+            warnings=tuple(warnings),
+            source=self.manifest.connector_id,
+            metadata={
+                "tenant_models": query.filters.get("tenant_models", {}),
+                "tenant_scope": query.filters.get("tenant_scope", "selected"),
+                "tenant_names": query.filters.get("tenant_names", {}),
+                "window_start": target_start.isoformat(),
+                "window_end": target_end.isoformat(),
+            },
+        )
     async def _query_machine_tpm(self, query: ReportQuery) -> ReportDataset:
         """Query Cube's hourly cluster/card-type normalized per-machine TPM series.
 
@@ -1422,6 +1734,34 @@ class CubeConnector(ConnectorPlugin):
             return None
         return parsed
 
+    @staticmethod
+    def _parse_hourly_local_point(point: Mapping[str, Any], timezone_name: Any) -> datetime | None:
+        """Parse Cube's date/hour variants into one timezone-aware local instant.
+
+        The live ``endpoint-max-tpm`` response currently returns values such as
+        ``date='2026-09-14 00'`` without separate ``hour`` or ``timestamp``
+        fields.  Treating that value as only a date silently drops the hour;
+        treating the missing hour as zero would make every returned point look
+        like midnight.  This parser accepts the observed combined form and the
+        older split date/hour form, while returning ``None`` for ambiguous data.
+        """
+        point_date = str(point.get("date") or "").strip()
+        point_hour = str(point.get("hour") or "").strip()
+        combined = point_date.replace("T", " ").split(" ", 1)
+        if len(combined) == 2 and not point_hour:
+            point_date, point_hour = combined
+        if not point_date or not point_hour:
+            return None
+        try:
+            hour_number = int(point_hour.split(":", 1)[0])
+            return datetime.combine(
+                date.fromisoformat(point_date[:10]),
+                time(hour_number),
+                tzinfo=timezone_name,
+            )
+        except (TypeError, ValueError):
+            return None
+
     async def _resolve_tenants(
         self,
         client: MagikCubeClient,
@@ -1825,6 +2165,360 @@ class CubeConnector(ConnectorPlugin):
                     )
         return rows
 
+
+def _format_hourly_tpm(value: int | float | None) -> str:
+    """Compact hourly TPM display; tighter than the shared Token formatter.
+
+    Hourly rows show three metrics inline, so values stay short: 亿 keeps two
+    decimals, 万 rounds to an integer, and smaller values use plain thousands
+    separators. ``None`` keeps its explicit 暂不可用 label.
+    """
+
+    if value is None:
+        return "暂不可用"
+    absolute = abs(float(value))
+    if absolute >= 100_000_000:
+        return f"{float(value) / 100_000_000:.2f}亿"
+    if absolute >= 10_000:
+        return f"{float(value) / 10_000:.0f}万"
+    return f"{float(value):,.0f}"
+
+
+class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
+    """Render the previous complete hour's model TPM from Cube hourly points."""
+
+    manifest = TemplateManifest(
+        template_id="usage_customer_model_hourly_tpm",
+        display_name="多客户多模型小时 TPM 报告",
+        version="2.0",
+        category="usage",
+        periods=frozenset({"recent1h"}),
+        required_metrics=frozenset(
+            {"ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"}
+        ),
+        required_dimensions=frozenset({"tenant", "model", "endpoint", "date", "hour"}),
+        connector_ids=frozenset({"magik_cube"}),
+        description="按客户分组展示上一完整小时的模型级 TPM 峰值、均值和平台机器数",
+    )
+
+    def __init__(self, *, timezone_name: str = "Asia/Shanghai") -> None:
+        self.timezone_name = timezone_name
+
+    def plan(self, intent: ReportIntent) -> tuple[ReportQuery, ...]:
+        tz = ZoneInfo(self.timezone_name)
+        now = datetime.now(tz)
+        end = now.replace(minute=0, second=0, microsecond=0)
+        start = end - timedelta(hours=1)
+        tenant_models = intent.filters.get("tenant_models")
+        planned_models = list(intent.models)
+        if not planned_models and isinstance(tenant_models, dict):
+            planned_models = sorted(
+                {
+                    str(model).strip()
+                    for models in tenant_models.values()
+                    for model in (models if isinstance(models, (list, tuple, set)) else ())
+                    if str(model).strip()
+                },
+                key=str.casefold,
+            )
+        return (ReportQuery(
+            connector_id=intent.connector_id,
+            metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+            dimensions=("tenant", "model", "endpoint", "date", "hour"),
+            # The Cube route returns hourly points from startDate 00:00
+            # through endDate 00:00 inclusive; a same-day range yields only
+            # the midnight point. endDate must therefore be the day after
+            # the target hour's date so every hour of that date is fetched
+            # (verified against the live contract 2026-09-15). Points are
+            # then filtered locally to the target complete hour.
+            start_date=start.date(),
+            end_date=start.date() + timedelta(days=1),
+            start_time=start,
+            end_time=end,
+            filters={**intent.filters, "models": planned_models, "model_scope": intent.model_scope},
+        ),)
+
+    @staticmethod
+    def _machine_text(allocation: float | None, used: float | None) -> tuple[str, int]:
+        """Build the ``占用/使用（闲N）`` machine cell for one model row.
+
+        Idle is flagged when allocation minus usage reaches one machine
+        (user-confirmed 2026-09-15). A missing usage value keeps the
+        allocation visible without guessing idle; negative differences
+        (machines removed after the hour) stay as the raw pair with no tag.
+        """
+
+        if allocation is None:
+            return "暂不可用", 0
+        if used is None:
+            return f"{allocation:.0f}/-", 0
+        idle = int(allocation - used)
+        if idle >= 1:
+            return f"{allocation:.0f}/{used:.0f}（闲{idle}）", idle
+        return f"{allocation:.0f}/{used:.0f}", 0
+
+    def analyze(self, datasets: tuple[ReportDataset, ...]) -> ReportDocument:
+        """Group the previous complete hour's TPM by customer and model.
+
+        Machine counts come from platform-level ``machine-tpm-trend`` rows and
+        are shown inside each model row with an explicit platform label; they
+        are never presented as customer-exclusive resources. Model-level
+        average TPM is never aggregated across endpoints.
+        """
+        dataset = datasets[0]
+        tenant_models = dataset.metadata.get("tenant_models", {})
+        tenant_names = dataset.metadata.get("tenant_names", {})
+        # Older connector metadata stored names as a list, while current rows
+        # carry the authoritative tenant ID. Treat non-mappings as unavailable
+        # instead of calling .get on a list and turning a valid report into
+        # an internal rendering error.
+        tenant_name_map = tenant_names if isinstance(tenant_names, Mapping) else {}
+        window_start = str(dataset.metadata.get("window_start") or "")
+        window_end = str(dataset.metadata.get("window_end") or "")
+        # Tenant/model TPM values keyed by (tenant, model, endpoint); machine
+        # allocation and usage are platform rows keyed by model only.
+        endpoint_values: dict[tuple[str, str, str], dict[str, Any]] = defaultdict(dict)
+        machine_by_model: dict[str, float] = {}
+        machine_used_by_model: dict[str, float] = {}
+        for row in dataset.rows:
+            metric = str(row.get("metric") or "")
+            model = str(row.get("model") or "未命名模型")
+            if metric in {"ai.machine.count", "ai.machine.used"}:
+                if (
+                    str(row.get("metric_scope") or "") == "platform_model"
+                    and isinstance(row.get("value"), (int, float))
+                ):
+                    if metric == "ai.machine.count":
+                        machine_by_model[model] = float(row["value"])
+                    else:
+                        machine_used_by_model[model] = float(row["value"])
+                continue
+            if metric not in {"ai.tpm.peak", "ai.tpm.avg"}:
+                continue
+            tenant_id = str(row.get("tenant_id") or "").strip()
+            endpoint = str(row.get("endpoint") or "")
+            if tenant_id:
+                endpoint_values[(tenant_id, model, endpoint)][metric] = row.get("value")
+        tpm_by_scope: dict[tuple[str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
+        for (tenant_id, model, endpoint), values in endpoint_values.items():
+            tpm_by_scope[(tenant_id, model)][endpoint] = values
+
+        groups: list[dict[str, Any]] = []
+        endpoint_detail_rows: list[dict[str, Any]] = []
+        # Idle machines per unique model (allocation minus usage); only
+        # differences of at least one machine count as idle (user-confirmed
+        # 2026-09-15) and feed the subtitle total.
+        idle_by_model: dict[str, int] = {}
+        if isinstance(tenant_models, Mapping):
+            group_items = list(tenant_models.items())
+        else:
+            group_items = []
+        for tenant_id, models in group_items:
+            model_list = [
+                str(model).strip()
+                for model in (models if isinstance(models, (list, tuple)) else [])
+                if str(model).strip()
+            ]
+            if not model_list:
+                continue
+            tenant_label = str(tenant_name_map.get(tenant_id, tenant_id) or tenant_id)
+            items: list[dict[str, Any]] = []
+            for model in sorted(set(model_list), key=str.casefold):
+                endpoints = tpm_by_scope.get((tenant_id, model), {})
+                peaks = [
+                    float(values["ai.tpm.peak"])
+                    for values in endpoints.values()
+                    if isinstance(values.get("ai.tpm.peak"), (int, float))
+                ]
+                avgs = [
+                    float(values["ai.tpm.avg"])
+                    for values in endpoints.values()
+                    if isinstance(values.get("ai.tpm.avg"), (int, float))
+                ]
+                if not peaks:
+                    peak_text = "暂不可用"
+                    status = "unavailable"
+                else:
+                    peak_text = _format_hourly_tpm(max(peaks))
+                    status = "no_usage" if max(peaks) == 0 else "active"
+                if not avgs:
+                    avg_text = "暂不可用"
+                elif len(endpoints) > 1:
+                    # avgTpm is reported per endpoint and must not be
+                    # averaged across endpoint boundaries.
+                    avg_text = "多 Endpoint，不汇总"
+                else:
+                    avg_text = _format_hourly_tpm(avgs[0])
+                machine_text, idle = self._machine_text(
+                    machine_by_model.get(model), machine_used_by_model.get(model)
+                )
+                if idle:
+                    idle_by_model[model] = idle
+                items.append({
+                    "label": model,
+                    "metric": "ai.tpm.peak",
+                    "value": peak_text,
+                    "current_value": peak_text,
+                    "current_unit": "峰值",
+                    "status": status,
+                    "metrics": [
+                        {"label": "峰值", "value": peak_text},
+                        {"label": "均值", "value": avg_text},
+                        {"label": "机器", "value": machine_text},
+                    ],
+                })
+                if len(endpoints) > 1:
+                    for endpoint, values in sorted(endpoints.items()):
+                        endpoint_detail_rows.append({
+                            "tenant": tenant_label,
+                            "model": model,
+                            "endpoint": endpoint,
+                            "tpm_peak": (
+                                _format_hourly_tpm(values["ai.tpm.peak"])
+                                if isinstance(values.get("ai.tpm.peak"), (int, float))
+                                else "暂不可用"
+                            ),
+                            "tpm_avg": (
+                                _format_hourly_tpm(values["ai.tpm.avg"])
+                                if isinstance(values.get("ai.tpm.avg"), (int, float))
+                                else "暂不可用"
+                            ),
+                        })
+            groups.append({"id": tenant_id, "label": tenant_label, "items": items})
+        displayed_models = {
+            str(item.get("label") or "")
+            for group in groups
+            for item in group.get("items") or []
+            if str(item.get("label") or "")
+        }
+        hour_text = ""
+        if window_start and window_end:
+            # Compact hourly cadence: MM-DD HH:MM–HH:MM. The timezone lives in
+            # the disclosure only.
+            hour_text = f"{window_start[5:10]} {window_start[11:16]}–{window_end[11:16]}"
+        idle_total = sum(idle_by_model.values())
+        subtitle = f"{hour_text} · {len(groups)} 客户 / {len(displayed_models)} 模型"
+        if idle_total >= 1:
+            subtitle += f" · {idle_total} 机器空闲"
+        context = ReportContext(
+            timezone=self.timezone_name,
+            current_window=ReportWindow(
+                start=window_start, end=window_end, label="上一完整小时"
+            ),
+            # Hourly snapshots have no comparison baseline by design; the
+            # disclosure states this explicitly instead of implying one.
+            comparison_windows=(),
+            sources=(
+                ReportSource(
+                    system="Cube Admin",
+                    route="analysis/endpoint-max-tpm/daily/query",
+                    fields=("maxTpm", "avgTpm", "model", "endpoint", "tenantId"),
+                ),
+                ReportSource(
+                    system="Cube Admin",
+                    route="analysis/model-machine-usage/query",
+                    fields=("machineCount", "clusterName", "gpuProduct", "model"),
+                ),
+            ),
+            metric_definitions=(
+                MetricDefinition(
+                    metric="ai.tpm.peak",
+                    label="TPM 峰值",
+                    unit="tokens/minute",
+                    aggregation="上一完整小时的 maxTpm（小时峰值）",
+                    source="Cube Admin / analysis/endpoint-max-tpm/daily/query",
+                ),
+                MetricDefinition(
+                    metric="ai.tpm.avg",
+                    label="TPM 均值",
+                    unit="tokens/minute",
+                    aggregation="上一完整小时的 avgTpm（小时均值），不跨 Endpoint 汇总",
+                    source="Cube Admin / analysis/endpoint-max-tpm/daily/query",
+                ),
+                MetricDefinition(
+                    metric="ai.machine.count",
+                    label="机器占用",
+                    unit="machines",
+                    aggregation="发送时的当前配置快照，按模型跨集群求和，平台级",
+                    source="Cube Admin / analysis/model-machine-usage/query",
+                ),
+                MetricDefinition(
+                    metric="ai.machine.used",
+                    label="机器使用",
+                    unit="machines",
+                    aggregation="上一完整小时时点实际使用数，按模型跨集群求和，平台级",
+                    source="Cube Admin / analysis/machine-tpm-trend/query",
+                ),
+            ),
+            calculation_version="2.0",
+            quality=dataset.quality,
+            quality_reasons=dataset.warnings,
+            template_version=self.manifest.version,
+        )
+        blocks: list[ReportBlock] = [
+            ReportBlock("grouped_metrics", {"groups": groups, "collapse_no_usage": False}),
+        ]
+        if endpoint_detail_rows:
+            blocks.append(ReportBlock("table", {
+                "title": "Endpoint 明细：多 Endpoint 模型不汇总均值",
+                "columns": [
+                    {"name": "tenant", "display_name": "客户", "data_type": "text"},
+                    {"name": "model", "display_name": "模型", "data_type": "text"},
+                    {"name": "endpoint", "display_name": "Endpoint", "data_type": "text"},
+                    {"name": "tpm_peak", "display_name": "TPM 峰值", "data_type": "text"},
+                    {"name": "tpm_avg", "display_name": "TPM 均值", "data_type": "text"},
+                ],
+                "rows": endpoint_detail_rows,
+            }))
+        blocks.append(
+            ReportBlock(
+                "note",
+                {
+                    "content": (
+                        "口径：上一完整小时的模型级 TPM 峰值（maxTpm）与均值（avgTpm），"
+                        f"无对比基准，时区 {self.timezone_name}。TPM 按客户与模型查询。"
+                        "机器 = 占用/真实使用（台）：占用为发送时的当前配置快照"
+                        "（model-machine-usage），真实使用为上一完整小时时点值"
+                        "（machine-tpm-trend），均按模型跨集群求和、平台级、与客户无关；"
+                        "占用−使用 ≥ 1 台标注（闲N），同一模型在不同客户行显示同一平台值。"
+                        "客户身份来自 Cube 实时目录。最近完整小时的 0 值或使用数缺失也可能"
+                        "来自上游聚合延迟。"
+                    ),
+                    "collapsed": True,
+                    "collapsed_label": "报表说明与数据质量",
+                    "include_context": True,
+                    "include_warnings": True,
+                },
+            )
+        )
+        fallback_lines: list[str] = []
+        for group in groups:
+            fallback_lines.append(f"客户 {group['label']}")
+            for item in group["items"]:
+                metrics = {
+                    str(metric.get("label") or ""): str(metric.get("value") or "")
+                    for metric in item["metrics"]
+                }
+                fallback_lines.append(
+                    f"{item['label']}：峰值 {metrics.get('峰值', '暂不可用')} · "
+                    f"均值 {metrics.get('均值', '暂不可用')} · "
+                    f"机器 {metrics.get('机器', '暂不可用')}"
+                )
+        return ReportDocument(
+            title=self.manifest.display_name,
+            subtitle=subtitle,
+            document_id=self.manifest.template_id,
+            blocks=tuple(blocks),
+            fallback_text=(
+                f"{self.manifest.display_name}\n{subtitle}\n"
+                + ("\n".join(fallback_lines) if fallback_lines else "暂无数据")
+                + f"\n数据质量：{dataset.quality}"
+            ),
+            quality=dataset.quality,
+            warnings=dataset.warnings,
+            context=context,
+            version=2,
+        )
 
 class CubeMachineTpmTemplate(TemplatePlugin):
     """Render peak normalized per-machine TPM by model, cluster, and GPU product."""

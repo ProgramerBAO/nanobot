@@ -64,6 +64,9 @@ _SAFE_REPORT_PARAM_KEYS = frozenset(
         "breakdown",
         "report_variant",
         "multi_scope",
+        # Hourly TPM subscriptions carry the template id so the cron-run
+        # compiler can pick the hourly intent branch deterministically.
+        "report_template_id",
     }
 )
 _ALLOWED_CHANNELS = frozenset({"feishu", "wecom", "dingtalk", "webhook", "text"})
@@ -219,9 +222,12 @@ def _recurrence(value: Any) -> str:
         "每周": "weekly",
         "monthly": "monthly",
         "每月": "monthly",
+        "hourly": "hourly",
+        "每小时": "hourly",
+        "每小时播报": "hourly",
     }
     result = aliases.get(str(value or "").strip(), str(value or "").strip() or "workdays")
-    if result not in {"every_day", "workdays", "weekly", "monthly"}:
+    if result not in {"every_day", "workdays", "weekly", "monthly", "hourly"}:
         raise SubscriptionServiceError("不支持的订阅频率")
     return result
 
@@ -232,6 +238,7 @@ def _schedule_period(recurrence: str) -> str:
         "workdays": "day",
         "weekly": "week",
         "monthly": "month",
+        "hourly": "recent1h",
     }[recurrence]
 
 
@@ -650,8 +657,9 @@ class ReportSubscriptionService:
             validation_tenant_ids=validation_tenant_ids,
         )
 
+        # Hourly TPM subscriptions are clock-driven: each run observes the just-completed hour.
         schedule = build_subscription_schedule(
-            _schedule_period(recurrence),
+            "recent1h" if period == "recent1h" else _schedule_period(recurrence),
             send_time=send_time,
             daily_mode="workdays" if recurrence == "workdays" else "every_day",
             weekday=weekday,

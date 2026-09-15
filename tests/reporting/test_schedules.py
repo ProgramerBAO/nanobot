@@ -37,6 +37,14 @@ from nanobot.reporting.store import ReportSubscription
             "30 18 15 * *",
             "每月 15 日 18:30",
         ),
+        # Hourly TPM runs five minutes after the hour so the upstream hourly
+        # aggregate of the just-completed hour is already ingested.
+        (
+            "recent1h",
+            {"send_time": "00:00"},
+            "5 * * * *",
+            "每小时（整点后 5 分钟）",
+        ),
     ],
 )
 def test_build_and_describe_subscription_schedule(

@@ -109,6 +109,19 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   averaged across valid dates within one tenant/model/Endpoint series, but must never
   be aggregated across Endpoint or customer boundaries; missing `avgTpm` stays
   unavailable and must not fall back to `maxTpm` or zero.
+- Cube hourly TPM reports must query `analysis/endpoint-max-tpm/daily/query` with
+  `time_level=TIME_LEVEL_HOUR` and an `endDate` one day after the target hour's date
+  (a same-day range returns only the midnight point), then filter locally to the
+  target complete hour; not-yet-elapsed hours return zero placeholders and must stay
+  out of the report. Machines are dual-source per unique model: allocation from
+  `analysis/model-machine-usage/query` (current snapshot, quality-relevant) and
+  actual usage from `analysis/machine-tpm-trend/query` (target-hour point-in-time,
+  informational — a missing usage value must not downgrade quality). Idle =
+  allocation minus usage, flagged as （闲N） from one machine difference and summed
+  into the subtitle as `N 机器空闲`; both values are platform-level and must never
+  be attributed to a customer. Hourly subscriptions run at five minutes past the
+  hour; a missing target-hour point stays 暂不可用 with `partial` quality and must
+  never be rendered as zero.
 
 ## Common File Locations
 

@@ -22,10 +22,12 @@ from nanobot.reporting.contracts import (
     ReportQueryComparison,
     ReportSource,
     ReportWindow,
+    format_metric_compact,
 )
 from nanobot.reporting.cube import (
     CubeConnector,
     CubeCostAccountTemplate,
+    CubeCustomerModelHourlyTpmTemplate,
     CubeHealthTemplate,
     CubeMachineTpmTemplate,
 )
@@ -253,8 +255,8 @@ class MultiCustomerModelDailyBriefTemplate(TemplatePlugin):
                 item = {
                     "label": model,
                     "metric": "ai.usage.tokens",
-                    "value": _format_compact(current),
-                    "current_value": _format_compact(current),
+                    "value": format_metric_compact(current),
+                    "current_value": format_metric_compact(current),
                     "current_unit": "Token",
                     "status": status,
                     "comparisons": comparisons,
@@ -1315,19 +1317,6 @@ def _format_metric_change(
     return "0.0%"
 
 
-def _format_compact(value: int | float | None) -> str:
-    """Format model totals compactly without manufacturing zero for missing rows."""
-
-    if value is None:
-        return "暂无数据"
-    absolute = abs(float(value))
-    if absolute >= 100_000_000:
-        return f"{float(value) / 100_000_000:.2f}亿"
-    if absolute >= 10_000:
-        return f"{float(value) / 10_000:.2f}万"
-    return f"{float(value):,.0f}"
-
-
 def _usage_table(rows: list[dict[str, Any]]) -> list[list[Any]]:
     grouped: dict[tuple[str, str], dict[str, float]] = defaultdict(dict)
     for row in rows:
@@ -1658,6 +1647,7 @@ def build_default_registry(
     cube_multi_scope_brief_enabled: bool = False,
     cube_multi_scope_weekly_brief_enabled: bool = False,
     cube_machine_tpm_template_enabled: bool = False,
+    cube_customer_model_hourly_tpm_enabled: bool = False,
     cube_cost_template_enabled: bool = False,
     cube_provider_quality_connector_enabled: bool = False,
     cube_provider_quality_template_enabled: bool = False,
@@ -1712,6 +1702,8 @@ def build_default_registry(
         registry.connector("magik_cube"), CubeConnector
     ):
         registry.register_template(MultiCustomerModelWeeklyBriefTemplate(timezone=timezone))
+    if cube_customer_model_hourly_tpm_enabled and isinstance(registry.connector("magik_cube"), CubeConnector):
+        registry.register_template(CubeCustomerModelHourlyTpmTemplate(timezone_name=timezone))
     if cube_machine_tpm_template_enabled and isinstance(
         registry.connector("magik_cube"), CubeConnector
     ):

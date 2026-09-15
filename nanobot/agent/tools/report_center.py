@@ -151,6 +151,27 @@ _MULTI_SCOPE_NAMED_RE = re.compile(
     r"(?P<period>日报|周报)简报[？?。！!]*$",
     re.IGNORECASE,
 )
+_CUSTOMER_MODEL_HOURLY_TPM_RE = re.compile(
+    r"^(?:请)?(?:查看|查询|生成)?\s*(?P<tenants>.+?)\s*(?:的)?\s*"
+    r"(?:全部|所有|全量)\s*模型\s*(?:的)?\s*"
+    r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时\s*(?:TPM|tpm)\s*"
+    r"(?:峰值和均值|均值和峰值|报告|报表)?[？?。！!]*$",
+    re.IGNORECASE,
+)
+_CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE = re.compile(
+    r"^(?:请)?(?:查看|查询|生成)?\s*(?P<tenants>.+?)\s+"
+    r"(?P<models>[A-Za-z0-9][A-Za-z0-9._-]*(?:[、，,]\s*[A-Za-z0-9][A-Za-z0-9._-]*)*)\s*"
+    r"(?:模型)?\s*(?:的)?\s*(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时\s*"
+    r"(?:TPM|tpm)\s*(?:峰值和均值|均值和峰值|报告|报表)?[？?。！!]*$",
+    re.IGNORECASE,
+)
+# This guard is intentionally broader than the deterministic parsers above.
+# Hourly TPM requests that are incomplete must fail closed in ReportCenter
+# instead of falling through to the legacy daily-usage matcher.
+_HOURLY_TPM_SIGNAL_RE = re.compile(
+    r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时.*(?:TPM|tpm)",
+    re.IGNORECASE,
+)
 _MACHINE_TPM_RE = re.compile(
     r"^(?:请)?(?:查看|查询|生成)?\s*(?P<model>[A-Za-z0-9][A-Za-z0-9._-]*)"
     r"\s*(?:模型)?(?:的)?(?:单机|每台机器)\s*(?:折算)?\s*TPM"
@@ -189,6 +210,10 @@ _ALLOWED_REPORT_PARAM_KEYS = frozenset(
         "cluster",
         "report_variant",
         "tenant_scope",
+        # Hourly TPM subscriptions carry their template id so the cron-run
+        # compiler can select the hourly intent branch without guessing from
+        # the period alone.
+        "report_template_id",
     }
 )
 _PERIOD_TEMPLATES: dict[str, str] = {
@@ -259,6 +284,8 @@ class ReportCenterToolConfig(Base):
     cube_multi_scope_brief: bool = False
     cube_multi_scope_weekly_brief: bool = False
     cube_machine_tpm_report: bool = False
+    cube_customer_model_hourly_tpm: bool = False
+    cube_customer_model_hourly_tpm_subscription: bool = False
     report_management_v1: bool = False
     # Guided WebUI subscription editing and result-card policy are independent
     # rollout gates. The legacy settings endpoint remains available while the
@@ -335,6 +362,7 @@ _REPORT_CENTER_PARAMETERS = {
                 "multi_scope_brief",
                 "multi_scope_weekly_brief",
                 "machine_tpm_report",
+                "customer_model_hourly_tpm",
                 "examples",
                 "recent",
                 "subscriptions",
@@ -351,7 +379,7 @@ _REPORT_CENTER_PARAMETERS = {
                 "request_access",
             ],
         },
-        "period": {"type": "string", "enum": ["day", "week", "month", "recent7", "recent15m", "range"]},
+        "period": {"type": "string", "enum": ["day", "week", "month", "recent7", "recent15m", "recent1h", "range"]},
         "report_family": {
             "type": "string",
             "enum": ["usage", "health", "cost", "provider_quality", "capacity"],
@@ -367,6 +395,8 @@ _REPORT_CENTER_PARAMETERS = {
                 "usage_weekly_brief",
                 "usage_monthly_brief",
                 "usage_customer_model_daily_brief",
+                "usage_customer_model_weekly_brief",
+                "usage_customer_model_hourly_tpm",
                 "inherit",
             ],
         },
@@ -403,7 +433,7 @@ _REPORT_CENTER_PARAMETERS = {
         },
         "recurrence": {
             "type": "string",
-            "enum": ["every_day", "workdays", "weekly", "monthly"],
+            "enum": ["every_day", "workdays", "weekly", "monthly", "hourly"],
         },
         "tenant_query": {"type": "string", "maxLength": 128},
         "tenants": {
@@ -509,6 +539,7 @@ class ReportCenterTool(Tool):
             cube_multi_scope_brief_enabled=config.cube_multi_scope_brief,
             cube_multi_scope_weekly_brief_enabled=config.cube_multi_scope_weekly_brief,
             cube_machine_tpm_template_enabled=config.cube_machine_tpm_report,
+            cube_customer_model_hourly_tpm_enabled=config.cube_customer_model_hourly_tpm,
             cube_cost_template_enabled=(config.cube_cost_connector and config.cube_cost_template),
             cube_provider_quality_connector_enabled=config.cube_provider_quality_connector,
             cube_provider_quality_template_enabled=(
@@ -1256,6 +1287,46 @@ class ReportCenterTool(Tool):
             }
         if _MULTI_SCOPE_WEEKLY_RE.fullmatch(raw):
             return {"action": "multi_scope_brief", "interactive": True, "period": "week"}
+        hourly_tpm_match = _CUSTOMER_MODEL_HOURLY_TPM_RE.fullmatch(raw)
+        if hourly_tpm_match:
+            tenant_values = [
+                item.strip()
+                for item in re.split(r"[、，,；;和与及]+", hourly_tpm_match.group("tenants"))
+                if item.strip()
+            ]
+            return {
+                "action": "customer_model_hourly_tpm",
+                "period": "recent1h",
+                "tenants": tenant_values,
+                "model_scope": "all",
+                "interactive": False,
+            }
+        selected_hourly_match = _CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE.fullmatch(raw)
+        if selected_hourly_match:
+            tenant_values = [
+                item.strip()
+                for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("tenants"))
+                if item.strip()
+            ]
+            model_values = [
+                item.strip()
+                for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("models"))
+                if item.strip()
+            ]
+            return {
+                "action": "customer_model_hourly_tpm",
+                "period": "recent1h",
+                "tenants": tenant_values,
+                "models": model_values,
+                "model_scope": "selected",
+                "interactive": False,
+            }
+        if _HOURLY_TPM_SIGNAL_RE.search(raw):
+            return {
+                "action": "customer_model_hourly_tpm",
+                "period": "recent1h",
+                "interactive": True,
+            }
         machine_tpm_match = _MACHINE_TPM_RE.fullmatch(raw)
         if machine_tpm_match:
             return {
@@ -1953,6 +2024,41 @@ class ReportCenterTool(Tool):
         # selector's ``agent_ui`` response.  The concrete Cube tool exposes a
         # direct catalog method for this path; keep the old selector fallback
         # only for compatibility adapters and test doubles that predate it.
+        direct_loader = getattr(self._magik_tool, "list_active_models_for_tenants", None)
+        native_loader = getattr(type(self._magik_tool), "list_active_models_for_tenants", None)
+        if callable(direct_loader) and native_loader is not None:
+            try:
+                loaded = await direct_loader(
+                    tenant_ids,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as exc:
+                raise LookupError("Cube 实时模型目录未返回可用模型，请检查目录查询权限") from exc
+            if not isinstance(loaded, dict):
+                raise LookupError("Cube 实时模型目录返回格式无效")
+            catalog_models = {
+                str(tenant_id).strip(): list(
+                    dict.fromkeys(
+                        str(model).strip()
+                        for model in models
+                        if str(model).strip()
+                    )
+                )
+                for tenant_id, models in loaded.items()
+                if str(tenant_id).strip() and isinstance(models, (list, tuple))
+            }
+            missing = [tenant_id for tenant_id in tenant_ids if not catalog_models.get(tenant_id)]
+            if missing:
+                raise LookupError("Cube 实时模型目录未返回可用模型，请检查客户模型配置")
+            if sum(len(catalog_models[tenant_id]) for tenant_id in tenant_ids) > 200:
+                raise ValueError("客户模型组合超过 200 个，请缩小订阅范围")
+            return {tenant_id: catalog_models[tenant_id] for tenant_id in tenant_ids}
+
+        # Compatibility fallback for older adapters and test doubles that only
+        # expose configured model catalogs. The concrete Cube tool above must
+        # use active usage discovery so all-model reports do not include idle
+        # configured models.
         direct_loader = getattr(self._magik_tool, "list_models_for_tenants", None)
         native_loader = getattr(type(self._magik_tool), "list_models_for_tenants", None)
         if callable(direct_loader) and native_loader is not None:
@@ -2286,6 +2392,265 @@ class ReportCenterTool(Tool):
             ),
         )
 
+    async def _run_customer_model_hourly_tpm(
+        self,
+        *,
+        tenants: list[str],
+        models: list[str],
+        all_tenants: bool,
+        interactive: bool = False,
+        report_selections: list[dict[str, Any]] | None = None,
+    ) -> ToolResult:
+        """Run the read-only hourly model TPM report for validated customer scope.
+
+        Customer/model discovery deliberately reuses the daily-report catalog
+        resolver.  The hourly Cube endpoint provides model-level TPM, so this
+        method carries customer relationships as scope metadata and never
+        claims customer-exclusive machine resources.
+        """
+        if not self._config.cube_customer_model_hourly_tpm:
+            return ToolResult.error("Error: hourly customer/model TPM report is not enabled")
+        if self._magik_tool is None:
+            return ToolResult.error("Cube 客户目录当前不可用，请稍后重试")
+        selections = [
+            item for item in report_selections or [] if isinstance(item, dict)
+        ]
+        if interactive and not tenants and not selections:
+            # No scope yet: open the shared customer/model selector and rewire
+            # every callback back into this action, mirroring the multi-scope
+            # brief workflow. Scope validation stays server-side.
+            now = datetime.now(ZoneInfo(self._config.timezone))
+            previous_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(
+                hours=1
+            )
+            result = await self._magik_tool.execute(
+                start_date=previous_hour.date().isoformat(),
+                end_date=previous_hour.date().isoformat(),
+                comparison="none",
+                include_tpm=False,
+                report_template="matrix_card",
+                granularity="day",
+                interactive=True,
+                save_snapshot=False,
+            )
+            ui = result.metadata.get(OUTBOUND_META_AGENT_UI) if result.metadata else None
+            if isinstance(ui, dict) and ui.get("kind") == "magik_report_form":
+                ui["title"] = "选择小时 TPM 客户与模型范围"
+                ui["base_params"] = {
+                    "action": "customer_model_hourly_tpm",
+                    "period": "recent1h",
+                    "interactive": False,
+                    "_report_center_selector": True,
+                }
+                ui["max_tenants"] = 20
+            return result
+        raw_tenants = [str(item).strip() for item in tenants if str(item).strip()]
+        if not raw_tenants and selections:
+            raw_tenants = list(
+                dict.fromkeys(
+                    str(item.get("tenant_query") or "").strip()
+                    for item in selections
+                    if str(item.get("tenant_query") or "").strip()
+                )
+            )
+        if all_tenants and not raw_tenants:
+            loader = getattr(self._magik_tool, "list_tenant_catalog", None)
+            if not callable(loader):
+                return ToolResult.error("Cube 客户目录当前不可用，请稍后重试")
+            try:
+                catalog = await loader(limit=20)
+            except Exception:
+                return ToolResult.error("Cube 客户目录当前不可用，请稍后重试")
+            raw_tenants = [
+                str(item.get("tenant_id") or item.get("tenantId") or "").strip()
+                for item in catalog or []
+                if isinstance(item, dict)
+            ]
+        if not raw_tenants:
+            return ToolResult.error("请指定至少一个客户")
+        resolver = getattr(self._magik_tool, "resolve_tenant_queries", None)
+        resolved: list[dict[str, Any]] = []
+        if callable(resolver):
+            try:
+                resolved, unresolved = await resolver(raw_tenants)
+            except Exception:
+                return ToolResult.error("Cube 客户目录当前不可用，请稍后重试")
+            if unresolved:
+                names = "、".join(str(item.get("query") or "") for item in unresolved)
+                return ToolResult.error(f"以下客户无法在 Cube 实时目录中确认：{names or '未知客户'}")
+            raw_tenants = [
+                str(item.get("tenant_id") or "").strip()
+                for item in resolved
+                if isinstance(item, dict) and str(item.get("tenant_id") or "").strip()
+            ]
+        if len(raw_tenants) > 20:
+            return ToolResult.error("最多支持 20 个客户，请缩小范围")
+        selected_models = self._canonical_cube_models(tuple(models))
+        discovered: dict[str, list[str]] = {}
+        if selections:
+            # Selector submissions already carry catalog-validated scope:
+            # all-scope tenants get live active discovery for the hour's date,
+            # selected-scope tenants keep the models their selector stage
+            # validated against the live catalog.
+            discovery_tenants = list(
+                dict.fromkeys(
+                    str(item.get("tenant_query") or "").strip()
+                    for item in selections
+                    if str(item.get("model_scope") or "") == "all"
+                    and str(item.get("tenant_query") or "").strip()
+                )
+            )
+            if discovery_tenants:
+                now = datetime.now(ZoneInfo(self._config.timezone))
+                previous_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(
+                    hours=1
+                )
+                try:
+                    discovered.update(
+                        await self._load_tenant_model_catalog(
+                            discovery_tenants,
+                            start_date=previous_hour.date(),
+                            end_date=previous_hour.date(),
+                        )
+                    )
+                except (LookupError, ValueError) as exc:
+                    return ToolResult.error(str(exc))
+            for item in selections:
+                if str(item.get("model_scope") or "") != "selected":
+                    continue
+                tenant_id = str(item.get("tenant_query") or "").strip()
+                model_values = [
+                    str(model).strip()
+                    for model in item.get("models") or []
+                    if str(model).strip()
+                ]
+                if tenant_id and model_values:
+                    discovered[tenant_id] = list(dict.fromkeys(model_values))
+            selected_models = self._canonical_cube_models(
+                tuple(model for values in discovered.values() for model in values)
+            )
+        elif selected_models:
+            # Explicit model scope must be resolved per tenant. Reusing one
+            # global model list for every tenant would claim a customer/model
+            # relationship that the live Cube catalog never confirmed.
+            model_resolver = getattr(self._magik_tool, "resolve_models_for_tenants", None)
+            if not callable(model_resolver):
+                return ToolResult.error("Cube 实时模型目录当前不可用，请稍后重试")
+            try:
+                discovered, unresolved_models = await model_resolver(
+                    raw_tenants, list(selected_models)
+                )
+            except (LookupError, ValueError) as exc:
+                return ToolResult.error(str(exc))
+            if unresolved_models:
+                details = "、".join(
+                    f"{item.get('tenant_id') or item.get('tenant')}: {item.get('model')}"
+                    for item in unresolved_models
+                    if isinstance(item, dict)
+                )
+                return ToolResult.error(
+                    f"以下客户未确认指定模型，请检查客户与模型范围：{details or '未知范围'}"
+                )
+            selected_models = self._canonical_cube_models(
+                tuple(model for values in discovered.values() for model in values)
+            )
+        else:
+            # The existing catalog path is the source of truth for all-model
+            # selection; it excludes configured models that have no live data.
+            now = datetime.now(ZoneInfo(self._config.timezone))
+            current_hour = now.replace(minute=0, second=0, microsecond=0)
+            previous_hour = current_hour - timedelta(hours=1)
+            try:
+                discovered = await self._load_tenant_model_catalog(
+                    raw_tenants,
+                    start_date=previous_hour.date(),
+                    end_date=previous_hour.date(),
+                )
+            except (LookupError, ValueError) as exc:
+                return ToolResult.error(str(exc))
+            selected_models = self._canonical_cube_models(
+                tuple(model for values in discovered.values() for model in values)
+            )
+        if not selected_models:
+            return ToolResult.error("所选客户当前没有可查询的有用量模型")
+        if len(selected_models) > 20:
+            return ToolResult.error("最多支持 20 个模型，请缩小范围")
+        tenant_models = {
+            tenant_id: list(dict.fromkeys(discovered.get(tenant_id, [])))
+            for tenant_id in raw_tenants
+        }
+        combinations = sum(len(values) for values in tenant_models.values())
+        if combinations > 200:
+            return ToolResult.error("客户模型组合超过 200 个，请缩小范围")
+        template = self._registry.template("usage_customer_model_hourly_tpm")
+        if template is None:
+            return ToolResult.error("Error: hourly customer/model TPM report template is unavailable")
+        # The intent's model scope must reflect how the scope was chosen: a
+        # discovery-expanded all-model run keeps model_scope="all" with an
+        # empty model tuple (the daily brief pattern), so quoted-card
+        # subscriptions inherit per-run discovery semantics instead of a flat
+        # cross-tenant model list that no catalog relationship confirms.
+        explicit_model_selection = any(str(item).strip() for item in models) or any(
+            str(item.get("model_scope") or "") == "selected" and item.get("models")
+            for item in selections
+        )
+        intent_model_scope = "selected" if explicit_model_selection else "all"
+        intent_models = selected_models if explicit_model_selection else ()
+        channel, chat_id, user_id, _session_key, metadata = self._request_identity()
+        tenant_names = {
+            str(item.get("tenant_id") or ""): str(
+                item.get("display_name") or item.get("tenant_name") or item.get("name") or item.get("tenant_id") or ""
+            )
+            for item in (resolved if callable(resolver) else [])
+            if isinstance(item, dict) and str(item.get("tenant_id") or "").strip()
+        }
+        intent = ReportIntent(
+            connector_id="magik_cube",
+            template_id=template.manifest.template_id,
+            period="recent1h",
+            tenant_scope="all" if all_tenants else "selected",
+            tenants=tuple(dict.fromkeys(raw_tenants)),
+            models=intent_models,
+            model_scope=intent_model_scope,
+            filters={
+                "tenants": list(dict.fromkeys(raw_tenants)),
+                "models": list(intent_models),
+                "model_scope": intent_model_scope,
+                "multi_scope": True,
+                "tenant_models": tenant_models,
+                "tenant_names": tenant_names,
+            },
+        )
+        trace_id = uuid.uuid4().hex
+        try:
+            outcome = await ReportRunner(
+                self._registry,
+                self._store,
+                semantic_shadow_enabled=self._config.cube_semantics_shadow,
+                template_policy_enforced=self._config.report_management_v1,
+            ).run(
+                intent,
+                ReportRunContext(
+                    channel=channel,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    timezone=self._config.timezone,
+                    trace_id=trace_id,
+                    template_version=template.manifest.version,
+                    metadata=metadata,
+                ),
+            )
+        except PermissionError:
+            return ToolResult.error("当前账号没有执行小时 TPM 报表的权限，请联系管理员授权")
+        except (LookupError, ValueError) as exc:
+            return ToolResult.error(f"Error: hourly TPM report unavailable: {exc}")
+        return self._result(
+            outcome.document,
+            report_reference=self._report_reference_payload(
+                intent, document=outcome.document, run_id=trace_id
+            ),
+        )
+
     async def _run_machine_tpm_report(
         self,
         *,
@@ -2470,11 +2835,13 @@ class ReportCenterTool(Tool):
             for tenant in tenants
         }
         report_variant = (
-            "customer_model_daily_brief"
+            "customer_model_hourly_tpm"
+            if intent.template_id == "usage_customer_model_hourly_tpm"
+            else "customer_model_daily_brief"
             if intent.template_id == "usage_customer_model_daily_brief"
             else "usage_brief"
         )
-        if report_variant == "customer_model_daily_brief":
+        if report_variant in {"customer_model_daily_brief", "customer_model_hourly_tpm"}:
             tenant_models = intent.filters.get("tenant_models")
             report_selections = [
                 {
@@ -2514,6 +2881,10 @@ class ReportCenterTool(Tool):
             ).isoformat(),
             "scope": {
                 "report_variant": report_variant,
+                # The template id lets the hourly cron-run compiler and quoted
+                # subscriptions select the hourly intent branch without
+                # guessing from the period alone.
+                "report_template_id": intent.template_id,
                 "tenant_scope": intent.tenant_scope or "selected",
                 "tenant_query": intent.tenant,
                 "tenants": tenants,
@@ -2766,6 +3137,7 @@ class ReportCenterTool(Tool):
             "usage_monthly_brief": ("month", "usage_brief"),
             "usage_customer_model_daily_brief": ("day", "customer_model_daily_brief"),
             "usage_customer_model_weekly_brief": ("week", "customer_model_weekly_brief"),
+            "usage_customer_model_hourly_tpm": ("recent1h", "customer_model_hourly_tpm"),
         }
         unresolved: list[dict[str, str]] = []
         display_names: list[str] = []
@@ -2840,6 +3212,7 @@ class ReportCenterTool(Tool):
                 "usage_monthly_brief",
                 "usage_customer_model_daily_brief",
                 "usage_customer_model_weekly_brief",
+                "usage_customer_model_hourly_tpm",
             }:
                 return self._result(
                     self._subscription_unavailable_document(
@@ -2899,12 +3272,37 @@ class ReportCenterTool(Tool):
                     if model_scope == "selected"
                     else [str(item) for item in params.get("models") or []]
                 )
+                # Preserve the reference's per-tenant model relationships:
+                # apply_tenant_scope rebuilds selections from a flat list,
+                # which would fabricate cross-tenant pairs the live catalog
+                # never confirmed (observed live 2026-09-15 with a quoted
+                # multi-customer hourly card).
+                reference_selection_models = {
+                    str(item.get("tenant_query") or "").strip(): [
+                        str(model).strip()
+                        for model in item.get("models") or []
+                        if str(model).strip()
+                    ]
+                    for item in params.get("report_selections") or []
+                    if isinstance(item, dict)
+                    and str(item.get("tenant_query") or "").strip()
+                    and item.get("models")
+                }
                 apply_tenant_scope(
                     params,
                     resolved,
                     selected_model_scope=effective_model_scope,
                     selected_models=effective_models,
                 )
+                if reference_selection_models and effective_model_scope == "selected":
+                    for selection in params.get("report_selections") or []:
+                        if not isinstance(selection, dict):
+                            continue
+                        tenant_id = str(selection.get("tenant_query") or "").strip()
+                        if tenant_id in reference_selection_models:
+                            selection["models"] = list(
+                                reference_selection_models[tenant_id]
+                            )
                 display_names = [item["display_name"] for item in resolved]
             if model_scope != "inherit":
                 params["model_scope"] = model_scope
@@ -2934,7 +3332,10 @@ class ReportCenterTool(Tool):
                 or (tenant_scope == "selected" and len(tenant_aliases) > 1)
                 or (tenant_scope == "all" and model_scope == "all")
             )
-            if multi_scope_requested:
+            if multi_scope_requested and report_type != "usage_customer_model_hourly_tpm":
+                # The hourly TPM template is inherently a multi-customer
+                # grouped report and must never be rewritten into a daily or
+                # weekly brief by the scope-shape heuristic below.
                 report_type = (
                     "usage_customer_model_weekly_brief"
                     if data_period == "week"
@@ -2997,7 +3398,85 @@ class ReportCenterTool(Tool):
             model_resolver = getattr(
                 self._magik_tool, "resolve_models_for_tenants", None
             )
-            if selected_tenants and selected_models:
+            # Per-tenant selections describe the confirmed customer/model
+            # relationships. Validating the flat model list against every
+            # tenant fabricates cross-tenant pairs the live catalog never
+            # confirmed (observed live 2026-09-15 with a quoted multi-customer
+            # hourly card), so prefer the per-tenant pairs whenever they
+            # exist.
+            per_tenant_pairs: list[tuple[str, list[str]]] = []
+            for item in params.get("report_selections") or []:
+                if not isinstance(item, dict):
+                    continue
+                tenant_id = str(item.get("tenant_query") or "").strip()
+                values = [
+                    str(model).strip()
+                    for model in item.get("models") or []
+                    if str(model).strip()
+                ]
+                if (
+                    tenant_id
+                    and values
+                    and str(item.get("model_scope") or "") == "selected"
+                ):
+                    per_tenant_pairs.append((tenant_id, values))
+            if per_tenant_pairs and callable(model_resolver):
+                resolved_by_tenant: dict[str, list[str]] = {}
+                unresolved_models: list[dict[str, Any]] = []
+                resolver_failed = False
+                for tenant_id, values in per_tenant_pairs:
+                    try:
+                        response = await model_resolver([tenant_id], values)
+                    except Exception as exc:
+                        logger.warning(
+                            "Cube subscription model resolution failed: error_type={}",
+                            type(exc).__name__,
+                        )
+                        resolver_failed = True
+                        break
+                    if not (isinstance(response, tuple) and len(response) == 2):
+                        resolver_failed = True
+                        break
+                    tenant_models, unresolved = response
+                    if isinstance(tenant_models, dict):
+                        for key, model_values in tenant_models.items():
+                            resolved_by_tenant[str(key)] = [
+                                str(model).strip()
+                                for model in model_values
+                                if str(model).strip()
+                            ]
+                    unresolved_models.extend(
+                        item for item in unresolved or [] if isinstance(item, dict)
+                    )
+                if resolver_failed:
+                    return self._result(
+                        self._subscription_unavailable_document(
+                            "Cube 模型目录当前不可用，请稍后重试或打开订阅中心。"
+                        )
+                    )
+                if unresolved_models:
+                    details = "、".join(
+                        f"{item.get('tenant_id')} / {item.get('model')}（{item.get('reason')}）"
+                        for item in unresolved_models
+                    )
+                    return self._result(
+                        self._subscription_unavailable_document(
+                            f"指定模型无法通过实时目录校验：{details}"
+                        )
+                    )
+                params["models"] = list(
+                    dict.fromkeys(
+                        model
+                        for values in resolved_by_tenant.values()
+                        for model in values
+                    )
+                )
+                for selection in params.get("report_selections") or []:
+                    if not isinstance(selection, dict):
+                        continue
+                    tenant_id = str(selection.get("tenant_query") or "")
+                    selection["models"] = list(resolved_by_tenant.get(tenant_id, []))
+            elif selected_tenants and selected_models:
                 if not callable(model_resolver):
                     return self._result(
                         self._subscription_unavailable_document(
@@ -3043,17 +3522,37 @@ class ReportCenterTool(Tool):
                     selection["models"] = list(tenant_models.get(tenant_id, []))
 
         params["subscription_period"] = data_period
+        if data_period == "recent1h":
+            # Hourly TPM only makes sense with an hourly cadence; any other
+            # recurrence would compile a wrong cron and mislead the user.
+            if recurrence != "hourly":
+                return self._result(
+                    self._subscription_unavailable_document(
+                        "小时 TPM 报表当前仅支持每小时播报，请使用“每小时播报…”的表达。"
+                    )
+                )
+            params["report_variant"] = "customer_model_hourly_tpm"
+            params["report_template_id"] = "usage_customer_model_hourly_tpm"
         if str(params.get("report_variant") or "") in {
             "customer_model_daily_brief",
             "customer_model_weekly_brief",
+            "customer_model_hourly_tpm",
         }:
             variant = str(params["report_variant"])
-            enabled = (
-                self._config.cube_multi_scope_brief
-                if variant == "customer_model_daily_brief"
-                else self._config.cube_multi_scope_weekly_brief
-            )
+            if variant == "customer_model_hourly_tpm":
+                enabled = (
+                    self._config.cube_customer_model_hourly_tpm
+                    and self._config.cube_customer_model_hourly_tpm_subscription
+                )
+            elif variant == "customer_model_daily_brief":
+                enabled = self._config.cube_multi_scope_brief
+            else:
+                enabled = self._config.cube_multi_scope_weekly_brief
             if not enabled:
+                if variant == "customer_model_hourly_tpm":
+                    return ToolResult.error(
+                        "Error: hourly customer/model TPM subscription is not enabled"
+                    )
                 return ToolResult.error("Error: multi-customer model brief is not enabled")
             params["report_template"] = "brief"
         try:
@@ -3071,6 +3570,8 @@ class ReportCenterTool(Tool):
             if str(params.get("report_variant") or "") == "customer_model_daily_brief"
             else "usage_customer_model_weekly_brief"
             if str(params.get("report_variant") or "") == "customer_model_weekly_brief"
+            else "usage_customer_model_hourly_tpm"
+            if str(params.get("report_variant") or "") == "customer_model_hourly_tpm"
             else _BRIEF_PERIOD_TEMPLATES[data_period]
         )
         policy_denial = self._subscription_policy_denial(
@@ -3086,6 +3587,7 @@ class ReportCenterTool(Tool):
             "workdays": "day",
             "weekly": "week",
             "monthly": "month",
+            "hourly": "recent1h",
         }[recurrence]
         subscribe_params = {
             "action": "subscribe",
@@ -3114,11 +3616,15 @@ class ReportCenterTool(Tool):
             "workdays": "每个工作日",
             "weekly": f"每周{'一二三四五六日'[weekday - 1]}",
             "monthly": f"每月 {month_day} 日",
+            "hourly": "每小时（整点后 5 分钟）",
         }[recurrence]
+        # The hourly cadence is clock-driven, so the placeholder send_time is
+        # never shown to the user.
+        send_time_text = "" if recurrence == "hourly" else f" {send_time}"
         content = (
             f"**客户**：{'、'.join(display_names)}\n"
             f"**模型**：{model_text}\n"
-            f"**发送计划**：{recurrence_text} {send_time}\n"
+            f"**发送计划**：{recurrence_text}{send_time_text}\n"
             f"**时区**：{self._config.timezone}{unresolved_text}"
         )
         if reference is not None:
@@ -3126,7 +3632,7 @@ class ReportCenterTool(Tool):
         action_label = "确认仅订阅已匹配客户" if unresolved else "确认创建订阅"
         document = ReportDocument(
             title="确认 Cube 报表订阅",
-            subtitle=f"{recurrence_text} {send_time}｜{self._config.timezone}",
+            subtitle=f"{recurrence_text}{send_time_text}｜{self._config.timezone}",
             fallback_text=content,
             blocks=(
                 ReportBlock("markdown", {"content": content}),
@@ -3185,6 +3691,8 @@ class ReportCenterTool(Tool):
 
     @staticmethod
     def _period_from_template(template_id: str) -> str:
+        if "hourly" in template_id:
+            return "recent1h"
         if "daily" in template_id:
             return "day"
         if "monthly" in template_id:
@@ -3194,7 +3702,7 @@ class ReportCenterTool(Tool):
     @staticmethod
     def _subscription_period(subscription: ReportSubscription) -> str:
         saved_period = str(subscription.report_params.get("subscription_period") or "")
-        if saved_period in {"day", "week", "month"}:
+        if saved_period in {"day", "week", "month", "recent1h"}:
             return saved_period
         return ReportCenterTool._period_from_template(subscription.template_id)
 
@@ -3493,7 +4001,7 @@ class ReportCenterTool(Tool):
         if error:
             return ToolResult.error(f"Error: {error}")
         data_period = str(params.get("subscription_period") or period)
-        if data_period not in {"day", "week", "month"}:
+        if data_period not in {"day", "week", "month", "recent1h"}:
             return ToolResult.error("Error: invalid report data period")
         report_variant = str(params.get("report_variant") or "")
         report_template = str(params.get("report_template") or "brief")
@@ -3568,10 +4076,16 @@ class ReportCenterTool(Tool):
 
     def _dynamic_magik_params(self, subscription: ReportSubscription) -> dict[str, Any]:
         period = self._subscription_period(subscription)
-        intent = MagikReportIntent(report_kind=period)  # type: ignore[arg-type]
-        params = intent.to_tool_params(
-            today=datetime.now(ZoneInfo(subscription.timezone)).date()
-        )
+        if period == "recent1h":
+            # Hourly runs keep no persisted report window: the template plans
+            # the just-completed hour from the clock, and the legacy intent
+            # registry has no hourly report kind, so no date params are added.
+            params: dict[str, Any] = {}
+        else:
+            intent = MagikReportIntent(report_kind=period)  # type: ignore[arg-type]
+            params = intent.to_tool_params(
+                today=datetime.now(ZoneInfo(subscription.timezone)).date()
+            )
         saved = dict(subscription.report_params)
         params.update(saved)
         params.setdefault(
@@ -3618,6 +4132,108 @@ class ReportCenterTool(Tool):
                     "models": [model],
                     "model_scope": "selected",
                     "cluster": str(params.get("cluster") or "").strip(),
+                },
+            )
+        if subscription.template_id == "usage_customer_model_hourly_tpm":
+            # Hourly TPM runs are clock-driven: every execution reports the
+            # just-completed hour, so the window is planned by the template
+            # from the current clock instead of persisted dates.
+            if not (
+                self._config.cube_customer_model_hourly_tpm
+                and self._config.cube_customer_model_hourly_tpm_subscription
+            ):
+                return None
+            if period != "recent1h":
+                return None
+            tenants = tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in params.get("tenants") or []
+                    if str(item).strip()
+                )
+            )
+            selections = [
+                item
+                for item in params.get("report_selections") or []
+                if isinstance(item, dict)
+            ]
+            if not tenants:
+                tenants = tuple(
+                    dict.fromkeys(
+                        str(item.get("tenant_query") or "").strip()
+                        for item in selections
+                        if str(item.get("tenant_query") or "").strip()
+                    )
+                )
+            if not tenants:
+                return None
+            model_scope = str(params.get("model_scope") or "all")
+            models = self._canonical_cube_models(
+                tuple(
+                    dict.fromkeys(
+                        str(item).strip()
+                        for item in params.get("models") or []
+                        if str(item).strip()
+                    )
+                )
+            )
+            if model_scope == "all":
+                if tenant_models is None:
+                    return None
+                # An all-model hourly subscription resolves its live per-tenant
+                # active models immediately before each run; the static model
+                # tuple stays empty.
+                models = ()
+            elif model_scope != "selected" or not models:
+                return None
+            else:
+                # Rebuild the per-tenant relationships from the validated
+                # selections; the flat model list alone cannot drive the
+                # per-pair hourly queries.
+                tenant_models = {
+                    str(item.get("tenant_query") or "").strip(): [
+                        str(model).strip()
+                        for model in item.get("models") or []
+                        if str(model).strip()
+                    ]
+                    for item in params.get("report_selections") or []
+                    if isinstance(item, dict)
+                    and str(item.get("model_scope") or "") == "selected"
+                    and str(item.get("tenant_query") or "").strip()
+                }
+                if not tenant_models and len(tenants) == 1:
+                    tenant_models = {tenants[0]: list(models)}
+                if not tenant_models:
+                    return None
+            tenant_labels = [
+                str(item).strip()
+                for item in params.get("tenant_labels") or []
+                if str(item).strip()
+            ]
+            tenant_names = {
+                tenant_id: tenant_labels[index]
+                for index, tenant_id in enumerate(tenants)
+                if index < len(tenant_labels)
+            }
+            return ReportIntent(
+                connector_id="magik_cube",
+                template_id="usage_customer_model_hourly_tpm",
+                period="recent1h",
+                tenant_scope=(
+                    "all" if params.get("all_tenants") is True else "selected"
+                ),
+                tenants=tenants,
+                models=models,
+                filters={
+                    "tenants": list(tenants),
+                    "tenant_scope": (
+                        "all" if params.get("all_tenants") is True else "selected"
+                    ),
+                    "models": list(models),
+                    "model_scope": model_scope,
+                    "tenant_models": tenant_models or {},
+                    "tenant_names": tenant_names,
+                    "multi_scope": True,
                 },
             )
         if subscription.template_id in {
@@ -3844,9 +4460,11 @@ class ReportCenterTool(Tool):
         params = self._dynamic_magik_params(subscription)
         tenant_models: dict[str, list[str]] | None = None
         if (
-            subscription.template_id in {
+            subscription.template_id
+            in {
                 "usage_customer_model_daily_brief",
                 "usage_customer_model_weekly_brief",
+                "usage_customer_model_hourly_tpm",
             }
             and str(params.get("model_scope") or "") == "all"
         ):
@@ -3871,11 +4489,24 @@ class ReportCenterTool(Tool):
                     for tenant_id in tenants
                 ]
                 subscription = replace(subscription, report_params=params)
-            try:
-                start_date = date.fromisoformat(str(params["start_date"]))
-                end_date = date.fromisoformat(str(params["end_date"]))
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError("subscription has an invalid dynamic report window") from exc
+            if subscription.template_id == "usage_customer_model_hourly_tpm":
+                # Hourly runs discover each tenant's active models for the
+                # date of the just-completed hour; the exact hour window is
+                # planned by the template from the current clock.
+                now = datetime.now(ZoneInfo(self._config.timezone))
+                previous_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(
+                    hours=1
+                )
+                start_date = previous_hour.date()
+                end_date = previous_hour.date()
+            else:
+                try:
+                    start_date = date.fromisoformat(str(params["start_date"]))
+                    end_date = date.fromisoformat(str(params["end_date"]))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "subscription has an invalid dynamic report window"
+                    ) from exc
             tenant_models = await self._load_tenant_model_catalog(
                 tenants,
                 start_date=start_date,
@@ -3958,6 +4589,8 @@ class ReportCenterTool(Tool):
             return ToolResult.error("Error: no permission to manage report subscriptions")
         params = self._safe_report_params(report_params)
         saved_family = str(params.get("report_family") or "")
+        hourly_template = str(params.get("report_template_id") or params.get("template_id") or "")
+        hourly_requested = period == "recent1h" or hourly_template == "usage_customer_model_hourly_tpm"
         if saved_family == "health" and report_family == "usage":
             report_family = saved_family
         report_family = report_family or saved_family or "usage"
@@ -3981,7 +4614,12 @@ class ReportCenterTool(Tool):
         elif report_family == "usage":
             if not self._config.cube_subscription:
                 return ToolResult.error("Error: Cube usage subscription is not enabled")
-            if period not in _PERIOD_TEMPLATES:
+            if hourly_requested:
+                if not self._config.cube_customer_model_hourly_tpm_subscription:
+                    return ToolResult.error("Error: Cube hourly TPM subscriptions are not enabled")
+                period = "recent1h"
+                params["report_template_id"] = "usage_customer_model_hourly_tpm"
+            elif period not in _PERIOD_TEMPLATES:
                 return ToolResult.error("Error: subscription period must be day, week, or month")
             # Day/week/month confirmations now use the same typed compiler as
             # the WebUI. Keep the bounded legacy path for custom windows, whose
@@ -4018,7 +4656,7 @@ class ReportCenterTool(Tool):
         # Delivery cadence and report data period are independent. For example,
         # a daily report can be delivered on workdays or once every Monday.
         data_period = str(params.get("subscription_period") or period)
-        if data_period not in {"day", "week", "month"}:
+        if data_period not in {"day", "week", "month", "recent1h"}:
             return ToolResult.error("Error: invalid report data period")
         if report_family == "provider_quality":
             if not user_id or not self.provider_quality_connector_enabled:
@@ -4060,7 +4698,9 @@ class ReportCenterTool(Tool):
             template_id = "usage_customer_model_daily_brief"
         else:
             template_id = (
-                "health_sre"
+                "usage_customer_model_hourly_tpm"
+                if hourly_requested
+                else "health_sre"
                 if report_family == "health"
                 else "cost_account"
                 if report_family == "cost"
@@ -4155,6 +4795,12 @@ class ReportCenterTool(Tool):
             channel, user_id, "capability", "subscriptions"
         ):
             return ToolResult.error("Error: no permission to manage report subscriptions")
+        params = self._safe_report_params(report_params)
+        # Compute the hourly marker once for every family so the template-id
+        # selection below cannot reference an unbound variable when the
+        # request is a health or cost subscription.
+        hourly_template = str(params.get("report_template_id") or params.get("template_id") or "")
+        hourly_requested = period == "recent1h" or hourly_template == "usage_customer_model_hourly_tpm"
         if report_family == "provider_quality":
             if not self.provider_quality_subscriptions_enabled:
                 return ToolResult.error("Error: Cube provider quality subscription is not enabled")
@@ -4173,7 +4819,12 @@ class ReportCenterTool(Tool):
         elif report_family == "usage":
             if not self._config.cube_subscription:
                 return ToolResult.error("Error: Cube usage subscription is not enabled")
-            if period not in _PERIOD_TEMPLATES:
+            if hourly_requested:
+                if not self._config.cube_customer_model_hourly_tpm_subscription:
+                    return ToolResult.error("Error: Cube hourly TPM subscriptions are not enabled")
+                period = "recent1h"
+                params["report_template_id"] = "usage_customer_model_hourly_tpm"
+            elif period not in _PERIOD_TEMPLATES:
                 return ToolResult.error("Error: subscription period must be day, week, or month")
         else:
             return ToolResult.error("Error: unsupported report family")
@@ -4222,7 +4873,9 @@ class ReportCenterTool(Tool):
             )
         else:
             template_id = (
-                "health_sre"
+                "usage_customer_model_hourly_tpm"
+                if hourly_requested
+                else "health_sre"
                 if report_family == "health"
                 else "cost_account"
                 if report_family == "cost"
@@ -4414,6 +5067,7 @@ class ReportCenterTool(Tool):
                     ),
                     multi_scope_enabled=self._config.cube_multi_scope_brief,
                     machine_tpm_enabled=self._config.cube_machine_tpm_report,
+                    hourly_tpm_enabled=self._config.cube_customer_model_hourly_tpm,
                     subscription_nlu_enabled=(
                         self._config.cube_subscription_nlu_v2
                         or self._config.cube_subscription_nlu_v3
@@ -4455,6 +5109,14 @@ class ReportCenterTool(Tool):
                 interactive=interactive,
                 start_date=start_date,
                 end_date=end_date,
+                report_selections=report_selections,
+            )
+        if action == "customer_model_hourly_tpm":
+            return await self._run_customer_model_hourly_tpm(
+                tenants=tenants or ([tenant_query] if tenant_query else []),
+                models=models or ([model] if model else []),
+                all_tenants=all_tenants,
+                interactive=interactive,
                 report_selections=report_selections,
             )
         if action == "machine_tpm_report":

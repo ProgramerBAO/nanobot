@@ -8,6 +8,7 @@ import pytest
 from nanobot.agent.reporting.cube_subscription_intent import (
     CubeSubscriptionIntent,
     classify_subscription_intent,
+    is_subscription_intent_candidate,
     parse_deterministic_subscription_intent,
 )
 from nanobot.providers.base import LLMResponse, ToolCallRequest
@@ -45,6 +46,94 @@ def test_deterministic_referenced_subscription_inherits_scope() -> None:
     assert intent.model_scope == "inherit"
     assert intent.recurrence == "workdays"
     assert intent.send_time == "10:00"
+
+
+def test_deterministic_hourly_tpm_broadcast_parses_without_clock() -> None:
+    """The hourly TPM broadcast is clock-driven, so no clock is required."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每小时播报上一小时阳春面、豆汁、佛跳墙全部模型的TPM"
+    )
+
+    assert intent == CubeSubscriptionIntent(
+        report_type="usage_customer_model_hourly_tpm",
+        tenant_scope="selected",
+        tenant_aliases=(),
+        model_scope="all",
+        models=(),
+        recurrence="hourly",
+        # send_time is a structural placeholder; the compiled cron ignores it.
+        send_time="00:00",
+    )
+
+
+def test_deterministic_hourly_named_models_defer_to_classifier() -> None:
+    """Named-model hourly requests must be extracted by the bounded classifier."""
+
+    assert (
+        parse_deterministic_subscription_intent("每小时播报 Kimi-K3 上一小时TPM")
+        is None
+    )
+
+
+def test_deterministic_hourly_quoted_card_inherits_hourly_recurrence() -> None:
+    """Quoting an hourly report card keeps the inherited scope on hourly cadence."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每小时播报给我",
+        referenced_report=True,
+    )
+
+    assert intent is not None
+    assert intent.report_type == "inherit"
+    assert intent.recurrence == "hourly"
+    assert intent.send_time == "00:00"
+
+
+def test_subscription_candidate_matches_meige_xiaoshi_wording() -> None:
+    """“每个小时” has no 每小时 substring but must gate the same way.
+
+    Regression for the live failure on 2026-09-15: a quoted hourly report
+    with “每个小时发送给我一次这个报表” fell through to the unstructured
+    LLM turn, which fabricated a saved subscription and a wrong channel.
+    """
+
+    assert is_subscription_intent_candidate("每个小时发送给我一次这个报表") is True
+    assert is_subscription_intent_candidate("每小时发送给我一次这个报表") is True
+
+
+def test_deterministic_hourly_quoted_meige_xiaoshi_inherits_scope() -> None:
+    """The exact live quoted-card wording must inherit the hourly scope."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每个小时发送给我一次这个报表",
+        referenced_report=True,
+    )
+
+    assert intent is not None
+    assert intent.report_type == "inherit"
+    assert intent.tenant_scope == "inherit"
+    assert intent.model_scope == "inherit"
+    assert intent.recurrence == "hourly"
+    assert intent.send_time == "00:00"
+
+
+def test_deterministic_hourly_direct_meige_xiaoshi_broadcast() -> None:
+    """The 每个小时 variant also compiles the all-model hourly broadcast."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每个小时播报上一小时阳春面、豆汁、佛跳墙全部模型的TPM"
+    )
+
+    assert intent == CubeSubscriptionIntent(
+        report_type="usage_customer_model_hourly_tpm",
+        tenant_scope="selected",
+        tenant_aliases=(),
+        model_scope="all",
+        models=(),
+        recurrence="hourly",
+        send_time="00:00",
+    )
 
 
 @pytest.mark.asyncio

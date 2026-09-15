@@ -15,6 +15,7 @@ REPORT_TEMPLATE_LABELS = {
     "cost_account": "Cube 成本与账户报表",
     "usage_customer_model_daily_brief": "多客户多模型日报简报",
     "usage_customer_model_weekly_brief": "多客户多模型周报简报",
+    "usage_customer_model_hourly_tpm": "多客户多模型小时 TPM 报告",
     "machine_tpm_peak": "单机折算 TPM 峰值",
 }
 
@@ -30,6 +31,7 @@ REPORT_DATA_PERIODS = {
     "usage_customer_model_daily_brief": "前一自然日，对比前一日和上周同期",
     "usage_customer_model_weekly_brief": "上一完整自然周，对比此前一完整自然周",
     "machine_tpm_peak": "发送时按订阅周期计算单机折算 TPM 峰值",
+    "usage_customer_model_hourly_tpm": "每小时（整点后 5 分钟）发送刚结束的上一完整小时 TPM",
 }
 
 _WEEKDAY_LABELS = {
@@ -60,6 +62,11 @@ def build_subscription_schedule(
     hour, minute = (int(value) for value in match.groups())
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         raise ValueError("send_time is outside the valid clock range")
+    if period == "recent1h":
+        # Five minutes after the hour: the upstream hourly TPM aggregate was
+        # confirmed to lag slightly behind the hour boundary, so the buffer
+        # keeps the freshest hour from being reported as zeros.
+        return "5 * * * *"
     if period == "day":
         if daily_mode not in {"workdays", "every_day"}:
             raise ValueError("daily_mode must be workdays or every_day")
@@ -73,7 +80,7 @@ def build_subscription_schedule(
         if not 1 <= month_day <= 28:
             raise ValueError("month_day must be between 1 and 28")
         return f"{minute} {hour} {month_day} * *"
-    raise ValueError("period must be day, week, or month")
+    raise ValueError("period must be recent1h, day, week, or month")
 
 
 def describe_subscription_schedule(schedule: str) -> str:
@@ -83,6 +90,10 @@ def describe_subscription_schedule(schedule: str) -> str:
     if len(fields) != 5:
         return "自定义定时"
     minute, hour, month_day, month, weekday = fields
+    if minute == "5" and hour == "*" and month_day == "*" and month == "*" and weekday == "*":
+        return "每小时（整点后 5 分钟）"
+    if minute == "0" and hour == "*" and month_day == "*" and month == "*" and weekday == "*":
+        return "每小时整点"
     if not minute.isdigit() or not hour.isdigit() or month != "*":
         return "自定义定时"
     if not 0 <= int(hour) <= 23 or not 0 <= int(minute) <= 59:

@@ -320,6 +320,7 @@ def _reporting_registry_kwargs(config: Any) -> dict[str, Any]:
         "cube_multi_scope_brief_enabled": flag("cube_multi_scope_brief"),
         "cube_multi_scope_weekly_brief_enabled": flag("cube_multi_scope_weekly_brief"),
         "cube_machine_tpm_template_enabled": flag("cube_machine_tpm_report"),
+        "cube_customer_model_hourly_tpm_enabled": flag("cube_customer_model_hourly_tpm"),
         "cube_cost_template_enabled": flag("cube_cost_connector")
         and flag("cube_cost_template"),
         "cube_provider_quality_connector_enabled": flag("cube_provider_quality_connector"),

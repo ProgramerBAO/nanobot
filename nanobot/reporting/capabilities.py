@@ -231,6 +231,25 @@ def capability_catalog(
                     ReportAction("machine_tpm_report", "单机 TPM 峰值"),
                 )
             )
+        hourly_template = registry.template("usage_customer_model_hourly_tpm")
+        if (
+            hourly_template is not None
+            and hourly_template in registry.compatible_templates("magik_cube")
+            and store.allowed(channel, user_id, "template", "usage_customer_model_hourly_tpm")
+            and _template_enabled(
+                store,
+                "usage_customer_model_hourly_tpm",
+                policy_enforced=template_policy_enforced,
+            )
+        ):
+            items.append(
+                Capability(
+                    "customer_model_hourly_tpm",
+                    "多客户多模型小时 TPM",
+                    "查看上一完整小时各客户各模型的 TPM 峰值、均值和平台机器数",
+                    ReportAction("customer_model_hourly_tpm", "小时 TPM 报告"),
+                )
+            )
     if _allowed(store, channel, user_id, "subscriptions"):
         items.append(
             Capability(
@@ -349,6 +368,7 @@ def examples_document(
     admin_skill_enabled: bool = False,
     multi_scope_enabled: bool = False,
     machine_tpm_enabled: bool = False,
+    hourly_tpm_enabled: bool = False,
     subscription_nlu_enabled: bool = False,
 ) -> ReportDocument:
     examples = ["我要周报", "我要日报", "健康报告", "查看我的订阅", "查看最近报表"]
@@ -369,6 +389,9 @@ def examples_document(
         examples.insert(0, "多客户多模型日报简报")
     if machine_tpm_enabled:
         examples.insert(0, "Kimi-K3 单机 TPM 峰值")
+    if hourly_tpm_enabled:
+        examples.insert(0, "查看阳春面、豆汁、佛跳墙全部模型上一小时 TPM")
+        examples.insert(1, "佛跳墙 Kimi-K3 上一小时 TPM 峰值和均值")
     if subscription_nlu_enabled:
         examples.extend(
             [
@@ -376,6 +399,8 @@ def examples_document(
                 "引用日报卡片并回复：工作日上午十点发送给我",
             ]
         )
+        if hourly_tpm_enabled:
+            examples.append("每小时播报上一小时阳春面、豆汁、佛跳墙全部模型的TPM")
     if authorized and admin_skill_enabled:
         examples.extend(
             [

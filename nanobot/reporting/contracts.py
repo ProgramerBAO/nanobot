@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 DataQuality = Literal["complete", "partial", "missing"]
-ReportPeriod = Literal["day", "week", "month", "recent7", "recent15m", "range"]
+ReportPeriod = Literal["day", "week", "month", "recent7", "recent15m", "recent1h", "range"]
 ModelScope = Literal["summary", "all", "selected"]
 TenantScope = Literal["key_accounts", "all", "selected"]
 BaselinePolicy = Literal["previous_equal_window"]
@@ -21,6 +21,7 @@ CANONICAL_METRICS = frozenset(
         "ai.rpm",
         "ai.tpm",
         "ai.tpm.avg",
+        "ai.tpm.peak",
         "ai.error_rate",
         "ai.http_4xx_rate",
         "ai.http_5xx_rate",
@@ -47,6 +48,7 @@ CANONICAL_METRICS = frozenset(
         "ai.machine.tpm_per_machine",
         "ai.machine.total_tokens",
         "ai.machine.count",
+        "ai.machine.used",
         "ai.machine.gpu_count",
     }
 )
@@ -239,6 +241,25 @@ class ReportContext:
     quality_reasons: tuple[str, ...] = ()
     freshness: str = ""
     template_version: str = ""
+
+
+def format_metric_compact(value: int | float | None) -> str:
+    """Format a metric total compactly without manufacturing zero for missing rows.
+
+    Shared by template implementations so grouped cards, tables, and text
+    fallbacks render the same compact value for the same number. ``None``
+    stays an explicit ``暂无数据`` so a missing value can never be mistaken
+    for a real zero.
+    """
+
+    if value is None:
+        return "暂无数据"
+    absolute = abs(float(value))
+    if absolute >= 100_000_000:
+        return f"{float(value) / 100_000_000:.2f}亿"
+    if absolute >= 10_000:
+        return f"{float(value) / 10_000:.2f}万"
+    return f"{float(value):,.0f}"
 
 
 @dataclass(frozen=True, slots=True)

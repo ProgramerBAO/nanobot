@@ -253,6 +253,12 @@ function GroupedMetrics({ data }: { data: RecordValue }) {
         {(group.items as unknown[] ?? []).map(recordValue).map((item, index) => (
           <div key={`${stringValue(item.label)}-${index}`} className="grid gap-1 py-2 text-sm sm:grid-cols-[minmax(10rem,1fr)_auto_auto] sm:items-center sm:gap-4">
             <span className="min-w-0 break-words font-medium">{stringValue(item.label, "未命名模型")}</span>
+            {(item.metrics as unknown[] ?? []).map(recordValue).map((metric, metricIndex) => (
+              <span key={`metric-${metricIndex}`} className="whitespace-nowrap text-xs text-muted-foreground">
+                {stringValue(metric.label, "指标")} {stringValue(metric.value, "暂不可用")}
+                {stringValue(metric.note) ? `（${stringValue(metric.note)}）` : ""}
+              </span>
+            ))}
             {(item.comparisons as unknown[] ?? []).map(recordValue).map((comparison, comparisonIndex) => (
               <span key={`${stringValue(comparison.key)}-${comparisonIndex}`} className="whitespace-nowrap text-xs text-muted-foreground">
                 {stringValue(comparison.label, "对比")} {stringValue(comparison.change, "暂无可比基准")}

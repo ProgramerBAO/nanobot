@@ -97,6 +97,130 @@ def test_new_capacity_and_multi_scope_phrases_use_report_center(monkeypatch, tmp
     assert len(named_weekly["report_selections"]) == 3
 
 
+def test_hourly_tpm_phrases_preserve_all_customers_and_selected_models(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression: hourly wording must never fall through to a daily usage report."""
+
+    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+
+    assert tool.match_direct_request("佛跳墙 Kimi-K3 上一小时 TPM 峰值和均值") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "tenants": ["佛跳墙"],
+        "models": ["Kimi-K3"],
+        "model_scope": "selected",
+        "interactive": False,
+    }
+    assert tool.match_direct_request("查看阳春面、豆汁、佛跳墙全部模型上一小时 TPM") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "tenants": ["阳春面", "豆汁", "佛跳墙"],
+        "model_scope": "all",
+        "interactive": False,
+    }
+    assert tool.match_direct_request("上一小时 TPM") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "interactive": True,
+    }
+
+
+def _hourly_subscription(**param_overrides) -> ReportSubscription:
+    params = {
+        "tenants": ["tenant-fo", "tenant-noodle"],
+        "tenant_labels": ["佛跳墙", "阳春面"],
+        "models": ["Kimi-K3"],
+        "model_scope": "selected",
+        "subscription_period": "recent1h",
+        # Confirmed subscriptions always carry the per-tenant selections the
+        # preview built from the live catalog.
+        "report_selections": [
+            {
+                "tenant_query": "tenant-fo",
+                "model_scope": "selected",
+                "models": ["Kimi-K3"],
+            },
+            {
+                "tenant_query": "tenant-noodle",
+                "model_scope": "selected",
+                "models": ["Kimi-K3"],
+            },
+        ],
+    }
+    params.update(param_overrides)
+    return ReportSubscription(
+        subscription_id="sub-hourly",
+        channel="feishu",
+        chat_id="chat-a",
+        user_id="ou-a",
+        connector_id="magik_cube",
+        template_id="usage_customer_model_hourly_tpm",
+        template_version="2.0",
+        schedule="5 * * * *",
+        timezone="Asia/Shanghai",
+        report_params=params,
+        cron_job_id="job-a",
+        enabled=True,
+        created_at="2026-09-15T10:00:00+08:00",
+        updated_at="2026-09-15T10:00:00+08:00",
+    )
+
+
+def test_hourly_subscription_compiles_clock_driven_intent() -> None:
+    """The cron-run compiler must resolve hourly subscriptions to the hourly intent."""
+
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(
+            cube_customer_model_hourly_tpm=True,
+            cube_customer_model_hourly_tpm_subscription=True,
+        ),
+        _FakeCron(),
+        MagicMock(),
+    )
+
+    intent = tool._subscription_cube_intent(_hourly_subscription())
+
+    assert intent is not None
+    assert intent.template_id == "usage_customer_model_hourly_tpm"
+    assert intent.period == "recent1h"
+    assert intent.tenants == ("tenant-fo", "tenant-noodle")
+    assert "Kimi-K3" in intent.models
+    # The selected branch rebuilds the per-tenant pairs from the validated
+    # selections so cron runs query real customer/model relationships.
+    assert intent.filters["tenant_models"] == {
+        "tenant-fo": ["Kimi-K3"],
+        "tenant-noodle": ["Kimi-K3"],
+    }
+    assert intent.filters["tenant_names"] == {
+        "tenant-fo": "佛跳墙",
+        "tenant-noodle": "阳春面",
+    }
+
+    # A multi-tenant selected subscription without per-tenant selections
+    # cannot map the flat model list to real relationships and must fail
+    # closed instead of querying with an empty tenant.
+    flat_only = _hourly_subscription(report_selections=[])
+    assert tool._subscription_cube_intent(flat_only) is None
+
+    # All-model hourly subscriptions only compile with a fresh live discovery
+    # result, so each run refreshes the active catalog before delivery.
+    all_models = _hourly_subscription(model_scope="all", models=[])
+    assert (
+        tool._subscription_cube_intent(
+            all_models, tenant_models={"tenant-fo": ["Kimi-K3"]}
+        )
+        is not None
+    )
+    assert tool._subscription_cube_intent(all_models) is None
+
+    # With the feature flags off the subscription must fail closed to the
+    # legacy compatibility path instead of silently producing a report.
+    disabled = ReportCenterTool(ReportCenterToolConfig(), _FakeCron(), MagicMock())
+    assert disabled._subscription_cube_intent(_hourly_subscription()) is None
+
+
 @pytest.mark.asyncio
 async def test_deterministic_subscription_compiles_all_live_tenants_without_llm(
     monkeypatch, tmp_path
@@ -163,6 +287,359 @@ async def test_reference_scope_is_found_even_when_subscription_nlu_fails(
         "subscription_error": "nlu_unavailable",
         "reference_message_id": "om-report",
     }
+
+
+@pytest.mark.asyncio
+async def test_quoted_hourly_report_meige_xiaoshi_routes_to_subscription_preview(
+    monkeypatch, tmp_path
+) -> None:
+    """The live failure wording must inherit the hourly scope via the reference.
+
+    Regression for 2026-09-15: “每个小时发送给我一次这个报表” failed the
+    subscription-candidate gate (每个小时 contains no 每小时 substring), fell
+    through to the unstructured LLM turn, and produced a fabricated
+    "saved subscription" reply with a wrong target channel.
+    """
+
+    tool, store, _cron = _tool(monkeypatch, tmp_path)
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-hourly",
+            run_id="run-hourly",
+            document_id="usage_customer_model_hourly_tpm",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_hourly_tpm",
+            period="recent1h",
+            scope={
+                "report_variant": "customer_model_hourly_tpm",
+                "report_template_id": "usage_customer_model_hourly_tpm",
+                "tenants": ["tenant-fo"],
+                "tenant_labels": ["佛跳墙"],
+                "model_scope": "all",
+                "models": [],
+            },
+            created_at="2026-09-15T00:00:00+00:00",
+            expires_at="2099-09-15T00:00:00+00:00",
+        )
+    )
+
+    result = await tool.classify_referenced_subscription(
+        "每个小时发送给我一次这个报表",
+        MagicMock(),
+        channel="feishu",
+        chat_id="chat-a",
+        reference_message_id="om-hourly",
+    )
+
+    assert result is not None
+    assert result["action"] == "subscription_preview"
+    assert result["report_type"] == "inherit"
+    assert result["recurrence"] == "hourly"
+    assert result["send_time"] == "00:00"
+    assert result["inherit_report_scope"] is True
+    assert result["reference_message_id"] == "om-hourly"
+
+
+def test_tool_schema_accepts_hourly_subscription_preview_params() -> None:
+    """Preview params for hourly/weekly subscriptions must pass the tool schema.
+
+    Regression for 2026-09-15: the preview re-entered report_center with
+    recurrence="hourly" and was rejected by the parameter enum before any
+    handler ran. The NLU vocabulary, the tool schema, and the preview
+    compiler are separate registries; this test keeps every supported
+    recurrence/report-type combination inside the public schema.
+    """
+    from nanobot.agent.reporting.cube_subscription_intent import CubeSubscriptionIntent
+    from nanobot.agent.tools.base import Schema
+
+    for report_type, recurrence in [
+        ("usage_customer_model_hourly_tpm", "hourly"),
+        ("usage_customer_model_weekly_brief", "weekly"),
+        ("usage_customer_model_daily_brief", "every_day"),
+        ("inherit", "hourly"),
+    ]:
+        intent = CubeSubscriptionIntent(
+            report_type=report_type,  # type: ignore[arg-type]
+            tenant_scope="inherit" if report_type == "inherit" else "selected",
+            tenant_aliases=(),
+            model_scope="inherit" if report_type == "inherit" else "all",
+            models=(),
+            recurrence=recurrence,  # type: ignore[arg-type]
+            send_time="00:00" if recurrence == "hourly" else "10:00",
+        )
+        params = report_center_module.ReportCenterTool._subscription_preview_params(
+            intent, reference_message_id="om-hourly"
+        )
+        errors = Schema.validate_json_schema_value(
+            params, report_center_module._REPORT_CENTER_PARAMETERS, "report_center"
+        )
+        assert errors == [], f"{report_type}/{recurrence}: {errors}"
+
+
+@pytest.mark.asyncio
+async def test_quoted_hourly_card_per_tenant_models_skip_cross_validation(
+    monkeypatch, tmp_path
+) -> None:
+    """Quoted multi-customer cards validate per-tenant pairs, not the cross product.
+
+    Regression for the live failure on 2026-09-15: inheriting a card whose
+    reference stored a flat cross-tenant model list made the preview validate
+    every model against every tenant and reject the whole subscription with a
+    long cross-pair error list.
+    """
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = AsyncMock()
+    magik.resolve_tenant_queries.return_value = (
+        [
+            {"query": "tenant-fo", "tenant_id": "tenant-fo", "display_name": "佛跳墙"},
+            {"query": "tenant-douzhi", "tenant_id": "tenant-douzhi", "display_name": "豆汁"},
+            {"query": "tenant-noodle", "tenant_id": "tenant-noodle", "display_name": "阳春面"},
+        ],
+        [],
+    )
+    # Ordered per-tenant responses mirroring the real catalog: each tenant
+    # only confirms its own models, so a flat cross-product validation would
+    # exhaust this list or receive the wrong tenant's answer.
+    magik.resolve_models_for_tenants.side_effect = [
+        ({"tenant-fo": ["GLM-5.2", "Kimi-K3"]}, []),
+        ({"tenant-douzhi": ["GLM-5.2"]}, []),
+        ({"tenant-noodle": ["MiniMax-M2.7", "MiniMax-M3"]}, []),
+    ]
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(
+            cube_customer_model_hourly_tpm=True,
+            cube_customer_model_hourly_tpm_subscription=True,
+        ),
+        _FakeCron(),
+        magik,
+        # The connector only needs to exist for template registration; these
+        # tests never issue a Cube request.
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+        ),
+    )
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-hourly",
+            run_id="run-hourly",
+            document_id="usage_customer_model_hourly_tpm",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_hourly_tpm",
+            period="recent1h",
+            scope={
+                "report_variant": "customer_model_hourly_tpm",
+                "report_template_id": "usage_customer_model_hourly_tpm",
+                "tenants": ["tenant-fo", "tenant-douzhi", "tenant-noodle"],
+                "tenant_labels": ["佛跳墙", "豆汁", "阳春面"],
+                "model_scope": "selected",
+                "models": ["GLM-5.2", "Kimi-K3", "MiniMax-M2.7", "MiniMax-M3"],
+                "report_selections": [
+                    {
+                        "tenant_query": "tenant-fo",
+                        "model_scope": "selected",
+                        "models": ["GLM-5.2", "Kimi-K3"],
+                    },
+                    {
+                        "tenant_query": "tenant-douzhi",
+                        "model_scope": "selected",
+                        "models": ["GLM-5.2"],
+                    },
+                    {
+                        "tenant_query": "tenant-noodle",
+                        "model_scope": "selected",
+                        "models": ["MiniMax-M2.7", "MiniMax-M3"],
+                    },
+                ],
+            },
+            created_at="2026-09-15T00:00:00+00:00",
+            expires_at="2099-09-15T00:00:00+00:00",
+        )
+    )
+
+    preview_params = await tool.classify_referenced_subscription(
+        "每个小时发送给我一次这个报表",
+        MagicMock(),
+        channel="feishu",
+        chat_id="chat-a",
+        reference_message_id="om-hourly",
+    )
+    assert preview_params["action"] == "subscription_preview"
+    assert preview_params["recurrence"] == "hourly"
+    assert preview_params["inherit_report_scope"] is True
+
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+        # The preview binds the quoted card to the reply's parent message.
+        metadata={"parent_id": "om-hourly"},
+    )
+    with request_context(context):
+        preview = await tool.execute(
+            action="subscription_preview",
+            report_type="inherit",
+            tenant_scope="inherit",
+            tenant_aliases=[],
+            model_scope="inherit",
+            models=[],
+            recurrence="hourly",
+            send_time="00:00",
+            weekday=1,
+            month_day=1,
+            inherit_report_scope=True,
+            reference_message_id="om-hourly",
+        )
+
+    assert "指定模型无法通过实时目录校验" not in str(preview)
+    ui = preview.metadata[OUTBOUND_META_AGENT_UI]
+    actions = [
+        item
+        for block in ui["blocks"]
+        if block["kind"] == "actions"
+        for item in block["data"]["actions"]
+    ]
+    confirm = next(
+        (item for item in actions if item["action_id"] == "subscription_confirm"),
+        None,
+    )
+    assert confirm is not None
+    # Every resolver call carried exactly one tenant and only that tenant's
+    # own models; the flat cross product was never queried.
+    resolver_calls = [
+        (call.args[0], tuple(call.args[1]))
+        for call in magik.resolve_models_for_tenants.await_args_list
+    ]
+    assert resolver_calls == [
+        (["tenant-fo"], ("GLM-5.2", "Kimi-K3")),
+        (["tenant-douzhi"], ("GLM-5.2",)),
+        (["tenant-noodle"], ("MiniMax-M2.7", "MiniMax-M3")),
+    ]
+    report_params = confirm["params"]["report_params"]
+    assert sorted(report_params["models"]) == [
+        "GLM-5.2",
+        "Kimi-K3",
+        "MiniMax-M2.7",
+        "MiniMax-M3",
+    ]
+    selection_models = {
+        item["tenant_query"]: item["models"]
+        for item in report_params["report_selections"]
+    }
+    assert selection_models == {
+        "tenant-fo": ["GLM-5.2", "Kimi-K3"],
+        "tenant-douzhi": ["GLM-5.2"],
+        "tenant-noodle": ["MiniMax-M2.7", "MiniMax-M3"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_quoted_hourly_all_model_card_skips_selected_validation(
+    monkeypatch, tmp_path
+) -> None:
+    """All-model hourly cards inherit per-run discovery; no model re-validation."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = AsyncMock()
+    magik.resolve_tenant_queries.return_value = (
+        [
+            {"query": "tenant-fo", "tenant_id": "tenant-fo", "display_name": "佛跳墙"},
+            {"query": "tenant-douzhi", "tenant_id": "tenant-douzhi", "display_name": "豆汁"},
+        ],
+        [],
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(
+            cube_customer_model_hourly_tpm=True,
+            cube_customer_model_hourly_tpm_subscription=True,
+        ),
+        _FakeCron(),
+        magik,
+        # The connector only needs to exist for template registration; these
+        # tests never issue a Cube request.
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+        ),
+    )
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-hourly-all",
+            run_id="run-hourly-all",
+            document_id="usage_customer_model_hourly_tpm",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_hourly_tpm",
+            period="recent1h",
+            scope={
+                "report_variant": "customer_model_hourly_tpm",
+                "report_template_id": "usage_customer_model_hourly_tpm",
+                "tenants": ["tenant-fo", "tenant-douzhi"],
+                "tenant_labels": ["佛跳墙", "豆汁"],
+                "model_scope": "all",
+                "models": [],
+                "report_selections": [
+                    {"tenant_query": "tenant-fo", "model_scope": "all", "models": []},
+                    {"tenant_query": "tenant-douzhi", "model_scope": "all", "models": []},
+                ],
+            },
+            created_at="2026-09-15T00:00:00+00:00",
+            expires_at="2099-09-15T00:00:00+00:00",
+        )
+    )
+
+    preview_params = await tool.classify_referenced_subscription(
+        "每个小时发送给我一次这个报表",
+        MagicMock(),
+        channel="feishu",
+        chat_id="chat-a",
+        reference_message_id="om-hourly-all",
+    )
+    assert preview_params["action"] == "subscription_preview"
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+        # The preview binds the quoted card to the reply's parent message.
+        metadata={"parent_id": "om-hourly-all"},
+    )
+    with request_context(context):
+        preview = await tool.execute(
+            action="subscription_preview",
+            report_type="inherit",
+            tenant_scope="inherit",
+            tenant_aliases=[],
+            model_scope="inherit",
+            models=[],
+            recurrence="hourly",
+            send_time="00:00",
+            weekday=1,
+            month_day=1,
+            inherit_report_scope=True,
+            reference_message_id="om-hourly-all",
+        )
+
+    ui = preview.metadata[OUTBOUND_META_AGENT_UI]
+    actions = [
+        item
+        for block in ui["blocks"]
+        if block["kind"] == "actions"
+        for item in block["data"]["actions"]
+    ]
+    assert any(item["action_id"] == "subscription_confirm" for item in actions)
+    # All-model inheritance resolves models per run; the flat model resolver
+    # must not be consulted at preview time.
+    magik.resolve_models_for_tenants.assert_not_awaited()
 
 
 @pytest.mark.asyncio

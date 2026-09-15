@@ -26,17 +26,20 @@ SubscriptionReportType = Literal[
     "usage_weekly_brief",
     "usage_monthly_brief",
     "usage_customer_model_daily_brief",
+    "usage_customer_model_hourly_tpm",
     "inherit",
 ]
-SubscriptionRecurrence = Literal["every_day", "workdays", "weekly", "monthly"]
+SubscriptionRecurrence = Literal["every_day", "workdays", "weekly", "monthly", "hourly"]
 SubscriptionModelScope = Literal["all", "selected", "summary", "inherit"]
 
 _TOOL_NAME = "emit_cube_subscription_intent"
+# 每个小时 (with the measure word 个) does not contain the substring 每小时,
+# so the optional 个 must be part of every hourly wording check.
 _SUBSCRIPTION_SIGNAL_RE = re.compile(
-    r"(?:订阅|定时|每天|工作日|每周|每月|发送给我|推送给我).{0,96}"
-    r"(?:发|发送|推送|报表|简报)|"
-    r"(?:订阅|定时|每天|工作日|每周|每月).{0,128}"
-    r"(?:日报|周报|月报|简报|这份报表|该报表)",
+    r"(?:订阅|定时|每个?小时|每天|工作日|每周|每月|发送给我|推送给我).{0,96}"
+    r"(?:发|发送|推送|播报|报表|简报)|"
+    r"(?:订阅|定时|每个?小时|每天|工作日|每周|每月).{0,128}"
+    r"(?:日报|周报|月报|简报|这份报表|该报表|TPM|tpm)",
     re.IGNORECASE,
 )
 _VALID_REPORT_TYPES = frozenset(
@@ -45,10 +48,13 @@ _VALID_REPORT_TYPES = frozenset(
         "usage_weekly_brief",
         "usage_monthly_brief",
         "usage_customer_model_daily_brief",
+        "usage_customer_model_hourly_tpm",
         "inherit",
     }
 )
-_VALID_RECURRENCES = frozenset({"every_day", "workdays", "weekly", "monthly"})
+_VALID_RECURRENCES = frozenset(
+    {"every_day", "workdays", "weekly", "monthly", "hourly"}
+)
 _VALID_MODEL_SCOPES = frozenset({"all", "selected", "summary", "inherit"})
 _PAYLOAD_FIELDS = frozenset(
     {
@@ -136,12 +142,19 @@ def parse_deterministic_subscription_intent(
     raw = text.strip()
     if not is_subscription_intent_candidate(raw):
         return None
+    hourly = bool(re.search(r"每个?小时", raw))
     send_time = _deterministic_clock(raw)
     if send_time is None:
-        return None
+        if not hourly:
+            return None
+        # Hourly cadence is clock-driven and the compiled cron ignores
+        # send_time; the placeholder only keeps the validated payload shape.
+        send_time = "00:00"
 
-    if re.search(r"工作日", raw):
-        recurrence: SubscriptionRecurrence = "workdays"
+    if hourly:
+        recurrence: SubscriptionRecurrence = "hourly"
+    elif re.search(r"工作日", raw):
+        recurrence = "workdays"
     elif re.search(r"每周", raw):
         recurrence = "weekly"
     elif re.search(r"每月", raw):
@@ -185,6 +198,30 @@ def parse_deterministic_subscription_intent(
         )
 
     all_models = bool(re.search(r"(?:全部|所有|全量|各个|每个|全体)\s*模型", raw))
+    if recurrence == "hourly":
+        # Deterministic hourly routing only covers the all-model hourly TPM
+        # broadcast. Named models need the bounded classifier so the exact
+        # model list is extracted instead of guessed.
+        if not re.search(r"(?:TPM|tpm)", raw):
+            return None
+        if not all_models and re.search(r"[A-Za-z][A-Za-z0-9._-]{2,}", raw):
+            return None
+        tenant_scope: Literal["selected", "all", "inherit"] = (
+            "all" if re.search(r"(?:全部|所有|全量|各个|每个|全体)\s*(?:客户|租户|用户)", raw)
+            else "selected"
+        )
+        return CubeSubscriptionIntent(
+            report_type="usage_customer_model_hourly_tpm",
+            tenant_scope=tenant_scope,
+            tenant_aliases=(),
+            model_scope="all",
+            models=(),
+            recurrence="hourly",
+            send_time=send_time,
+            weekday=weekday,
+            month_day=month_day,
+            inherit_report_scope=False,
+        )
     has_daily = bool(re.search(r"日报", raw))
     has_multi_scope = bool(re.search(r"多客户|多模型", raw))
     if has_daily and (has_multi_scope or all_models):
@@ -252,8 +289,10 @@ def is_subscription_intent_candidate(text: str) -> bool:
         return False
     if not _SUBSCRIPTION_SIGNAL_RE.search(raw):
         return False
-    has_schedule = bool(re.search(r"订阅|定时|每天|工作日|每周|每月", raw, re.IGNORECASE))
-    has_delivery = bool(re.search(r"发|发送|推送|报表|简报", raw, re.IGNORECASE))
+    # 每个小时 must gate exactly like 每小时, or a quoted hourly report
+    # subscription falls through to the unstructured LLM turn.
+    has_schedule = bool(re.search(r"订阅|定时|每天|工作日|每周|每月|每个?小时", raw, re.IGNORECASE))
+    has_delivery = bool(re.search(r"发|发送|推送|播报|报表|简报", raw, re.IGNORECASE))
     return has_schedule and has_delivery
 
 
@@ -428,7 +467,9 @@ async def classify_subscription_intent(
                 "Extract a Cube report subscription request. Parse names exactly as written; "
                 "never invent tenant IDs, Cron expressions, URLs, API paths, SQL, tokens, or "
                 "credentials. Chinese 上午十点 means 10:00. 工作日 means workdays; 每天 means "
-                "every_day. 多客户多模型日报简报 means "
+                "every_day. 每小时 or 每个小时 means recurrence hourly and must use "
+                "send_time 00:00. 小时 TPM 播报 or 上一小时 TPM means "
+                "usage_customer_model_hourly_tpm with recurrence hourly. 多客户多模型日报简报 means "
                 "usage_customer_model_daily_brief. Any daily brief that names more than one "
                 "customer must also use usage_customer_model_daily_brief. 全部模型 means "
                 "model_scope=all. "
