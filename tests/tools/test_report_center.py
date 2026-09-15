@@ -215,9 +215,18 @@ def test_hourly_subscription_compiles_clock_driven_intent() -> None:
     )
     assert tool._subscription_cube_intent(all_models) is None
 
-    # With the feature flags off the subscription must fail closed to the
-    # legacy compatibility path instead of silently producing a report.
-    disabled = ReportCenterTool(ReportCenterToolConfig(), _FakeCron(), MagicMock())
+    # With the feature flags explicitly disabled the subscription must fail
+    # closed to the legacy compatibility path instead of silently producing a
+    # report. The flags default on now, so the disabled case is configured
+    # explicitly (runtime overrides are covered by the feature-flag suite).
+    disabled = ReportCenterTool(
+        ReportCenterToolConfig(
+            cube_customer_model_hourly_tpm=False,
+            cube_customer_model_hourly_tpm_subscription=False,
+        ),
+        _FakeCron(),
+        MagicMock(),
+    )
     assert disabled._subscription_cube_intent(_hourly_subscription()) is None
 
 
@@ -640,6 +649,56 @@ async def test_quoted_hourly_all_model_card_skips_selected_validation(
     # All-model inheritance resolves models per run; the flat model resolver
     # must not be consulted at preview time.
     magik.resolve_models_for_tenants.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_override_gates_hourly_run_without_restart(
+    monkeypatch, tmp_path
+) -> None:
+    """Store overrides flip execution gates on the next request, no restart."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        # The config leaves the hourly flag at its default-on value; only the
+        # store override changes behavior.
+        ReportCenterToolConfig(),
+        _FakeCron(),
+        AsyncMock(),
+        MagikCubeToolConfig(enable=True),
+    )
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+    )
+
+    async def run_hourly():
+        with request_context(context):
+            return await tool.execute(
+                action="customer_model_hourly_tpm",
+                period="recent1h",
+                tenants=["佛跳墙"],
+                model_scope="all",
+                interactive=False,
+            )
+
+    # Default-on: the gate passes and execution proceeds to catalog loading.
+    result = await run_hourly()
+    assert "hourly customer/model TPM report is not enabled" not in str(result)
+
+    # Page-style override off: the very next request is rejected at the gate.
+    store.set_feature_flag(
+        "cube_customer_model_hourly_tpm", False, updated_by="webui_admin"
+    )
+    result = await run_hourly()
+    assert "hourly customer/model TPM report is not enabled" in str(result)
+
+    # Resetting the override restores the configured default instantly.
+    store.clear_feature_flag("cube_customer_model_hourly_tpm", updated_by="webui_admin")
+    result = await run_hourly()
+    assert "hourly customer/model TPM report is not enabled" not in str(result)
 
 
 @pytest.mark.asyncio
@@ -1948,6 +2007,11 @@ async def test_health_report_is_direct_and_visible_only_when_flags_are_enabled(
         cube_health_template=True,
         cube_health_report=True,
         cube_health_subscription=True,
+        # Pin the v1 presentation so the status wording assertion below stays
+        # deterministic; the v2 semantics now default on for new deployments.
+        cube_health_semantics_v2=False,
+        cube_health_card_v2=False,
+        cube_ttft_detail=False,
     )
 
     async def fake_query(_connector, _query):

@@ -2534,10 +2534,6 @@ def report_plugins_list() -> None:
         grafana_config=getattr(config.tools.reporting, "grafana", None),
         cube_config=config.tools.magik_cube,
         cube_templates_enabled=bool(getattr(config.tools.reporting, "cube_template", True)),
-        cube_health_template_enabled=(
-            bool(getattr(config.tools.reporting, "cube_health_connector", False))
-            and bool(getattr(config.tools.reporting, "cube_health_template", False))
-        ),
         cube_health_semantics_v2=bool(
             getattr(config.tools.reporting, "cube_health_semantics_v2", False)
         ),
@@ -2549,21 +2545,6 @@ def report_plugins_list() -> None:
         ),
         cube_usage_semantics_v2=bool(
             getattr(config.tools.reporting, "cube_usage_semantics_v2", False)
-        ),
-        cube_usage_brief_template_enabled=bool(
-            getattr(config.tools.reporting, "cube_usage_brief_template", True)
-        ),
-        cube_multi_scope_brief_enabled=bool(
-            getattr(config.tools.reporting, "cube_multi_scope_brief", False)
-        ),
-        cube_multi_scope_weekly_brief_enabled=bool(
-            getattr(config.tools.reporting, "cube_multi_scope_weekly_brief", False)
-        ),
-        cube_machine_tpm_template_enabled=bool(
-            getattr(config.tools.reporting, "cube_machine_tpm_report", False)
-        ),
-        cube_customer_model_hourly_tpm_enabled=bool(
-            getattr(config.tools.reporting, "cube_customer_model_hourly_tpm", False)
         ),
         timezone=str(getattr(config.tools.reporting, "timezone", "Asia/Shanghai")),
         health_thresholds=getattr(config.tools.reporting, "health_thresholds", None),

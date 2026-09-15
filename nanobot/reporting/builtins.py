@@ -1638,19 +1638,11 @@ def build_default_registry(
     grafana_config: Mapping[str, Any] | None = None,
     cube_config: Any | None = None,
     cube_templates_enabled: bool = True,
-    cube_health_template_enabled: bool = False,
     cube_health_semantics_v2: bool = False,
     cube_health_card_v2: bool = False,
     cube_ttft_detail_enabled: bool = False,
     cube_usage_semantics_v2: bool = False,
-    cube_usage_brief_template_enabled: bool = True,
-    cube_multi_scope_brief_enabled: bool = False,
-    cube_multi_scope_weekly_brief_enabled: bool = False,
-    cube_machine_tpm_template_enabled: bool = False,
-    cube_customer_model_hourly_tpm_enabled: bool = False,
     cube_cost_template_enabled: bool = False,
-    cube_provider_quality_connector_enabled: bool = False,
-    cube_provider_quality_template_enabled: bool = False,
     cube_provider_quality_detail_enabled: bool = False,
     timezone: str = "Asia/Shanghai",
     health_thresholds: Mapping[str, Any] | None = None,
@@ -1673,18 +1665,20 @@ def build_default_registry(
             if cube_config is not None
             else MagikCubeConnector()
         )
-    cube_health_active = cube_health_template_enabled and isinstance(
-        registry.connector("magik_cube"), CubeConnector
-    )
+    # Enable/disable feature flags no longer gate registration (2026-09-15
+    # decision): every Cube template registers whenever its connector exists,
+    # and execution/visibility read the effective flag per request from the
+    # report state store overrides. Only construction-time semantics (version
+    # switches, thresholds, include_details) remain config-level, so a
+    # restart is required to change those.
+    cube_connector_active = isinstance(registry.connector("magik_cube"), CubeConnector)
     for template in build_business_templates():
-        if cube_health_active and template.manifest.template_id == "health_sre":
+        if cube_connector_active and template.manifest.template_id == "health_sre":
             continue
         registry.register_template(template)
     if cube_templates_enabled:
         for spec in load_builtin_template_specs():
             is_brief = spec.template_id.endswith("_brief")
-            if is_brief and not cube_usage_brief_template_enabled:
-                continue
             registry.register_template(
                 UsageMatrixTemplate(
                     spec,
@@ -1694,21 +1688,11 @@ def build_default_registry(
                     presentation="brief" if is_brief else "matrix",
                 )
             )
-    if cube_multi_scope_brief_enabled and isinstance(
-        registry.connector("magik_cube"), CubeConnector
-    ):
+    if cube_connector_active:
         registry.register_template(MultiCustomerModelDailyBriefTemplate(timezone=timezone))
-    if cube_multi_scope_weekly_brief_enabled and isinstance(
-        registry.connector("magik_cube"), CubeConnector
-    ):
         registry.register_template(MultiCustomerModelWeeklyBriefTemplate(timezone=timezone))
-    if cube_customer_model_hourly_tpm_enabled and isinstance(registry.connector("magik_cube"), CubeConnector):
         registry.register_template(CubeCustomerModelHourlyTpmTemplate(timezone_name=timezone))
-    if cube_machine_tpm_template_enabled and isinstance(
-        registry.connector("magik_cube"), CubeConnector
-    ):
         registry.register_template(CubeMachineTpmTemplate(timezone_name=timezone))
-    if cube_health_active:
         registry.register_template(
             CubeHealthTemplate(
                 thresholds=health_thresholds,
@@ -1720,11 +1704,11 @@ def build_default_registry(
         )
     if (
         cube_cost_template_enabled
-        and isinstance(registry.connector("magik_cube"), CubeConnector)
+        and cube_connector_active
         and registry.connector("magik_cube").account_configured
     ):
         registry.register_template(CubeCostAccountTemplate(timezone=timezone))
-    if cube_provider_quality_connector_enabled and cube_config is not None:
+    if cube_config is not None:
         try:
             registry.register_connector(
                 CubeProviderQualityConnector(
@@ -1734,7 +1718,7 @@ def build_default_registry(
             )
         except Exception as exc:
             registry.load_errors["builtin:cube_provider_quality"] = type(exc).__name__
-    if cube_provider_quality_template_enabled and registry.connector("cube_provider_quality") is not None:
+    if registry.connector("cube_provider_quality") is not None:
         registry.register_template(ProviderQualityTemplate(timezone=timezone))
     if grafana_config and bool(grafana_config.get("enabled", False)):
         try:

@@ -1037,6 +1037,14 @@ export interface ReportingSubscriptionOptions {
   timezones: string[];
 }
 
+export interface ReportingFeatureFlag {
+  key: string;
+  label: string;
+  group: string;
+  enabled: boolean;
+  source: "override" | "default";
+}
+
 export interface ReportingSettingsPayload {
   catalog: {
     connectors: ReportingCatalogConnector[];
@@ -1050,6 +1058,7 @@ export interface ReportingSettingsPayload {
     button_policy_enabled: boolean;
     resource_types: string[];
   };
+  feature_flags?: ReportingFeatureFlag[];
   storage: { backend: string; retention_days: number };
   onboarding_version: number;
   grants: ReportingGrant[];

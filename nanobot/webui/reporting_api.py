@@ -20,6 +20,11 @@ from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
 from nanobot.reporting import build_default_registry, get_report_state_store
+from nanobot.reporting.feature_flags import (
+    RUNTIME_FEATURE_FLAG_KEYS,
+    effective_feature_flags,
+    feature_flag_details,
+)
 from nanobot.reporting.store import ReportSubscription
 from nanobot.reporting.subscriptions import (
     ReportSubscriptionService,
@@ -285,14 +290,14 @@ def _magik_resolvers(config: Any):
 
 
 def _reporting_registry_kwargs(config: Any) -> dict[str, Any]:
-    """Return one flag-to-registry mapping for runtime and management views.
+    """Return one construction-flag mapping for runtime and management views.
 
-    The settings page and the channel runtime must describe the same enabled
-    templates and renderers.  Keeping this mapping in one place prevents a
-    policy editor from showing a capability that the live report registry did
-    not actually load (or the inverse).  Configuration values only select
-    built-in capability registration; credentials remain inside connector
-    configuration and are never copied into the returned mapping.
+    Enable/disable feature flags no longer gate template registration: every
+    Cube template registers whenever the connector exists, and visibility is
+    filtered per request from the effective flags (store override or config
+    default). Only construction-level semantics (version switches,
+    thresholds, include_details, renderers) remain here. Credentials stay
+    inside connector configuration and are never copied into the mapping.
     """
 
     tools = getattr(config, "tools", None)
@@ -310,22 +315,12 @@ def _reporting_registry_kwargs(config: Any) -> dict[str, Any]:
         ),
         "cube_config": magik_config,
         "cube_templates_enabled": flag("cube_template", True),
-        "cube_health_template_enabled": flag("cube_health_connector")
-        and flag("cube_health_template"),
         "cube_health_semantics_v2": flag("cube_health_semantics_v2"),
         "cube_health_card_v2": flag("cube_health_card_v2"),
         "cube_ttft_detail_enabled": flag("cube_ttft_detail"),
         "cube_usage_semantics_v2": flag("cube_usage_semantics_v2"),
-        "cube_usage_brief_template_enabled": flag("cube_usage_brief_template", True),
-        "cube_multi_scope_brief_enabled": flag("cube_multi_scope_brief"),
-        "cube_multi_scope_weekly_brief_enabled": flag("cube_multi_scope_weekly_brief"),
-        "cube_machine_tpm_template_enabled": flag("cube_machine_tpm_report"),
-        "cube_customer_model_hourly_tpm_enabled": flag("cube_customer_model_hourly_tpm"),
         "cube_cost_template_enabled": flag("cube_cost_connector")
         and flag("cube_cost_template"),
-        "cube_provider_quality_connector_enabled": flag("cube_provider_quality_connector"),
-        "cube_provider_quality_template_enabled": flag("cube_provider_quality_connector")
-        and flag("cube_provider_quality_template"),
         "cube_provider_quality_detail_enabled": flag("cube_provider_quality_detail"),
         "timezone": str(getattr(reporting, "timezone", "Asia/Shanghai")),
         "health_thresholds": getattr(reporting, "health_thresholds", None),
@@ -500,6 +495,12 @@ def reporting_settings_payload(query: QueryParams | None = None) -> dict[str, An
     registry = build_default_registry(**_reporting_registry_kwargs(config))
     channel = str(query_first(query, "channel") or "").strip()
     user_id = str(query_first(query, "user_id") or "").strip()
+    # Runtime feature flags resolve store overrides over configured defaults
+    # so the management page always shows and toggles the live values.
+    flags = effective_feature_flags(
+        store,
+        lambda key: bool(getattr(config.tools.reporting, key, False)),
+    )
     persisted_policies = {
         item["template_id"]: item for item in store.template_policies()
     }
@@ -529,20 +530,20 @@ def reporting_settings_payload(query: QueryParams | None = None) -> dict[str, An
         "catalog": registry.public_catalog(),
         "policy": {
             "rbac_enabled": store.rbac_enabled(),
-            "management_enabled": bool(
-                getattr(config.tools.reporting, "report_management_v1", False)
-            ),
-            "guided_ui_enabled": bool(
-                getattr(config.tools.reporting, "report_subscription_guided_ui", False)
-            ),
-            "button_policy_enabled": bool(
-                getattr(config.tools.reporting, "report_subscription_button_policy", False)
-            ),
+            "management_enabled": flags["report_management_v1"],
+            "guided_ui_enabled": flags["report_subscription_guided_ui"],
+            "button_policy_enabled": flags["report_subscription_button_policy"],
             "resource_types": [
                 "connector", "template", "tenant", "project", "model", "endpoint",
             "provider", "environment", "capability", "subscription_template",
             ],
         },
+        # Unified feature switches: instant (store override or configured
+        # default), no restart required.
+        "feature_flags": feature_flag_details(
+            store,
+            lambda key: bool(getattr(config.tools.reporting, key, False)),
+        ),
         "storage": {
             "backend": config.tools.reporting.state_backend,
             "retention_days": config.tools.reporting.run_retention_days,
@@ -601,13 +602,35 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
         config.tools.reporting.state_backend,
         config.tools.reporting.postgres_dsn_env,
     )
-    management_enabled = bool(getattr(config.tools.reporting, "report_management_v1", False))
-    guided_enabled = bool(
-        getattr(config.tools.reporting, "report_subscription_guided_ui", False)
+    # Gate flags resolve store overrides so page toggles apply immediately.
+    flags = effective_feature_flags(
+        store,
+        lambda key: bool(getattr(config.tools.reporting, key, False)),
     )
-    button_policy_enabled = bool(
-        getattr(config.tools.reporting, "report_subscription_button_policy", False)
-    )
+    management_enabled = flags["report_management_v1"]
+    guided_enabled = flags["report_subscription_guided_ui"]
+    button_policy_enabled = flags["report_subscription_button_policy"]
+    if action in {"feature_flag", "feature_flag_reset"}:
+        flag_key = str(query_first(query, "flag") or "").strip()
+        if flag_key not in RUNTIME_FEATURE_FLAG_KEYS:
+            raise ReportingSettingsError("unknown report feature flag", status=400)
+        if action == "feature_flag":
+            enabled = str(query_first(query, "enabled") or "").strip().lower()
+            if enabled not in {"true", "false"}:
+                raise ReportingSettingsError(
+                    "feature flag enabled must be true or false", status=400
+                )
+            store.set_feature_flag(flag_key, enabled == "true", updated_by="webui_admin")
+        else:
+            # Removing the override restores the configured default without
+            # touching config.json (environment references stay intact).
+            if not store.clear_feature_flag(flag_key, updated_by="webui_admin"):
+                raise ReportingSettingsError(
+                    "feature flag has no override to reset", status=404
+                )
+        payload = reporting_settings_payload(query)
+        payload["last_action"] = {"ok": True, "action": action, "flag": flag_key}
+        return payload
     if action in {"subscription_options", "options"}:
         if not management_enabled:
             raise ReportingSettingsError("report management is disabled", status=404)

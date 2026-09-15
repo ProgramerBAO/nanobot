@@ -647,6 +647,8 @@ export async function runReportingSettingsAction(
     | "grant"
     | "revoke"
     | "export"
+    | "feature_flag"
+    | "feature_flag_reset"
     | "template_policy"
     | "subscription_create"
     | "subscription_enable"

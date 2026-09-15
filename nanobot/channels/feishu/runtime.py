@@ -5119,6 +5119,7 @@ class FeishuChannel(BaseChannel):
         from nanobot.config.loader import load_config
         from nanobot.reporting import build_default_registry, configured_report_state_store
         from nanobot.reporting.capabilities import home_document
+        from nanobot.reporting.feature_flags import effective_feature_flags
 
         config = load_config()
         reporting_config = config.tools.reporting
@@ -5131,10 +5132,6 @@ class FeishuChannel(BaseChannel):
         registry = build_default_registry(
             magik_enabled=bool(config.tools.magik_cube.enable),
             cube_config=config.tools.magik_cube,
-            cube_health_template_enabled=(
-                bool(getattr(reporting_config, "cube_health_connector", False))
-                and bool(getattr(reporting_config, "cube_health_template", False))
-            ),
             cube_health_semantics_v2=bool(
                 getattr(reporting_config, "cube_health_semantics_v2", False)
             ),
@@ -5147,41 +5144,28 @@ class FeishuChannel(BaseChannel):
             cube_usage_semantics_v2=bool(
                 getattr(reporting_config, "cube_usage_semantics_v2", False)
             ),
-            cube_provider_quality_connector_enabled=bool(
-                getattr(reporting_config, "cube_provider_quality_connector", False)
-            ),
-            cube_provider_quality_template_enabled=(
-                bool(getattr(reporting_config, "cube_provider_quality_connector", False))
-                and bool(getattr(reporting_config, "cube_provider_quality_template", False))
-            ),
             cube_provider_quality_detail_enabled=bool(
                 getattr(reporting_config, "cube_provider_quality_detail", False)
             ),
-            cube_multi_scope_brief_enabled=bool(
-                getattr(reporting_config, "cube_multi_scope_brief", False)
-            ),
-            cube_multi_scope_weekly_brief_enabled=bool(
-                getattr(reporting_config, "cube_multi_scope_weekly_brief", False)
-            ),
-            cube_machine_tpm_template_enabled=bool(
-                getattr(reporting_config, "cube_machine_tpm_report", False)
-            ),
-            cube_customer_model_hourly_tpm_enabled=bool(
-                getattr(reporting_config, "cube_customer_model_hourly_tpm", False)
-            ),
             health_thresholds=getattr(reporting_config, "health_thresholds", None),
             timezone=str(getattr(reporting_config, "timezone", "Asia/Shanghai")),
+        )
+        # Home visibility reads the effective runtime flags (store override
+        # or configured default) so page toggles apply without a restart.
+        flags = effective_feature_flags(
+            store,
+            lambda key: bool(getattr(reporting_config, key, False)),
         )
         document = home_document(
             registry,
             store,
             channel=self.name,
             user_id=user_id,
-            health_enabled=bool(getattr(reporting_config, "cube_health_report", False)),
+            health_enabled=flags["cube_health_report"],
             provider_quality_enabled=(
-                bool(getattr(reporting_config, "cube_provider_quality_connector", False))
+                flags["cube_provider_quality_report"]
+                and bool(getattr(reporting_config, "cube_provider_quality_connector", False))
                 and bool(getattr(reporting_config, "cube_provider_quality_template", False))
-                and bool(getattr(reporting_config, "cube_provider_quality_report", False))
             ),
         )
         await self.send(

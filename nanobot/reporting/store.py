@@ -220,6 +220,12 @@ class ReportStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS report_admin_audit_created
                     ON report_admin_audit(created_at DESC);
+                CREATE TABLE IF NOT EXISTS report_feature_flags (
+                    flag_key TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL
+                );
                 """
             )
             # Existing deployments were created before policy/button and
@@ -489,6 +495,79 @@ class ReportStateStore:
                     updated_by[:256] or "webui_admin",
                 ),
             )
+
+    def get_feature_flags(self) -> dict[str, bool]:
+        """Return runtime feature-flag overrides.
+
+        Keys absent from the result have no override and fall back to the
+        process configuration default; callers must never treat a missing
+        key as ``False``.
+        """
+
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT flag_key, enabled FROM report_feature_flags"
+            ).fetchall()
+        return {str(row["flag_key"]): bool(int(row["enabled"])) for row in rows}
+
+    def set_feature_flag(
+        self, flag_key: str, enabled: bool, *, updated_by: str = "webui_admin"
+    ) -> None:
+        """Upsert one runtime feature-flag override and audit the change.
+
+        Overrides are the single runtime control surface for report feature
+        switches; they never touch config.json, so environment-variable
+        references and deployment defaults stay intact.
+        """
+
+        if not isinstance(enabled, bool):
+            raise ValueError("report feature flag value must be boolean")
+        if not flag_key or len(flag_key) > 128:
+            raise ValueError("invalid report feature flag key")
+        with self._lock, self._connect() as db:
+            before = db.execute(
+                "SELECT enabled FROM report_feature_flags WHERE flag_key=?",
+                (flag_key,),
+            ).fetchone()
+            db.execute(
+                """INSERT INTO report_feature_flags(flag_key, enabled, updated_at, updated_by)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(flag_key) DO UPDATE SET
+                    enabled=excluded.enabled, updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by""",
+                (flag_key, int(enabled), _utc_now(), updated_by[:256] or "webui_admin"),
+            )
+        self.record_admin_audit(
+            action="feature_flag_update",
+            target_type="feature_flag",
+            target_id=flag_key,
+            before_summary={"enabled": bool(int(before["enabled"])) if before else "default"},
+            after_summary={"enabled": enabled},
+            updated_by=updated_by,
+        )
+
+    def clear_feature_flag(self, flag_key: str, *, updated_by: str = "webui_admin") -> bool:
+        """Remove one override so the flag falls back to its configured default."""
+
+        if not flag_key or len(flag_key) > 128:
+            raise ValueError("invalid report feature flag key")
+        with self._lock, self._connect() as db:
+            before = db.execute(
+                "SELECT enabled FROM report_feature_flags WHERE flag_key=?",
+                (flag_key,),
+            ).fetchone()
+            if before is None:
+                return False
+            db.execute("DELETE FROM report_feature_flags WHERE flag_key=?", (flag_key,))
+        self.record_admin_audit(
+            action="feature_flag_reset",
+            target_type="feature_flag",
+            target_id=flag_key,
+            before_summary={"enabled": bool(int(before["enabled"]))},
+            after_summary={"enabled": "default"},
+            updated_by=updated_by,
+        )
+        return True
 
     def grant(self, channel: str, user_id: str, resource_type: str, resource_id: str) -> None:
         if resource_type not in {
@@ -1007,6 +1086,9 @@ class PostgresReportStateStore(ReportStateStore):
                 updated_by TEXT NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS report_admin_audit_created
                 ON report_admin_audit(created_at DESC)""",
+            """CREATE TABLE IF NOT EXISTS report_feature_flags (
+                flag_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+                updated_at TEXT NOT NULL, updated_by TEXT NOT NULL)""",
         )
         with self._lock, self._connect() as db:
             for statement in statements:

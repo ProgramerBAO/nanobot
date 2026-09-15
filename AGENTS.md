@@ -122,6 +122,16 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   be attributed to a customer. Hourly subscriptions run at five minutes past the
   hour; a missing target-hour point stays 暂不可用 with `partial` quality and must
   never be rendered as zero.
+- Report feature flags default ON for the usage/health/provider/management
+  families. Enable/disable flags no longer gate template registration (all Cube
+  templates register whenever the connector exists); execution and visibility read
+  the effective flag per request: a `report_feature_flags` store override wins over
+  the configured default, so the WebUI "功能开关" page toggles take effect without a
+  restart and every change is audited. Construction-level semantics (semantics v2
+  family, TTFT detail, thresholds, provider include_details) and extension
+  connectors (Grafana/WeCom/DingTalk/cost TokenAPI) stay config-level. New user-
+  facing configuration must ship with a page-level control in the Report platform
+  settings; do not add config.json-only switches for report features.
 
 ## Common File Locations
 

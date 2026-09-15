@@ -9,8 +9,10 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
@@ -24,6 +26,7 @@ import {
   runReportingSettingsAction,
 } from "@/lib/api";
 import type {
+  ReportingFeatureFlag,
   ReportingSettingsPayload,
   ReportingSubscription,
   ReportingSubscriptionForm,
@@ -37,6 +40,8 @@ type ReportAction =
   | "grant"
   | "revoke"
   | "export"
+  | "feature_flag"
+  | "feature_flag_reset"
   | "template_policy"
   | "subscription_create"
   | "subscription_preview"
@@ -569,7 +574,7 @@ function SubscriptionEditor({
 export function ReportsSettings({ token }: { token: string }) {
   const [payload, setPayload] = useState<ReportingSettingsPayload | null>(null);
   const [options, setOptions] = useState<ReportingSubscriptionOptions | null>(null);
-  const [tab, setTab] = useState<"templates" | "subscriptions" | "permissions">("templates");
+  const [tab, setTab] = useState<"templates" | "subscriptions" | "permissions" | "flags">("templates");
   const [grant, setGrant] = useState(EMPTY_GRANT);
   const [subscription, setSubscription] = useState<GuidedFormState>(EMPTY_SUBSCRIPTION);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -703,6 +708,7 @@ export function ReportsSettings({ token }: { token: string }) {
     { id: "templates" as const, label: "报表类型", icon: FileBarChart },
     { id: "subscriptions" as const, label: "订阅管理", icon: CalendarClock },
     { id: "permissions" as const, label: "权限管理", icon: ShieldCheck },
+    { id: "flags" as const, label: "功能开关", icon: SlidersHorizontal },
   ];
   const managementEnabled = Boolean(payload?.policy.management_enabled);
   const guidedUiEnabled = Boolean(payload?.policy.guided_ui_enabled);
@@ -723,7 +729,7 @@ export function ReportsSettings({ token }: { token: string }) {
       </div>
       {error ? <div className="border-l-2 border-destructive px-3 py-2 text-sm text-destructive" role="alert">{error}</div> : null}
       {message ? <div className="border-l-2 border-emerald-500 px-3 py-2 text-sm text-muted-foreground" role="status">{message}</div> : null}
-      {!managementEnabled ? <div className="border-l-2 border-amber-500 px-3 py-2 text-sm text-muted-foreground">报表管理 feature flag 尚未启用；当前页面保持只读，原 reporting 设置接口继续可用。</div> : null}
+      {!managementEnabled ? <div className="border-l-2 border-amber-500 px-3 py-2 text-sm text-muted-foreground">报表管理功能当前关闭；报表类型与订阅管理保持只读，功能开关页仍可操作（可在其中重新开启）。</div> : null}
       {managementEnabled && !guidedUiEnabled ? <div className="border-l-2 border-amber-500 px-3 py-2 text-sm text-muted-foreground">引导式订阅界面尚未启用；订阅管理暂不可编辑，旧兼容接口仍可用。</div> : null}
 
       <div className="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="报表管理视图">
@@ -748,6 +754,39 @@ export function ReportsSettings({ token }: { token: string }) {
         <div className="flex items-center justify-between border-y py-3"><div className="flex items-start gap-3"><ShieldCheck className="mt-0.5 h-4 w-4 text-muted-foreground" /><div><div className="text-sm font-medium">Report RBAC</div><div className="text-xs text-muted-foreground">启用后校验 Connector、Template、客户、模型和订阅模板授权。</div></div></div><ToggleButton checked={Boolean(payload?.policy.rbac_enabled)} disabled={action !== null} label="Report RBAC" onChange={(enabled) => void run("rbac", { enabled: String(enabled) })} /></div>
         <div className="space-y-3"><h3 className="text-sm font-semibold">Grant editor</h3><div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4"><Input value={grant.channel} onChange={(event) => setGrant({ ...grant, channel: event.target.value })} placeholder="Channel" /><Input value={grant.user_id} onChange={(event) => setGrant({ ...grant, user_id: event.target.value })} placeholder="User open_id" /><select className={SELECT_CLASS} value={grant.resource_type} onChange={(event) => setGrant({ ...grant, resource_type: event.target.value })}>{(payload?.policy.resource_types ?? []).map((item) => <option key={item} value={item}>{item}</option>)}</select><Input value={grant.resource_id} onChange={(event) => setGrant({ ...grant, resource_id: event.target.value })} placeholder="Resource ID or *" /></div><div className="flex flex-wrap gap-2"><Button size="sm" disabled={!grant.user_id || !grant.resource_id || action !== null} onClick={() => void run("grant", grant)}>Grant</Button><Button variant="outline" size="sm" disabled={!grant.user_id || !grant.resource_id || action !== null} onClick={() => void run("revoke", grant)}>Revoke</Button><Button variant="ghost" size="sm" disabled={!grant.user_id} onClick={() => void load({ channel: grant.channel, user_id: grant.user_id })}>Inspect user</Button></div>{payload?.grants.length ? <div className="divide-y border-y text-sm">{payload.grants.map((item) => <div key={`${item.resource_type}:${item.resource_id}`} className="flex items-center justify-between py-2"><span>{item.resource_type}</span><code className="text-xs text-muted-foreground">{item.resource_id}</code></div>)}</div> : null}</div>
       </section> : null}
+
+      {tab === "flags" ? (() => {
+        const featureFlags = payload?.feature_flags ?? [];
+        const groups = featureFlags.reduce<Record<string, ReportingFeatureFlag[]>>((acc, item) => {
+          const key = item.group || "其他";
+          acc[key] = [...(acc[key] ?? []), item];
+          return acc;
+        }, {});
+        return <section className="space-y-4">
+          <div><h3 className="text-sm font-semibold">功能开关</h3><p className="mt-1 text-xs text-muted-foreground">切换立即生效，无需重启网关；覆盖值保存在报表状态库并记录管理审计。计算口径、阈值与扩展连接（Grafana/企业微信/钉钉/成本 TokenAPI）仍属部署配置，需修改配置文件并重启。</p></div>
+          {Object.entries(groups).map(([group, items]) => (
+            <div key={group} className="space-y-1">
+              <h4 className="pt-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group}</h4>
+              <div className="divide-y border-y">
+                {items.map((item) => (
+                  <div key={item.key} className="flex items-center justify-between gap-3 py-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">{item.label}</div>
+                      <code className="text-xs text-muted-foreground">{item.key} · {item.source === "override" ? "页面覆盖" : "默认值"}</code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {item.source === "override" ? (
+                        <Button variant="ghost" size="sm" disabled={action !== null} title="恢复默认值" aria-label={`恢复 ${item.label} 默认值`} onClick={() => void run("feature_flag_reset", { flag: item.key })}><RotateCcw className="h-4 w-4" /></Button>
+                      ) : null}
+                      <ToggleButton checked={item.enabled} disabled={action !== null} label={item.label} onChange={(enabled) => void run("feature_flag", { flag: item.key, enabled: String(enabled) })} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>;
+      })() : null}
 
       <div className="flex items-center gap-2 text-xs text-muted-foreground"><Database className="h-3.5 w-3.5" />{payload?.storage.backend} · {payload?.storage.retention_days}-day run retention · onboarding v{payload?.onboarding_version}</div>
     </div>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -843,6 +844,9 @@ def test_cube_contract_preserves_large_integer_strings_and_fixed_route() -> None
     assert _as_int("9007199254740993") == 9007199254740993
     tool = ReportCenterTool.__new__(ReportCenterTool)
     tool._config = ReportCenterToolConfig()
+    # Routing reads effective feature flags; this double has no overrides, so
+    # every flag falls back to its configured default.
+    tool._store = SimpleNamespace(get_feature_flags=lambda: {})
     for text, period in (("我要日报", "day"), ("我要周报", "week"), ("我要月报", "month")):
         assert tool.match_direct_request(text) == {
             "action": "cube_report",

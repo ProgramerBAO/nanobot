@@ -67,6 +67,86 @@ def test_template_policy_action_enforces_revision(monkeypatch, tmp_path) -> None
     assert exc_info.value.status == 409
 
 
+def test_feature_flag_action_toggles_instantly_and_audits(monkeypatch, tmp_path) -> None:
+    """Page toggles write store overrides; unknown keys fail closed."""
+
+    store = ReportStateStore(tmp_path / "reporting.db")
+    monkeypatch.setattr(reporting_api, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *_args, **_kwargs: store)
+
+    payload = reporting_api.reporting_settings_action(
+        "feature_flag",
+        _query(flag="cube_customer_model_hourly_tpm", enabled="false"),
+    )
+    hourly = next(
+        item for item in payload["feature_flags"] if item["key"] == "cube_customer_model_hourly_tpm"
+    )
+    # The override wins over the (now default-on) configuration value.
+    assert hourly["enabled"] is False
+    assert hourly["source"] == "override"
+
+    # Resetting the override restores the configured default.
+    payload = reporting_api.reporting_settings_action(
+        "feature_flag_reset",
+        _query(flag="cube_customer_model_hourly_tpm"),
+    )
+    hourly = next(
+        item for item in payload["feature_flags"] if item["key"] == "cube_customer_model_hourly_tpm"
+    )
+    assert hourly["enabled"] is True
+    assert hourly["source"] == "default"
+
+    # Unknown keys and invalid values are rejected server-side.
+    with pytest.raises(reporting_api.ReportingSettingsError) as unknown_key:
+        reporting_api.reporting_settings_action(
+            "feature_flag", _query(flag="not_a_report_flag", enabled="true")
+        )
+    assert unknown_key.value.status == 400
+    with pytest.raises(reporting_api.ReportingSettingsError) as bad_value:
+        reporting_api.reporting_settings_action(
+            "feature_flag", _query(flag="cube_multi_scope_brief", enabled="maybe")
+        )
+    assert bad_value.value.status == 400
+    with pytest.raises(reporting_api.ReportingSettingsError) as missing_override:
+        reporting_api.reporting_settings_action(
+            "feature_flag_reset", _query(flag="cube_multi_scope_brief")
+        )
+    assert missing_override.value.status == 404
+
+    # Every mutation is audited in the control-plane audit log.
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "reporting.db") as db:
+        audit_actions = [
+            row[0]
+            for row in db.execute(
+                "SELECT action FROM report_admin_audit ORDER BY created_at"
+            ).fetchall()
+        ]
+    assert audit_actions.count("feature_flag_update") == 1
+    assert audit_actions.count("feature_flag_reset") == 1
+
+
+def test_feature_flags_payload_reflects_effective_values(monkeypatch, tmp_path) -> None:
+    """The payload merges store overrides with configured defaults."""
+
+    store = ReportStateStore(tmp_path / "reporting.db")
+    store.set_feature_flag("report_management_v1", False, updated_by="webui_admin")
+    monkeypatch.setattr(reporting_api, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *_args, **_kwargs: store)
+
+    payload = reporting_api.reporting_settings_payload()
+
+    flags = {item["key"]: item for item in payload["feature_flags"]}
+    # The store override wins even though the config enables management.
+    assert payload["policy"]["management_enabled"] is False
+    assert flags["report_management_v1"]["enabled"] is False
+    assert flags["report_management_v1"]["source"] == "override"
+    # Untouched flags fall back to configured defaults.
+    assert flags["cube_multi_scope_brief"]["enabled"] is True
+    assert flags["cube_multi_scope_brief"]["source"] == "default"
+
+
 def test_default_subscription_policy_allows_daily_brief_but_not_machine_peak(
     monkeypatch, tmp_path
 ) -> None:

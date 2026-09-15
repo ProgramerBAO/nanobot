@@ -875,7 +875,6 @@ def test_guided_subscription_resolves_display_alias_to_live_cube_id(tmp_path) ->
         discover_external=False,
         magik_enabled=True,
         cube_config=cube_config,
-        cube_multi_scope_brief_enabled=True,
     )
     config = SimpleNamespace(
         workspace_path=tmp_path,
