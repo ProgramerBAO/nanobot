@@ -2616,6 +2616,42 @@ def report_policy_status(
         console.print(table)
 
 
+@report_policy_app.command("migrate-flags")
+def report_policy_migrate_flags(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show the planned policy rows without writing",
+    ),
+) -> None:
+    """Convert retired per-template flag overrides into template policies.
+
+    Idempotent and expand-only: existing administrator rows are never
+    overwritten, and the old report_feature_flags override rows are kept
+    (they become inert once the retired flag keys leave the runtime
+    registry). Run once when upgrading across the 2026-09-16 switch
+    consolidation; back up the report state store first.
+    """
+
+    from nanobot.reporting import (
+        configured_report_state_store,
+        migrate_flag_overrides_to_template_policies,
+    )
+
+    store = configured_report_state_store()
+    report = migrate_flag_overrides_to_template_policies(
+        store, updated_by="cli:migrate-flags", dry_run=dry_run
+    )
+    mode = "planned" if dry_run else "created"
+    console.print(
+        f"Flag->policy migration {'(dry run)' if dry_run else 'complete'}: "
+        f"{len(report[mode])} {mode}, {len(report['updated'])} updated, "
+        f"{len(report['skipped_existing'])} skipped (admin rows)"
+    )
+    for item in report["planned"] if dry_run else []:
+        console.print(f"  would write {item}")
+
+
 @report_policy_app.command("rbac")
 def report_policy_rbac(enabled: bool = typer.Argument(...)) -> None:
     """Enable or disable report RBAC explicitly."""

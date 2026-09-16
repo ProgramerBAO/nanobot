@@ -39,6 +39,11 @@ from nanobot.reporting.delivery import (
     DeliveryRouter,
     split_message,
 )
+from nanobot.reporting.flag_migration import (
+    FAMILY_FLAG_TEMPLATES,
+    SUBSCRIPTION_FLAG_TEMPLATES,
+    migrate_flag_overrides_to_template_policies,
+)
 from nanobot.reporting.grafana import (
     GrafanaConnector,
     GrafanaConnectorConfig,
@@ -108,6 +113,9 @@ __all__ = [
     "RenderedReport",
     "DeliveryResult",
     "DeliveryRouter",
+    "FAMILY_FLAG_TEMPLATES",
+    "SUBSCRIPTION_FLAG_TEMPLATES",
+    "migrate_flag_overrides_to_template_policies",
     "DingTalkReportRenderer",
     "FeishuReportRenderer",
     "GrafanaConnector",
