@@ -254,29 +254,19 @@ class WebUISettingsRouter:
     def _reporting_subscription_route(
         path: str, request: WsRequest
     ) -> tuple[str | None, str] | None:
-        """Map REST-shaped subscription paths to the legacy action protocol."""
+        """Map the REST-shaped reporting options path to the action protocol.
+
+        The subscription REST routes were removed in the phase-3 dead-surface
+        cleanup: the WebUI uses the action protocol, no other consumer
+        existed, and the duplicated entry drifted from the action surface.
+        """
 
         prefix = "/api/settings/reporting/"
         if not path.startswith(prefix):
             return None
         suffix = path.removeprefix(prefix).strip("/")
-        method = str(getattr(request, "method", "GET") or "GET").upper()
         if suffix == "options":
             return ("subscription_options", "")
-        if suffix == "subscriptions/preview":
-            return ("subscription_preview", "")
-        if suffix == "subscriptions":
-            return ("subscription_create_guided", "") if method == "POST" else (None, "")
-        parts = suffix.split("/")
-        if len(parts) not in {2, 3} or parts[0] != "subscriptions" or not parts[1]:
-            return None
-        subscription_id = parts[1][:64]
-        if len(parts) == 2 and method == "PATCH":
-            return ("subscription_update", subscription_id)
-        if len(parts) == 2 and method == "DELETE":
-            return ("subscription_delete", subscription_id)
-        if len(parts) == 3 and method == "POST" and parts[2] in {"enable", "disable"}:
-            return (f"subscription_{parts[2]}", subscription_id)
         return None
 
     def _authorized(self, request: WsRequest) -> bool:

@@ -4970,10 +4970,16 @@ class ReportCenterTool(Tool):
             return ToolResult("该计划周期的报表已经处理，已跳过重复发送。")
         run_id = str(trigger.get("run_id") or uuid.uuid4().hex)
         connector = self._registry.connector(subscription.connector_id)
-        # The usage and cost families keep a mechanism flag (pipeline
-        # rollback); health and provider-quality runs are governed by the
-        # always-enforced template policy — the runner denies disabled
-        # templates with a clear error instead of falling back.
+        # Single Cube-vs-legacy decision point (phase 3e). The runner path
+        # serves every family whose mechanism flag is on (usage and cost keep
+        # theirs for pipeline rollback) and whose subscription compiles to a
+        # Cube intent. The legacy magik fallback below only serves rolled-back
+        # flags, multi-selection matrix windows the compiler rejects, and
+        # pre-consolidation rows. Deletion condition: after one retention
+        # cycle (default 30 days) with no flag rollbacks, verify that no
+        # stored subscription hits the fallback path (it lacks the runner's
+        # policy/RBAC authorization), then remove it together with
+        # _dynamic_magik_params.
         cube_family_enabled = (
             (family == "usage" and self._flag("cube_subscription"))
             or family == "health"

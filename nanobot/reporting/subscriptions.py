@@ -325,6 +325,49 @@ def subscription_fingerprint(
     ).hexdigest()
 
 
+def find_duplicate_subscriptions(store: Any) -> list[dict[str, Any]]:
+    """Report semantically duplicate stored subscriptions (report-only).
+
+    Groups rows by the unified fingerprint identity minus report params
+    (channel, chat_id, user_id, template_id, schedule, timezone). The
+    phase-3 unified fingerprint prevents NEW cross-entry duplicates, but
+    rows created before the consolidation keep their historical
+    fingerprints; this scan surfaces the residual duplicates so an operator
+    can delete them deliberately. Scans at most the store's bounded page
+    (500 rows) — raise the bound if a deployment exceeds it.
+    """
+
+    groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = {}
+    for subscription in store.all_subscriptions(limit=500):
+        key = (
+            subscription.channel,
+            subscription.chat_id,
+            subscription.user_id,
+            subscription.template_id,
+            subscription.schedule,
+            subscription.timezone,
+        )
+        groups.setdefault(key, []).append(
+            {
+                "subscription_id": subscription.subscription_id,
+                "enabled": subscription.enabled,
+            }
+        )
+    return [
+        {
+            "channel": key[0],
+            "chat_id": key[1],
+            "user_id": key[2],
+            "template_id": key[3],
+            "schedule": key[4],
+            "timezone": key[5],
+            "subscriptions": rows,
+        }
+        for key, rows in sorted(groups.items())
+        if len(rows) > 1
+    ]
+
+
 class ReportSubscriptionService:
     """Compile and mutate subscriptions through one validated control plane.
 

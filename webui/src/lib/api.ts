@@ -652,10 +652,8 @@ export type ReportingSettingsAction =
   | "feature_flag"
   | "feature_flag_reset"
   | "template_policy"
-  | "subscription_create"
   | "subscription_enable"
   | "subscription_disable"
-  | "subscription_schedule"
   | "subscription_delete"
   | "subscription_preview"
   | "subscription_create_guided"
@@ -685,9 +683,14 @@ export async function runReportingSettingsAction(
       query.set(key, String(value));
     });
   }
-  const init: RequestInit | undefined = useStructuredHeader
-    ? { headers: reportingValuesHeader(values) }
-    : undefined;
+  // All reporting settings actions are mutations or audited control-plane
+  // operations; they are sent as POST since the phase-3 consolidation
+  // (previously an implicit GET with side effects carried in the query
+  // string). The gateway action dispatch is method-agnostic.
+  const init: RequestInit = {
+    method: "POST",
+    ...(useStructuredHeader ? { headers: reportingValuesHeader(values) } : {}),
+  };
   const suffix = query.toString() ? `?${query}` : "";
   return request<ReportingSettingsPayload>(
     `${base}/api/settings/reporting/${action}${suffix}`,

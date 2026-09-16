@@ -36,7 +36,7 @@ from nanobot.reporting.registry import (
     TemplatePlugin,
 )
 from nanobot.reporting.renderer import document_to_markdown
-from nanobot.reporting.store import ReportMessageReference
+from nanobot.reporting.store import ReportMessageReference, ReportSubscription
 from nanobot.reporting.subscriptions import ReportSubscriptionService, SubscriptionServiceError
 from nanobot.reporting.templates import (
     load_builtin_template_specs,
@@ -484,6 +484,53 @@ def test_service_denies_machine_tpm_peak_without_management_flag(tmp_path) -> No
                 "timezone": "Asia/Shanghai",
             }
         )
+
+
+def test_find_duplicate_subscriptions_reports_semantic_groups(tmp_path) -> None:
+    """Phase 3e: the residual-duplicate scan groups by the unified identity."""
+
+    from nanobot.reporting.subscriptions import find_duplicate_subscriptions
+
+    store = ReportStateStore(tmp_path / "state.db")
+    now = "2026-09-16T00:00:00+00:00"
+
+    def _row(subscription_id: str, fingerprint: str, **overrides):
+        base = dict(
+            subscription_id=subscription_id,
+            channel="feishu",
+            chat_id="chat-a",
+            user_id="ou-a",
+            connector_id="magik_cube",
+            template_id="usage_daily_brief",
+            template_version="2.0",
+            schedule="0 10 * * *",
+            timezone="Asia/Shanghai",
+            report_params={},
+            cron_job_id=f"job-{subscription_id}",
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+        )
+        base.update(overrides)
+        assert store.add_subscription(ReportSubscription(**base), fingerprint)
+
+    # Two rows with different historical fingerprints but one semantic
+    # identity form the duplicate group; a different chat, template, or
+    # schedule stays out of it.
+    _row("sub-1", "fp-1")
+    _row("sub-2", "fp-2")
+    _row("sub-3", "fp-3", chat_id="chat-b")
+    _row("sub-4", "fp-4", template_id="usage_weekly_brief")
+
+    duplicates = find_duplicate_subscriptions(store)
+    assert len(duplicates) == 1
+    group = duplicates[0]
+    assert group["template_id"] == "usage_daily_brief"
+    assert group["chat_id"] == "chat-a"
+    assert [row["subscription_id"] for row in group["subscriptions"]] == [
+        "sub-1",
+        "sub-2",
+    ]
 
 
 def test_template_policy_matrix_visibility_and_subscription(tmp_path) -> None:

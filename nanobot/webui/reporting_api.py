@@ -3,22 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from nanobot.bus.events import INBOUND_META_DIRECT_TOOL
 from nanobot.config.loader import load_config, resolve_config_env_vars
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.service import CronService
-from nanobot.cron.types import CronSchedule
 from nanobot.reporting import (
     build_default_registry,
     default_registry_kwargs,
@@ -32,12 +26,9 @@ from nanobot.reporting.feature_flags import (
 from nanobot.reporting.store import ReportSubscription
 from nanobot.reporting.subscriptions import (
     DEFAULT_UNSUBSCRIBABLE_TEMPLATES,
-    POLICY_DENIED_ALLOWLIST,
     ReportSubscriptionService,
     SubscriptionServiceError,
-    evaluate_subscription_policy,
 )
-from nanobot.session.keys import session_key_for_channel
 from nanobot.utils.helpers import _write_text_atomic
 from nanobot.webui.http_utils import query_first
 
@@ -114,52 +105,6 @@ def _cron_service(config: Any) -> CronService:
     """Open the workspace Cron store through its cross-process action protocol."""
 
     return CronService(config.workspace_path / "cron" / "jobs.json")
-
-
-def _restore_cron_job_or_raise(cron: CronService, job: Any) -> None:
-    """Restore a Cron snapshot after a legacy settings mutation fails.
-
-    The compatibility endpoint predates ``ReportSubscriptionService`` but must
-    obey the same consistency invariant: a subscription row and its executable
-    Cron job either change together or the scheduler is restored.  Failure to
-    compensate is surfaced as a conflict rather than hidden behind a success
-    response.
-    """
-
-    restore = getattr(cron, "restore_job", None)
-    if not callable(restore):
-        raise ReportingSettingsError(
-            "subscription state changed and Cron recovery is unavailable", status=409
-        )
-    try:
-        result = restore(deepcopy(job))
-    except Exception as exc:
-        raise ReportingSettingsError(
-            "subscription state changed and Cron recovery failed", status=409
-        ) from exc
-    if result not in {"restored", "already_present"}:
-        raise ReportingSettingsError(
-            "subscription state changed and Cron recovery was rejected", status=409
-        )
-
-
-def _safe_admin_report_params(raw: str) -> dict[str, Any]:
-    if len(raw) > 16_384:
-        raise ReportingSettingsError("report_params_json is too large")
-    try:
-        value = json.loads(raw or "{}")
-    except json.JSONDecodeError as exc:
-        raise ReportingSettingsError("report_params_json must be valid JSON") from exc
-    if not isinstance(value, dict):
-        raise ReportingSettingsError("report_params_json must be an object")
-    unknown = set(value) - _ADMIN_REPORT_PARAM_KEYS
-    if unknown:
-        raise ReportingSettingsError("report_params_json contains unsupported fields")
-    serialized = json.dumps(value, ensure_ascii=False).casefold()
-    forbidden = ("http://", "https://", "bearer ", "password", "api_key", "apikey", "secret")
-    if any(item in serialized for item in forbidden):
-        raise ReportingSettingsError("report_params_json contains forbidden content")
-    return value
 
 
 def _structured_values(query: QueryParams) -> dict[str, Any]:
@@ -680,11 +625,10 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
         "subscription_enable",
         "subscription_disable",
         "subscription_delete",
-    } or (action == "subscription_create" and bool(structured)):
+    }:
         form = _guided_form(query)
         guided_requested = (
             action in {"subscription_preview", "subscription_create_guided"}
-            or (action == "subscription_create" and bool(structured))
             or (action == "subscription_update" and bool(structured))
             or (
                 action in {"subscription_enable", "subscription_disable", "subscription_delete"}
@@ -770,11 +714,9 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
             payload["subscription_preview"] = preview
             payload["last_action"] = {"ok": True, "action": "subscription_preview"}
             return payload
-        # ``subscription_create`` with the private structured header and the
-        # explicit guided action share the same service.  The old query-based
-        # JSON branch below remains available only when no structured values
-        # are supplied, preserving existing clients during migration.
-        if action == "subscription_create_guided" or (action == "subscription_create" and structured):
+        # The guided action is the only creation entry since the phase-3
+        # dead-surface cleanup; the legacy query-based JSON branch is gone.
+        if action == "subscription_create_guided":
             if not management_enabled:
                 raise ReportingSettingsError("report management is disabled", status=404)
             registry = _reporting_registry(config)
@@ -789,10 +731,22 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
             except SubscriptionServiceError as exc:
                 raise ReportingSettingsError(exc.message, status=exc.status) from exc
             payload = reporting_settings_payload(query)
-            payload["last_action"] = {"ok": True, "action": "subscription_create"}
+            payload["last_action"] = {"ok": True, "action": "subscription_create_guided"}
             return payload
     if action == "rbac":
-        store.set_rbac_enabled(_bool_value(query, "enabled"))
+        # Phase-3 audit closure: the RBAC toggle previously mutated report
+        # authorization without any admin audit row.
+        before_rbac = store.rbac_enabled()
+        enabled = _bool_value(query, "enabled")
+        store.set_rbac_enabled(enabled)
+        store.record_admin_audit(
+            action=action,
+            target_type="rbac",
+            target_id="rbac_enabled",
+            before_summary={"enabled": before_rbac},
+            after_summary={"enabled": enabled},
+            updated_by="webui_admin",
+        )
     elif action in {"grant", "revoke"}:
         channel = _required(query, "channel", max_length=32)
         user_id = _required(query, "user_id")
@@ -805,6 +759,16 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
                 store.revoke(channel, user_id, resource_type, resource_id)
         except ValueError as exc:
             raise ReportingSettingsError(str(exc)) from exc
+        # Phase-3 audit closure: grant/revoke previously changed authorization
+        # without any admin audit row.
+        store.record_admin_audit(
+            action=action,
+            target_type="resource",
+            target_id=f"{resource_type}:{resource_id}"[:256],
+            before_summary={},
+            after_summary={"channel": channel, "user_id": user_id},
+            updated_by="webui_admin",
+        )
     elif action == "template_policy":
         if not management_enabled:
             raise ReportingSettingsError("report management is disabled", status=404)
@@ -863,167 +827,6 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
         payload = reporting_settings_payload(query)
         payload["last_action"] = {"ok": True, "action": action}
         return payload
-    elif action == "subscription_schedule":
-        if not management_enabled:
-            raise ReportingSettingsError("report management is disabled", status=404)
-        subscription_id = _required(query, "subscription_id", max_length=64)
-        schedule = _required(query, "schedule", max_length=128)
-        timezone_name = _required(query, "timezone", max_length=64)
-        try:
-            ZoneInfo(timezone_name)
-        except Exception as exc:
-            raise ReportingSettingsError("invalid subscription timezone") from exc
-        subscription = store.subscription(subscription_id)
-        if subscription is None:
-            raise ReportingSettingsError("report subscription not found", status=404)
-        cron = _cron_service(config)
-        job_snapshot = cron.get_job(subscription.cron_job_id)
-        if job_snapshot is None:
-            raise ReportingSettingsError("subscription Cron job is missing or protected", status=409)
-        job_snapshot = deepcopy(job_snapshot)
-        result = cron.update_job(
-            subscription.cron_job_id,
-            schedule=CronSchedule(kind="cron", expr=schedule, tz=timezone_name),
-        )
-        if result in {"not_found", "protected"}:
-            raise ReportingSettingsError("subscription Cron job cannot be updated", status=409)
-        try:
-            updated = store.update_subscription_schedule(
-                subscription_id, schedule=schedule, timezone_name=timezone_name
-            )
-        except Exception as exc:
-            _restore_cron_job_or_raise(cron, job_snapshot)
-            raise ReportingSettingsError(
-                "订阅计划保存失败，已恢复原计划", status=503
-            ) from exc
-        if updated is None:
-            _restore_cron_job_or_raise(cron, job_snapshot)
-            raise ReportingSettingsError("subscription state changed during update", status=409)
-        store.record_admin_audit(
-            action=action,
-            target_type="subscription",
-            target_id=subscription_id,
-            before_summary={"schedule": subscription.schedule, "timezone": subscription.timezone},
-            after_summary={"schedule": schedule, "timezone": timezone_name},
-            updated_by="webui_admin",
-        )
-    elif action == "subscription_create":
-        if not management_enabled:
-            raise ReportingSettingsError("report management is disabled", status=404)
-        registry = _reporting_registry(config)
-        template_id = _required(query, "template_id", max_length=128)
-        template = registry.template(template_id)
-        if template is None:
-            raise ReportingSettingsError("unknown report template", status=404)
-        policy = next(
-            (item for item in store.template_policies() if item["template_id"] == template_id),
-            None,
-        )
-        reason = evaluate_subscription_policy(template_id, policy)
-        if reason == POLICY_DENIED_ALLOWLIST:
-            if not store.allowed(
-                _required(query, "channel", max_length=32),
-                _required(query, "user_id"),
-                "subscription_template",
-                template_id,
-            ):
-                raise ReportingSettingsError("user is not allowed to subscribe to this template", status=403)
-        elif reason is not None:
-            raise ReportingSettingsError("this report template does not allow subscriptions", status=403)
-        channel = _required(query, "channel", max_length=32)
-        chat_id = _required(query, "chat_id")
-        user_id = _required(query, "user_id")
-        schedule = _required(query, "schedule", max_length=128)
-        timezone_name = _required(query, "timezone", max_length=64)
-        try:
-            ZoneInfo(timezone_name)
-        except Exception as exc:
-            raise ReportingSettingsError("invalid subscription timezone") from exc
-        params = _safe_admin_report_params(
-            str(query_first(query, "report_params_json") or "{}")
-        )
-        subscription_id = uuid.uuid4().hex[:16]
-        supported_periods = sorted(template.manifest.periods)
-        params.setdefault(
-            "subscription_period",
-            "day" if "day" in template.manifest.periods else supported_periods[0],
-        )
-        fingerprint_source = [channel, user_id, template_id, schedule, params]
-        fingerprint = hashlib.sha256(
-            json.dumps(fingerprint_source, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        direct_tool = {
-            "name": "report_center",
-            "params": {"action": "run_subscription", "subscription_id": subscription_id},
-        }
-        cron = _cron_service(config)
-        job = cron.add_job(
-            name=f"固定报表订阅 {template.manifest.display_name}",
-            schedule=CronSchedule(kind="cron", expr=schedule, tz=timezone_name),
-            message="执行固定报表订阅",
-            session_key=session_key_for_channel(
-                channel,
-                chat_id,
-                unified_session=config.agents.defaults.unified_session,
-            ),
-            origin_channel=channel,
-            origin_chat_id=chat_id,
-            origin_metadata={
-                INBOUND_META_DIRECT_TOOL: direct_tool,
-                "direct_request_text": "执行固定报表订阅",
-            },
-        )
-        now = datetime.now(UTC).isoformat()
-        subscription = ReportSubscription(
-            subscription_id=subscription_id,
-            channel=channel,
-            chat_id=chat_id,
-            user_id=user_id,
-            connector_id=next(iter(template.manifest.connector_ids)),
-            template_id=template_id,
-            template_version=template.manifest.version,
-            schedule=schedule,
-            timezone=timezone_name,
-            report_params=params,
-            cron_job_id=job.id,
-            enabled=True,
-            created_at=now,
-            updated_at=now,
-        )
-        try:
-            added = store.add_subscription(subscription, fingerprint)
-        except Exception as exc:
-            # Cron is created before the legacy row for the same reason as the
-            # shared service: an executable orphan must never survive a failed
-            # persistence write.  Keep the compatibility endpoint under the
-            # same compensation invariant during migration.
-            try:
-                cron.remove_job(job.id)
-            except Exception as cleanup_exc:
-                raise ReportingSettingsError(
-                    "subscription save failed and Cron cleanup failed", status=409
-                ) from cleanup_exc
-            raise ReportingSettingsError(
-                "subscription save failed; no subscription was created", status=503
-            ) from exc
-        if not added:
-            try:
-                cron.remove_job(job.id)
-            except Exception as cleanup_exc:
-                raise ReportingSettingsError(
-                    "duplicate subscription detected but Cron cleanup failed", status=409
-                ) from cleanup_exc
-            raise ReportingSettingsError(
-                "an identical report subscription already exists", status=409
-            )
-        store.record_admin_audit(
-            action=action,
-            target_type="subscription",
-            target_id=subscription_id,
-            before_summary={},
-            after_summary={"template_id": template_id, "enabled": True, "schedule": schedule},
-            updated_by="webui_admin",
-        )
     elif action == "export":
         path = _export_catalog()
         payload = reporting_settings_payload(query)

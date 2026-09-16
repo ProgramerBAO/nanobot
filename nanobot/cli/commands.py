@@ -2681,6 +2681,35 @@ def report_policy_migrate_flags(
         console.print(f"  would write {item}")
 
 
+@report_policy_app.command("scan-duplicates")
+def report_policy_scan_duplicates() -> None:
+    """List semantically duplicate report subscriptions (report-only).
+
+    Groups rows by owner, chat, template, schedule, and timezone. The
+    unified fingerprint (phase 3) prevents new cross-entry duplicates;
+    rows created before it keep historical fingerprints, so this scan
+    surfaces residual duplicates for deliberate manual deletion.
+    """
+
+    from nanobot.reporting import (
+        configured_report_state_store,
+        find_duplicate_subscriptions,
+    )
+
+    duplicates = find_duplicate_subscriptions(configured_report_state_store())
+    if not duplicates:
+        console.print("No duplicate report subscriptions found.")
+        return
+    for group in duplicates:
+        console.print(
+            f"{group['channel']}/{group['chat_id']}/{group['user_id']} "
+            f"{group['template_id']} {group['schedule']} ({group['timezone']}): "
+            f"{len(group['subscriptions'])} rows"
+        )
+        for row in group["subscriptions"]:
+            console.print(f"  {row['subscription_id']} enabled={row['enabled']}")
+
+
 @report_policy_app.command("rbac")
 def report_policy_rbac(enabled: bool = typer.Argument(...)) -> None:
     """Enable or disable report RBAC explicitly."""

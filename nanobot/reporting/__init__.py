@@ -75,6 +75,7 @@ from nanobot.reporting.subscriptions import (
     CompiledSubscriptionForm,
     ReportSubscriptionService,
     SubscriptionServiceError,
+    find_duplicate_subscriptions,
 )
 
 __all__ = [
@@ -140,4 +141,5 @@ __all__ = [
     "CompiledSubscriptionForm",
     "ReportSubscriptionService",
     "SubscriptionServiceError",
+    "find_duplicate_subscriptions",
 ]
