@@ -5123,7 +5123,6 @@ class FeishuChannel(BaseChannel):
             default_registry_kwargs,
         )
         from nanobot.reporting.capabilities import home_document
-        from nanobot.reporting.feature_flags import effective_feature_flags
 
         config = load_config()
         reporting_config = config.tools.reporting
@@ -5143,24 +5142,18 @@ class FeishuChannel(BaseChannel):
                 config.tools.magik_cube,
             )
         )
-        # Home visibility reads the effective runtime flags (store override
-        # or configured default) so page toggles apply without a restart.
-        flags = effective_feature_flags(
-            store,
-            lambda key: bool(getattr(reporting_config, key, False)),
-        )
         document = home_document(
             registry,
             store,
             channel=self.name,
             user_id=user_id,
-            health_enabled=flags["cube_health_report"],
-            # Connector availability is derived from the registry exactly like
-            # the Gateway tool does; the former per-field config switches were
-            # read nowhere else and have been removed.
+            # Capability presence is registry-derived (the health template only
+            # registers with a real Cube connector); per-template on/off lives
+            # in the always-enforced template policy, checked inside the
+            # capability catalog.
+            health_enabled=registry.template("health_sre") is not None,
             provider_quality_enabled=(
-                flags["cube_provider_quality_report"]
-                and registry.connector("cube_provider_quality") is not None
+                registry.connector("cube_provider_quality") is not None
             ),
         )
         await self.send(

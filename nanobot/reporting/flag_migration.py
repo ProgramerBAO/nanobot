@@ -25,6 +25,7 @@ be cleaned up after an observation window.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from nanobot.reporting.subscriptions import DEFAULT_UNSUBSCRIBABLE_TEMPLATES
@@ -55,6 +56,22 @@ SUBSCRIPTION_FLAG_TEMPLATES: dict[str, str] = {
     "cube_customer_model_hourly_tpm_subscription": "usage_customer_model_hourly_tpm",
 }
 
+# Original defaults of the retired flags at removal time, used to detect
+# config-level non-default values that must migrate alongside store
+# overrides. A contract test pins this table to the config class defaults.
+_RETIRED_FLAG_DEFAULTS: dict[str, bool] = {
+    "cube_usage_brief_template": True,
+    "cube_multi_scope_brief": True,
+    "cube_multi_scope_weekly_brief": True,
+    "cube_machine_tpm_report": True,
+    "cube_customer_model_hourly_tpm": True,
+    "cube_customer_model_hourly_tpm_subscription": True,
+    "cube_health_report": True,
+    "cube_health_subscription": True,
+    "cube_provider_quality_report": True,
+    "cube_provider_quality_subscription": False,
+}
+
 
 def _default_mode(template_id: str) -> str:
     # Mirrors the management-page default so a later manual enable of a
@@ -67,15 +84,26 @@ def migrate_flag_overrides_to_template_policies(
     *,
     updated_by: str = "flag-migration",
     dry_run: bool = False,
+    config_defaults: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Convert retired per-template flag overrides into policy rows.
 
-    Returns a report dict with ``created``/``updated``/``skipped_existing``
-    lists (or ``planned`` in dry-run mode). Safe to re-run: existing rows
-    make every step a no-op.
+    ``config_defaults`` optionally supplies the deployment's configured
+    values for the retired flags; a config-level non-default value is as
+    binding as a store override and migrates the same way (store overrides
+    still win). Returns a report dict with ``created``/``updated``/
+    ``skipped_existing`` lists (or ``planned`` in dry-run mode). Safe to
+    re-run: existing rows make every step a no-op.
     """
 
-    overrides = store.get_feature_flags()
+    overrides = dict(store.get_feature_flags())
+    if config_defaults is not None:
+        for flag in (*FAMILY_FLAG_TEMPLATES, *SUBSCRIPTION_FLAG_TEMPLATES):
+            if flag in overrides:
+                continue
+            configured = config_defaults.get(flag)
+            if configured is not None and configured != _RETIRED_FLAG_DEFAULTS.get(flag):
+                overrides[flag] = bool(configured)
     report: dict[str, Any] = {
         "dry_run": bool(dry_run),
         "planned": [],

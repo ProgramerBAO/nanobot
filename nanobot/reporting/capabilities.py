@@ -31,8 +31,13 @@ def _allowed(
     return store.allowed(channel, user_id, "capability", capability_id)
 
 
-def _template_enabled(store: ReportStateStore, template_id: str) -> bool:
-    """Hide administratively disabled templates (policy always enforced)."""
+def template_enabled(store: ReportStateStore, template_id: str) -> bool:
+    """Report whether a template's exposure policy allows use.
+
+    Public single source: the capability catalog and the report tool's
+    execution/routing gates both consult the always-enforced template
+    policy through this helper.
+    """
 
     policy = store.template_policy(template_id)
     return policy is None or bool(policy["enabled"])
@@ -69,7 +74,7 @@ def capability_catalog(
         and health_template is not None
         and health_template in registry.compatible_templates("magik_cube")
         and store.allowed(channel, user_id, "template", "health_sre")
-        and _template_enabled(store, "health_sre")
+        and template_enabled(store, "health_sre")
     ):
         items.append(
             Capability(
@@ -90,7 +95,7 @@ def capability_catalog(
         and provider_quality_template is not None
         and provider_quality_template in registry.compatible_templates("cube_provider_quality")
         and store.allowed(channel, user_id, "template", "provider_quality")
-        and _template_enabled(store, "provider_quality")
+        and template_enabled(store, "provider_quality")
     ):
         items.append(
             Capability(
@@ -107,7 +112,7 @@ def capability_catalog(
         and cost_template is not None
         and cost_template in registry.compatible_templates("magik_cube")
         and store.allowed(channel, user_id, "template", "cost_account")
-        and _template_enabled(store, "cost_account")
+        and template_enabled(store, "cost_account")
     ):
         items.append(
             Capability(
@@ -123,7 +128,7 @@ def capability_catalog(
             multi_template is not None
             and multi_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", multi_template.manifest.template_id)
-            and _template_enabled(store, multi_template.manifest.template_id)
+            and template_enabled(store, multi_template.manifest.template_id)
         ):
             items.append(
                 Capability(
@@ -138,7 +143,7 @@ def capability_catalog(
             weekly_multi_template is not None
             and weekly_multi_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", weekly_multi_template.manifest.template_id)
-            and _template_enabled(store, weekly_multi_template.manifest.template_id)
+            and template_enabled(store, weekly_multi_template.manifest.template_id)
         ):
             items.append(
                 Capability(
@@ -170,7 +175,7 @@ def capability_catalog(
             action_info = period_actions.get(manifest.template_id)
             if action_info is None or not store.allowed(
                 channel, user_id, "template", manifest.template_id
-            ) or not _template_enabled(store, manifest.template_id):
+            ) or not template_enabled(store, manifest.template_id):
                 continue
             period, title, description = action_info
             items.append(
@@ -186,7 +191,7 @@ def capability_catalog(
                 )
             )
         recent_template = "usage_custom_brief" if brief_default else "usage_weekly_matrix"
-        if store.allowed(channel, user_id, "template", recent_template) and _template_enabled(
+        if store.allowed(channel, user_id, "template", recent_template) and template_enabled(
             store, recent_template
         ):
             items.append(
@@ -202,7 +207,7 @@ def capability_catalog(
             machine_template is not None
             and machine_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", "machine_tpm_peak")
-            and _template_enabled(store, "machine_tpm_peak")
+            and template_enabled(store, "machine_tpm_peak")
         ):
             items.append(
                 Capability(
@@ -217,7 +222,7 @@ def capability_catalog(
             hourly_template is not None
             and hourly_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", "usage_customer_model_hourly_tpm")
-            and _template_enabled(store, "usage_customer_model_hourly_tpm")
+            and template_enabled(store, "usage_customer_model_hourly_tpm")
         ):
             items.append(
                 Capability(

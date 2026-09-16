@@ -76,22 +76,22 @@ def test_feature_flag_action_toggles_instantly_and_audits(monkeypatch, tmp_path)
 
     payload = reporting_api.reporting_settings_action(
         "feature_flag",
-        _query(flag="cube_customer_model_hourly_tpm", enabled="false"),
+        _query(flag="cube_admin_skill_help", enabled="false"),
     )
     hourly = next(
-        item for item in payload["feature_flags"] if item["key"] == "cube_customer_model_hourly_tpm"
+        item for item in payload["feature_flags"] if item["key"] == "cube_admin_skill_help"
     )
-    # The override wins over the (now default-on) configuration value.
+    # The override wins over the (default-on) configuration value.
     assert hourly["enabled"] is False
     assert hourly["source"] == "override"
 
     # Resetting the override restores the configured default.
     payload = reporting_api.reporting_settings_action(
         "feature_flag_reset",
-        _query(flag="cube_customer_model_hourly_tpm"),
+        _query(flag="cube_admin_skill_help"),
     )
     hourly = next(
-        item for item in payload["feature_flags"] if item["key"] == "cube_customer_model_hourly_tpm"
+        item for item in payload["feature_flags"] if item["key"] == "cube_admin_skill_help"
     )
     assert hourly["enabled"] is True
     assert hourly["source"] == "default"
@@ -104,12 +104,12 @@ def test_feature_flag_action_toggles_instantly_and_audits(monkeypatch, tmp_path)
     assert unknown_key.value.status == 400
     with pytest.raises(reporting_api.ReportingSettingsError) as bad_value:
         reporting_api.reporting_settings_action(
-            "feature_flag", _query(flag="cube_multi_scope_brief", enabled="maybe")
+            "feature_flag", _query(flag="cube_admin_skill_help", enabled="maybe")
         )
     assert bad_value.value.status == 400
     with pytest.raises(reporting_api.ReportingSettingsError) as missing_override:
         reporting_api.reporting_settings_action(
-            "feature_flag_reset", _query(flag="cube_multi_scope_brief")
+            "feature_flag_reset", _query(flag="cube_usage_brief_default")
         )
     assert missing_override.value.status == 404
 
@@ -143,8 +143,8 @@ def test_feature_flags_payload_reflects_effective_values(monkeypatch, tmp_path) 
     assert flags["report_management_v1"]["enabled"] is False
     assert flags["report_management_v1"]["source"] == "override"
     # Untouched flags fall back to configured defaults.
-    assert flags["cube_multi_scope_brief"]["enabled"] is True
-    assert flags["cube_multi_scope_brief"]["source"] == "default"
+    assert flags["cube_admin_skill_help"]["enabled"] is True
+    assert flags["cube_admin_skill_help"]["source"] == "default"
 
 
 def test_default_subscription_policy_allows_daily_brief_but_not_machine_peak(

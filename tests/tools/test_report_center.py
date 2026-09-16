@@ -53,7 +53,7 @@ def _tool(monkeypatch, tmp_path):
 
 
 def test_usage_depth_words_route_to_brief_detail_and_full(monkeypatch, tmp_path) -> None:
-    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+    tool, store, _cron = _tool(monkeypatch, tmp_path)
 
     assert tool.match_direct_request("日报") == {
         "action": "cube_report",
@@ -64,8 +64,18 @@ def test_usage_depth_words_route_to_brief_detail_and_full(monkeypatch, tmp_path)
     assert tool.match_direct_request("详细日报")["report_template"] == "matrix_card"
     assert tool.match_direct_request("完整日报")["report_template"] == "full"
 
+    # Brief-template availability lives in the template policy since the
+    # 2026-09-16 consolidation (the retired cube_usage_brief_template flag
+    # is ignored): a disabled row restores matrix routing.
+    store.set_template_policy(
+        "usage_daily_brief",
+        enabled=False,
+        subscription_mode="all_authorized",
+        updated_by="test",
+        expected_revision=0,
+    )
     disabled = ReportCenterTool(
-        ReportCenterToolConfig(cube_usage_brief_template=False), _FakeCron(), MagicMock()
+        ReportCenterToolConfig(), _FakeCron(), MagicMock()
     )
     assert disabled.match_direct_request("日报")["report_template"] == "matrix_card"
 
@@ -215,19 +225,16 @@ def test_hourly_subscription_compiles_clock_driven_intent() -> None:
     )
     assert tool._subscription_cube_intent(all_models) is None
 
-    # With the feature flags explicitly disabled the subscription must fail
-    # closed to the legacy compatibility path instead of silently producing a
-    # report. The flags default on now, so the disabled case is configured
-    # explicitly (runtime overrides are covered by the feature-flag suite).
-    disabled = ReportCenterTool(
-        ReportCenterToolConfig(
-            cube_customer_model_hourly_tpm=False,
-            cube_customer_model_hourly_tpm_subscription=False,
-        ),
+    # Since the 2026-09-16 consolidation, compilation is no longer flag-gated
+    # (the retired family flags are ignored): the intent always compiles and
+    # the always-enforced template policy denies disabled templates at run
+    # time instead (covered by the policy gate tests).
+    unflagged = ReportCenterTool(
+        ReportCenterToolConfig(),
         _FakeCron(),
         MagicMock(),
     )
-    assert disabled._subscription_cube_intent(_hourly_subscription()) is None
+    assert unflagged._subscription_cube_intent(_hourly_subscription()) is not None
 
 
 @pytest.mark.asyncio
@@ -688,15 +695,27 @@ async def test_feature_flag_override_gates_hourly_run_without_restart(
     result = await run_hourly()
     assert "hourly customer/model TPM report is not enabled" not in str(result)
 
-    # Page-style override off: the very next request is rejected at the gate.
-    store.set_feature_flag(
-        "cube_customer_model_hourly_tpm", False, updated_by="webui_admin"
+    # Since the 2026-09-16 consolidation the per-template switch lives in the
+    # always-enforced template policy (the runtime flag was retired): a
+    # disabled row rejects the very next request.
+    store.set_template_policy(
+        "usage_customer_model_hourly_tpm",
+        enabled=False,
+        subscription_mode="all_authorized",
+        updated_by="webui_admin",
+        expected_revision=0,
     )
     result = await run_hourly()
     assert "hourly customer/model TPM report is not enabled" in str(result)
 
-    # Resetting the override restores the configured default instantly.
-    store.clear_feature_flag("cube_customer_model_hourly_tpm", updated_by="webui_admin")
+    # Re-enabling the policy restores execution instantly.
+    store.set_template_policy(
+        "usage_customer_model_hourly_tpm",
+        enabled=True,
+        subscription_mode="all_authorized",
+        updated_by="webui_admin",
+        expected_revision=1,
+    )
     result = await run_hourly()
     assert "hourly customer/model TPM report is not enabled" not in str(result)
 

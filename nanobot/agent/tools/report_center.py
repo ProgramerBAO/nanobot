@@ -16,7 +16,7 @@ from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo
 
 from loguru import logger
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from nanobot.agent.reporting.cube_subscription_intent import (
     EXPLICIT_ALL_MODELS_RE,
@@ -56,6 +56,7 @@ from nanobot.reporting.capabilities import (
     recent_document,
     subscription_created_document,
     subscriptions_document,
+    template_enabled,
 )
 from nanobot.reporting.contracts import ReportBlock
 from nanobot.reporting.cube import normalize_health_thresholds
@@ -241,6 +242,29 @@ class _TenantMentionResolution:
     unresolved: tuple[str, ...] = ()
 
 
+# Per-template report switches retired by the 2026-09-16 consolidation
+# (phase 2d): their semantics moved into the always-enforced
+# report_template_policies store table. The config fields below stay
+# accepted for one migration window so existing config.json files keep
+# loading (a warning is logged when set non-default); run
+# `nanobot reports policy migrate-flags` and remove them from config.
+_RETIRED_TEMPLATE_FLAG_FIELDS = frozenset(
+    {
+        "cube_subscription_nlu_v3",
+        "cube_health_report",
+        "cube_health_subscription",
+        "cube_usage_brief_template",
+        "cube_multi_scope_brief",
+        "cube_multi_scope_weekly_brief",
+        "cube_machine_tpm_report",
+        "cube_customer_model_hourly_tpm",
+        "cube_customer_model_hourly_tpm_subscription",
+        "cube_provider_quality_report",
+        "cube_provider_quality_subscription",
+    }
+)
+
+
 class ReportCenterToolConfig(Base):
     enable: bool = True
     # Cube is the only production report path in this phase; the Magik tool
@@ -349,6 +373,29 @@ class ReportCenterToolConfig(Base):
         cls, value: dict[str, dict[str, float]]
     ) -> dict[str, dict[str, float]]:
         return normalize_health_thresholds(value)
+
+    @model_validator(mode="after")
+    def _warn_retired_template_flags(self) -> "ReportCenterToolConfig":
+        """Log (never raise) when a retired per-template switch is set non-default.
+
+        The retired fields no longer gate anything (phase 2d); the warning
+        points operators at the replacement surface instead of failing a
+        previously valid config.json during the migration window.
+        """
+
+        changed = [
+            name
+            for name in _RETIRED_TEMPLATE_FLAG_FIELDS
+            if getattr(self, name, None) is not None
+            and getattr(self, name) != type(self).model_fields[name].default
+        ]
+        if changed:
+            logger.warning(
+                "Retired per-template report flags in tools.reporting are ignored; "
+                "manage these templates in Report platform -> 报表类型 instead: {}",
+                ", ".join(sorted(changed)),
+            )
+        return self
 
 
 _REPORT_CENTER_PARAMETERS = {
@@ -598,7 +645,7 @@ class ReportCenterTool(Tool):
         """Use one schema-forced LLM call only for subscription-like language."""
 
         return bool(
-            (self._flag("cube_subscription_nlu_v2") or self._flag("cube_subscription_nlu_v3"))
+            (self._flag("cube_subscription_nlu_v2"))
             and self._flag("cube_subscription")
             and is_subscription_intent_candidate(text)
         )
@@ -1098,7 +1145,7 @@ class ReportCenterTool(Tool):
         """Parse schedule language using only a verified reference summary."""
 
         if not (
-            (self._flag("cube_subscription_nlu_v2") or self._flag("cube_subscription_nlu_v3"))
+            (self._flag("cube_subscription_nlu_v2"))
             and self._flag("cube_report_reference_subscription")
             and is_subscription_intent_candidate(text)
         ):
@@ -1420,7 +1467,7 @@ class ReportCenterTool(Tool):
             return "full"
         if requested == "详细":
             return "matrix_card"
-        if requested == "简报" and self._flag("cube_usage_brief_template"):
+        if requested == "简报" and template_enabled(self._store, "usage_daily_brief"):
             return "brief"
         if self._usage_brief_default_enabled:
             return "brief"
@@ -1428,10 +1475,10 @@ class ReportCenterTool(Tool):
 
     @property
     def _usage_brief_default_enabled(self) -> bool:
-        """Require template registration and routing flags to enable the default safely."""
+        """Require the brief template policy and routing flag to enable the default safely."""
 
         return (
-            self._flag("cube_usage_brief_template")
+            template_enabled(self._store, "usage_daily_brief")
             and self._flag("cube_usage_brief_default")
         )
 
@@ -1535,11 +1582,11 @@ class ReportCenterTool(Tool):
 
     @property
     def health_reports_enabled(self) -> bool:
-        return self.health_connector_enabled and self._flag("cube_health_report")
-
-    @property
-    def health_subscriptions_enabled(self) -> bool:
-        return self.health_connector_enabled and self._flag("cube_health_subscription")
+        # Per-template on/off lives in the template policy since the
+        # 2026-09-16 consolidation; the runtime flag was retired.
+        return self.health_connector_enabled and template_enabled(
+            self._store, "health_sre"
+        )
 
     @property
     def cost_connector_enabled(self) -> bool:
@@ -1578,14 +1625,10 @@ class ReportCenterTool(Tool):
 
     @property
     def provider_quality_reports_enabled(self) -> bool:
-        return self.provider_quality_connector_enabled and self._flag(
-            "cube_provider_quality_report"
-        )
-
-    @property
-    def provider_quality_subscriptions_enabled(self) -> bool:
-        return self.provider_quality_connector_enabled and self._flag(
-            "cube_provider_quality_subscription"
+        # Per-template on/off lives in the template policy since the
+        # 2026-09-16 consolidation; the runtime flag was retired.
+        return self.provider_quality_connector_enabled and template_enabled(
+            self._store, "provider_quality"
         )
 
     async def _run_health_report(self, *, period: str) -> ToolResult:
@@ -2157,11 +2200,15 @@ class ReportCenterTool(Tool):
     ) -> ToolResult:
         """Run the explicit multi-customer/model brief after scope selection."""
 
-        if period == "day" and not self._flag("cube_multi_scope_brief"):
+        if period == "day" and not template_enabled(
+            self._store, "usage_customer_model_daily_brief"
+        ):
             return ToolResult.error("Error: multi-customer model brief is not enabled")
         if period not in {"day", "week"}:
             return ToolResult.error("Error: multi-customer model brief supports day and week")
-        if period == "week" and not self._flag("cube_multi_scope_weekly_brief"):
+        if period == "week" and not template_enabled(
+            self._store, "usage_customer_model_weekly_brief"
+        ):
             return ToolResult.error("Error: multi-customer weekly brief is not enabled")
         channel, chat_id, user_id, _session_key, metadata = self._request_identity()
         if interactive and not tenants and not report_selections:
@@ -2417,7 +2464,7 @@ class ReportCenterTool(Tool):
         method carries customer relationships as scope metadata and never
         claims customer-exclusive machine resources.
         """
-        if not self._flag("cube_customer_model_hourly_tpm"):
+        if not template_enabled(self._store, "usage_customer_model_hourly_tpm"):
             return ToolResult.error("Error: hourly customer/model TPM report is not enabled")
         if self._magik_tool is None:
             return ToolResult.error("Cube 客户目录当前不可用，请稍后重试")
@@ -2666,7 +2713,7 @@ class ReportCenterTool(Tool):
     ) -> ToolResult:
         """Generate the read-only machine TPM report for one validated model."""
 
-        if not self._flag("cube_machine_tpm_report"):
+        if not template_enabled(self._store, "machine_tpm_peak"):
             return ToolResult.error("Error: machine TPM report is not enabled")
         if not model.strip():
             return ToolResult("请指定一个模型，例如：Kimi-K3 单机 TPM 峰值。")
@@ -3546,22 +3593,10 @@ class ReportCenterTool(Tool):
             "customer_model_weekly_brief",
             "customer_model_hourly_tpm",
         }:
-            variant = str(params["report_variant"])
-            if variant == "customer_model_hourly_tpm":
-                enabled = (
-                    self._flag("cube_customer_model_hourly_tpm")
-                    and self._flag("cube_customer_model_hourly_tpm_subscription")
-                )
-            elif variant == "customer_model_daily_brief":
-                enabled = self._flag("cube_multi_scope_brief")
-            else:
-                enabled = self._flag("cube_multi_scope_weekly_brief")
-            if not enabled:
-                if variant == "customer_model_hourly_tpm":
-                    return ToolResult.error(
-                        "Error: hourly customer/model TPM subscription is not enabled"
-                    )
-                return ToolResult.error("Error: multi-customer model brief is not enabled")
+            # Family availability is governed by the always-enforced template
+            # policy (the denial check below rejects disabled templates and
+            # disabled subscription modes); the retired runtime flags are
+            # gone.
             params["report_template"] = "brief"
         try:
             params = self._safe_report_params(params)
@@ -4067,8 +4102,8 @@ class ReportCenterTool(Tool):
             report_template=report_template,
             report_variant=report_variant,
         )
-        if report_variant == "customer_model_daily_brief" and not self._flag("cube_multi_scope_brief"):
-            return ToolResult.error("Error: multi-customer model brief is not enabled")
+        # The guided service enforces the template policy itself; the retired
+        # multi-scope runtime flag no longer gates this path.
         if period == "week":
             recurrence = "weekly"
         elif period == "month":
@@ -4168,8 +4203,9 @@ class ReportCenterTool(Tool):
         family = str(subscription.report_params.get("report_family") or "usage")
         period = self._subscription_period(subscription)
         if subscription.template_id == "machine_tpm_peak":
-            if not self._flag("cube_machine_tpm_report"):
-                return None
+            # Run-time availability is enforced by the template policy in the
+            # runner; the retired machine-TPM runtime flag no longer gates
+            # the compile path.
             try:
                 start_date = date.fromisoformat(str(params["start_date"]))
                 end_date = date.fromisoformat(str(params["end_date"]))
@@ -4195,11 +4231,6 @@ class ReportCenterTool(Tool):
             # Hourly TPM runs are clock-driven: every execution reports the
             # just-completed hour, so the window is planned by the template
             # from the current clock instead of persisted dates.
-            if not (
-                self._flag("cube_customer_model_hourly_tpm")
-                and self._flag("cube_customer_model_hourly_tpm_subscription")
-            ):
-                return None
             if period != "recent1h":
                 return None
             tenants, models = self._normalized_subscription_scope(params)
@@ -4274,12 +4305,10 @@ class ReportCenterTool(Tool):
                 if subscription.template_id == "usage_customer_model_daily_brief"
                 else "week"
             )
-            enabled = (
-                self._flag("cube_multi_scope_brief")
-                if expected_period == "day"
-                else self._flag("cube_multi_scope_weekly_brief")
-            )
-            if not enabled or period != expected_period:
+            # Availability is enforced by the always-on template policy at
+            # run time; the retired family runtime flags no longer gate the
+            # compile path.
+            if period != expected_period:
                 return None
             try:
                 start_date = date.fromisoformat(str(params["start_date"]))
@@ -4594,14 +4623,13 @@ class ReportCenterTool(Tool):
         report_family = report_family or saved_family or "usage"
         if report_family not in {"usage", "health", "cost", "provider_quality"}:
             return ToolResult.error("Error: unsupported report family")
+        # Provider-quality and health subscription availability is governed by
+        # the always-enforced template policy (subscription_mode), checked by
+        # the policy denial below; the retired family flags no longer gate.
         if report_family == "provider_quality":
-            if not self.provider_quality_subscriptions_enabled:
-                return ToolResult.error("Error: Cube provider quality subscription is not enabled")
             if period not in {"day", "week"}:
                 return ToolResult.error("Error: provider quality subscriptions support day or week only")
         elif report_family == "health":
-            if not self.health_subscriptions_enabled:
-                return ToolResult.error("Error: Cube health subscription is not enabled")
             if period not in {"day", "week"}:
                 return ToolResult.error("Error: health subscriptions support day or week only")
         elif report_family == "cost":
@@ -4613,8 +4641,8 @@ class ReportCenterTool(Tool):
             if not self._flag("cube_subscription"):
                 return ToolResult.error("Error: Cube usage subscription is not enabled")
             if hourly_requested:
-                if not self._flag("cube_customer_model_hourly_tpm_subscription"):
-                    return ToolResult.error("Error: Cube hourly TPM subscriptions are not enabled")
+                # Creation-time availability is enforced by the template
+                # policy (subscription_mode) later in this action.
                 period = "recent1h"
                 params["report_template_id"] = "usage_customer_model_hourly_tpm"
             elif period not in PERIOD_TEMPLATES:
@@ -4689,7 +4717,7 @@ class ReportCenterTool(Tool):
             return ToolResult.error(f"Error: invalid subscription schedule: {exc}")
         report_variant = str(params.get("report_variant") or "")
         if report_variant == "customer_model_daily_brief":
-            if not self._flag("cube_multi_scope_brief") or data_period != "day":
+            if data_period != "day":
                 return ToolResult.error(
                     "Error: multi-customer model subscriptions require the daily brief"
                 )
@@ -4799,14 +4827,13 @@ class ReportCenterTool(Tool):
         # request is a health or cost subscription.
         hourly_template = str(params.get("report_template_id") or params.get("template_id") or "")
         hourly_requested = period == "recent1h" or hourly_template == "usage_customer_model_hourly_tpm"
+        # Provider-quality and health subscription availability is governed by
+        # the always-enforced template policy (subscription_mode), checked by
+        # the policy denial below; the retired family flags no longer gate.
         if report_family == "provider_quality":
-            if not self.provider_quality_subscriptions_enabled:
-                return ToolResult.error("Error: Cube provider quality subscription is not enabled")
             if period not in {"day", "week"}:
                 return ToolResult.error("Error: provider quality subscriptions support day or week only")
         elif report_family == "health":
-            if not self.health_subscriptions_enabled:
-                return ToolResult.error("Error: Cube health subscription is not enabled")
             if period not in {"day", "week"}:
                 return ToolResult.error("Error: health subscriptions support day or week only")
         elif report_family == "cost":
@@ -4818,8 +4845,8 @@ class ReportCenterTool(Tool):
             if not self._flag("cube_subscription"):
                 return ToolResult.error("Error: Cube usage subscription is not enabled")
             if hourly_requested:
-                if not self._flag("cube_customer_model_hourly_tpm_subscription"):
-                    return ToolResult.error("Error: Cube hourly TPM subscriptions are not enabled")
+                # Creation-time availability is enforced by the template
+                # policy (subscription_mode) later in this action.
                 period = "recent1h"
                 params["report_template_id"] = "usage_customer_model_hourly_tpm"
             elif period not in PERIOD_TEMPLATES:
@@ -4855,12 +4882,9 @@ class ReportCenterTool(Tool):
             expected_period = (
                 "day" if report_variant == "customer_model_daily_brief" else "week"
             )
-            enabled = (
-                self._flag("cube_multi_scope_brief")
-                if report_variant == "customer_model_daily_brief"
-                else self._flag("cube_multi_scope_weekly_brief")
-            )
-            if not enabled or period != expected_period:
+            # Availability is enforced by the template policy; only the
+            # period contract remains here.
+            if period != expected_period:
                 return ToolResult.error(
                     "Error: multi-customer model subscription period is not enabled"
                 )
@@ -4934,11 +4958,15 @@ class ReportCenterTool(Tool):
             return ToolResult("该计划周期的报表已经处理，已跳过重复发送。")
         run_id = str(trigger.get("run_id") or uuid.uuid4().hex)
         connector = self._registry.connector(subscription.connector_id)
+        # The usage and cost families keep a mechanism flag (pipeline
+        # rollback); health and provider-quality runs are governed by the
+        # always-enforced template policy — the runner denies disabled
+        # templates with a clear error instead of falling back.
         cube_family_enabled = (
             (family == "usage" and self._flag("cube_subscription"))
-            or (family == "health" and self._flag("cube_health_subscription"))
+            or family == "health"
             or (family == "cost" and self._flag("cube_cost_subscription"))
-            or (family == "provider_quality" and self._flag("cube_provider_quality_subscription"))
+            or family == "provider_quality"
         )
         if (
             cube_family_enabled
@@ -5042,7 +5070,7 @@ class ReportCenterTool(Tool):
                     self._store,
                     channel=channel,
                     user_id=user_id,
-                    health_enabled=self._flag("cube_health_report"),
+                    health_enabled=self.health_reports_enabled,
                     cost_enabled=self.cost_reports_enabled,
                     provider_quality_enabled=self.provider_quality_reports_enabled,
                     brief_default=self._usage_brief_default_enabled,
@@ -5062,13 +5090,16 @@ class ReportCenterTool(Tool):
                     admin_skill_enabled=(
                         self._flag("cube_admin_skill_help") and self._magik_tool is not None
                     ),
-                    multi_scope_enabled=self._flag("cube_multi_scope_brief"),
-                    machine_tpm_enabled=self._flag("cube_machine_tpm_report"),
-                    hourly_tpm_enabled=self._flag("cube_customer_model_hourly_tpm"),
-                    subscription_nlu_enabled=(
-                        self._flag("cube_subscription_nlu_v2")
-                        or self._flag("cube_subscription_nlu_v3")
+                    multi_scope_enabled=template_enabled(
+                        self._store, "usage_customer_model_daily_brief"
                     ),
+                    machine_tpm_enabled=template_enabled(
+                        self._store, "machine_tpm_peak"
+                    ),
+                    hourly_tpm_enabled=template_enabled(
+                        self._store, "usage_customer_model_hourly_tpm"
+                    ),
+                    subscription_nlu_enabled=self._flag("cube_subscription_nlu_v2"),
                 )
             )
         if action == "recent":

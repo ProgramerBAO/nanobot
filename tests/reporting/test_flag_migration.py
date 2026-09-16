@@ -7,9 +7,18 @@ administrator-written policy row.
 from __future__ import annotations
 
 from nanobot.reporting.flag_migration import (
+    _RETIRED_FLAG_DEFAULTS,
     migrate_flag_overrides_to_template_policies,
 )
 from nanobot.reporting.store import ReportStateStore
+
+
+def test_retired_flag_defaults_match_the_config_class() -> None:
+    """The migration's default table must track the config class it replaces."""
+    from nanobot.agent.tools.report_center import ReportCenterToolConfig
+
+    for name, default in _RETIRED_FLAG_DEFAULTS.items():
+        assert ReportCenterToolConfig.model_fields[name].default == default
 
 
 def test_off_family_override_creates_disabled_policy_rows(tmp_path) -> None:
@@ -102,6 +111,30 @@ def test_family_and_subscription_overrides_merge_into_one_row(tmp_path) -> None:
     assert report["created"] == ["health_sre"]
     assert report["updated"] == ["health_sre"]
     assert policy["revision"] == 2
+
+
+def test_config_level_non_default_migrates_like_an_override(tmp_path) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+
+    report = migrate_flag_overrides_to_template_policies(
+        store, config_defaults={"cube_health_report": False}
+    )
+
+    policy = store.template_policy("health_sre")
+    assert policy is not None and policy["enabled"] is False
+    assert report["created"] == ["health_sre"]
+
+
+def test_store_override_wins_over_config_default(tmp_path) -> None:
+    store = ReportStateStore(tmp_path / "state.db")
+    store.set_feature_flag("cube_health_report", True, updated_by="webui_admin")
+
+    report = migrate_flag_overrides_to_template_policies(
+        store, config_defaults={"cube_health_report": False}
+    )
+
+    assert store.template_policy("health_sre") is None
+    assert report["created"] == []
 
 
 def test_dry_run_reports_without_writing(tmp_path) -> None:

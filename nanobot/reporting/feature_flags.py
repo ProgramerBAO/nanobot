@@ -3,10 +3,16 @@
 Feature switches are store-backed overrides (``report_feature_flags``) that
 fall back to the process configuration default. Template registration is no
 longer flag-gated: every Cube template registers whenever its connector
-exists, and execution/visibility read the effective flag per request, so a
-page toggle takes effect without a restart. Construction-level semantics
-(version switches, thresholds, ``include_details``) stay config-level and
-require a restart; they are intentionally absent from this registry.
+exists, and per-template on/off lives in the always-enforced
+``report_template_policies`` table since the 2026-09-16 consolidation
+(phase 2d retired the per-template family flags; the
+``reports policy migrate-flags`` CLI converts existing overrides).
+This registry now covers behavior/routing switches only: the subscription
+mechanism, NLU routing, the brief-default routing, help visibility, the
+management surface, and the extension-connector families (cost).
+Construction-level semantics (version switches, thresholds,
+``include_details``) stay config-level and require a restart; they are
+intentionally absent from this registry.
 
 Only the keys listed here may be written through the management surface;
 unknown keys are rejected server-side (fail closed).
@@ -21,38 +27,16 @@ RUNTIME_FEATURE_FLAGS: "OrderedDict[str, dict[str, str]]" = OrderedDict(
     [
         # group: 用量报表
         (
-            "cube_usage_brief_template",
-            {"label": "用量简报模板", "group": "用量报表"},
-        ),
-        (
             "cube_usage_brief_default",
             {"label": "简报默认路由", "group": "用量报表"},
-        ),
-        (
-            "cube_multi_scope_brief",
-            {"label": "多客户多模型日报简报", "group": "用量报表"},
-        ),
-        (
-            "cube_multi_scope_weekly_brief",
-            {"label": "多客户多模型周报简报", "group": "用量报表"},
-        ),
-        (
-            "cube_machine_tpm_report",
-            {"label": "单机折算 TPM 峰值", "group": "用量报表"},
         ),
         (
             "cube_admin_skill_help",
             {"label": "Cube 灵活查询帮助", "group": "用量报表"},
         ),
         # group: 小时 TPM
-        (
-            "cube_customer_model_hourly_tpm",
-            {"label": "小时 TPM 报告", "group": "小时 TPM"},
-        ),
-        (
-            "cube_customer_model_hourly_tpm_subscription",
-            {"label": "小时 TPM 订阅播报", "group": "小时 TPM"},
-        ),
+        # (The hourly report/subscription family flags were retired to the
+        # usage_customer_model_hourly_tpm template policy in phase 2d.)
         # group: 订阅
         (
             "cube_subscription",
@@ -60,34 +44,16 @@ RUNTIME_FEATURE_FLAGS: "OrderedDict[str, dict[str, str]]" = OrderedDict(
         ),
         (
             "cube_subscription_nlu_v2",
-            {"label": "自然语言订阅 V2", "group": "订阅"},
-        ),
-        (
-            "cube_subscription_nlu_v3",
-            {"label": "自然语言订阅 V3（路由抢占）", "group": "订阅"},
+            {"label": "自然语言订阅", "group": "订阅"},
         ),
         (
             "cube_report_reference_subscription",
             {"label": "引用报表创建订阅", "group": "订阅"},
         ),
         # group: 健康报告
-        (
-            "cube_health_report",
-            {"label": "健康报告", "group": "健康报告"},
-        ),
-        (
-            "cube_health_subscription",
-            {"label": "健康报告订阅", "group": "健康报告"},
-        ),
+        # (Retired to the health_sre template policy in phase 2d.)
         # group: 供应商质量
-        (
-            "cube_provider_quality_report",
-            {"label": "供应商质量报告", "group": "供应商质量"},
-        ),
-        (
-            "cube_provider_quality_subscription",
-            {"label": "供应商质量订阅", "group": "供应商质量"},
-        ),
+        # (Retired to the provider_quality template policy in phase 2d.)
         # group: 成本报表
         # Promoted from config-level gating in the 2026-09-16 consolidation
         # (phase 2c): report execution and subscription creation are runtime
@@ -103,6 +69,9 @@ RUNTIME_FEATURE_FLAGS: "OrderedDict[str, dict[str, str]]" = OrderedDict(
             {"label": "成本报表订阅", "group": "成本报表"},
         ),
         # group: 管理界面
+        # report_management_v1 gates only the WebUI management surface and
+        # guided forms since phase 2a; the template policy itself is always
+        # enforced.
         (
             "report_management_v1",
             {"label": "Report platform 管理页", "group": "管理界面"},

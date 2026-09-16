@@ -2633,14 +2633,43 @@ def report_policy_migrate_flags(
     consolidation; back up the report state store first.
     """
 
+    from nanobot.config.loader import load_config
     from nanobot.reporting import (
         configured_report_state_store,
         migrate_flag_overrides_to_template_policies,
     )
 
+    # Config-level non-default values of the retired flags migrate alongside
+    # store overrides; absent values fall back to the source defaults.
+    config = load_config()
+    reporting = getattr(getattr(config, "tools", None), "reporting", None)
+    config_defaults = (
+        {
+            name: bool(getattr(reporting, name))
+            for name in (
+                "cube_usage_brief_template",
+                "cube_multi_scope_brief",
+                "cube_multi_scope_weekly_brief",
+                "cube_machine_tpm_report",
+                "cube_customer_model_hourly_tpm",
+                "cube_customer_model_hourly_tpm_subscription",
+                "cube_health_report",
+                "cube_health_subscription",
+                "cube_provider_quality_report",
+                "cube_provider_quality_subscription",
+            )
+            if hasattr(reporting, name)
+        }
+        if reporting is not None
+        else {}
+    )
+
     store = configured_report_state_store()
     report = migrate_flag_overrides_to_template_policies(
-        store, updated_by="cli:migrate-flags", dry_run=dry_run
+        store,
+        updated_by="cli:migrate-flags",
+        dry_run=dry_run,
+        config_defaults=config_defaults,
     )
     mode = "planned" if dry_run else "created"
     console.print(

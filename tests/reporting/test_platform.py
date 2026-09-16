@@ -486,6 +486,108 @@ def test_service_denies_machine_tpm_peak_without_management_flag(tmp_path) -> No
         )
 
 
+def test_template_policy_matrix_visibility_and_subscription(tmp_path) -> None:
+    """Phase 2d two-layer contract on one template.
+
+    ``enabled`` gates visibility and execution; ``subscription_mode`` gates
+    only new subscriptions and must NOT hide the capability. The retired
+    per-template runtime flags used to blur exactly this boundary.
+    """
+
+    store = ReportStateStore(tmp_path / "state.db")
+    registry = build_default_registry(
+        discover_external=False,
+        magik_enabled=True,
+        cube_config=MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="",
+        ),
+    )
+    config = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(report_management_v1=True, timezone="Asia/Shanghai")
+        ),
+        agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+    )
+
+    def resolve_tenants(values: list[str]):
+        return (
+            [
+                {"query": value, "tenant_id": value, "display_name": value}
+                for value in values
+            ],
+            [],
+        )
+
+    def resolve_models(tenant_ids: list[str], models: list[str]):
+        return {tenant_id: list(models) for tenant_id in tenant_ids}, []
+
+    service = ReportSubscriptionService(
+        config=config,
+        store=store,
+        registry=registry,
+        cron=CronService(tmp_path / "cron" / "jobs.json"),
+        tenant_resolver=resolve_tenants,
+        model_resolver=resolve_models,
+    )
+    form = {
+        "template_id": "usage_customer_model_daily_brief",
+        "channel": "feishu",
+        "chat_id": "chat-a",
+        "user_id": "ou-a",
+        "tenant_scope": "selected",
+        "tenants": ["tenant-a"],
+        "model_scope": "all",
+        "models": [],
+        "period": "day",
+        "recurrence": "every_day",
+        "send_time": "10:00",
+        "weekday": 1,
+        "month_day": 1,
+        "timezone": "Asia/Shanghai",
+    }
+
+    def visible() -> set[str]:
+        return {
+            item.capability_id
+            for item in capability_catalog(
+                registry, store, channel="feishu", user_id="ou-a"
+            )
+        }
+
+    # No policy row: visible and subscribable.
+    assert "multi_scope_brief" in visible()
+    service.create(form)
+
+    # subscription_mode=disabled blocks only new subscriptions; the
+    # capability stays visible (mode is a creation gate, not a hide gate).
+    store.set_template_policy(
+        "usage_customer_model_daily_brief",
+        enabled=True,
+        subscription_mode="disabled",
+        updated_by="test",
+        expected_revision=0,
+    )
+    assert "multi_scope_brief" in visible()
+    with pytest.raises(SubscriptionServiceError, match="does not allow subscriptions"):
+        service.create(form)
+
+    # enabled=False hides the capability and denies creation with the
+    # disabled wording (execution denial is pinned by the runner test).
+    store.set_template_policy(
+        "usage_customer_model_daily_brief",
+        enabled=False,
+        subscription_mode="all_authorized",
+        updated_by="test",
+        expected_revision=1,
+    )
+    assert "multi_scope_brief" not in visible()
+    with pytest.raises(SubscriptionServiceError, match="this report template is disabled"):
+        service.create(form)
+
+
 def test_declarative_template_rejects_executable_fields() -> None:
     with pytest.raises(ValueError, match="unsupported template fields"):
         parse_template_spec(
