@@ -2526,28 +2526,14 @@ def report_plugins_list() -> None:
     """List fail-isolated report connectors and compatible templates."""
 
     from nanobot.config.loader import load_config
-    from nanobot.reporting import build_default_registry
+    from nanobot.reporting import build_default_registry, default_registry_kwargs
 
     config = load_config()
     registry = build_default_registry(
-        magik_enabled=bool(config.tools.magik_cube.enable),
-        grafana_config=getattr(config.tools.reporting, "grafana", None),
-        cube_config=config.tools.magik_cube,
-        cube_templates_enabled=bool(getattr(config.tools.reporting, "cube_template", True)),
-        cube_health_semantics_v2=bool(
-            getattr(config.tools.reporting, "cube_health_semantics_v2", False)
-        ),
-        cube_health_card_v2=bool(
-            getattr(config.tools.reporting, "cube_health_card_v2", False)
-        ),
-        cube_ttft_detail_enabled=bool(
-            getattr(config.tools.reporting, "cube_ttft_detail", False)
-        ),
-        cube_usage_semantics_v2=bool(
-            getattr(config.tools.reporting, "cube_usage_semantics_v2", False)
-        ),
-        timezone=str(getattr(config.tools.reporting, "timezone", "Asia/Shanghai")),
-        health_thresholds=getattr(config.tools.reporting, "health_thresholds", None),
+        # Single construction source: the CLI view must match the Gateway's
+        # registry, including the grafana_connector gate and cost/provider
+        # detail flags the previous local call skipped.
+        **default_registry_kwargs(config.tools.reporting, config.tools.magik_cube)
     )
     table = Table(title="Report plugins")
     table.add_column("Kind")

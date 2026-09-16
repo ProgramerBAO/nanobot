@@ -24,6 +24,7 @@ import {
   fetchReportingSettings,
   fetchReportingSubscriptionOptions,
   runReportingSettingsAction,
+  type ReportingSettingsAction,
 } from "@/lib/api";
 import type {
   ReportingFeatureFlag,
@@ -35,22 +36,9 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type ReportAction =
-  | "rbac"
-  | "grant"
-  | "revoke"
-  | "export"
-  | "feature_flag"
-  | "feature_flag_reset"
-  | "template_policy"
-  | "subscription_create"
-  | "subscription_preview"
-  | "subscription_create_guided"
-  | "subscription_update"
-  | "subscription_enable"
-  | "subscription_disable"
-  | "subscription_schedule"
-  | "subscription_delete";
+// Derived from the shared api-side action union: this component never
+// dispatches subscription_options itself (it uses the dedicated fetch).
+type ReportAction = Exclude<ReportingSettingsAction, "subscription_options">;
 
 type GuidedFormState = {
   template_id: string;

@@ -1,6 +1,6 @@
 """Channel-neutral deterministic reporting platform contracts."""
 
-from nanobot.reporting.builtins import build_default_registry
+from nanobot.reporting.builtins import build_default_registry, default_registry_kwargs
 from nanobot.reporting.contracts import (
     CANONICAL_DIMENSIONS,
     CANONICAL_METRICS,
@@ -125,6 +125,7 @@ __all__ = [
     "validate_report_query",
     "TextChannelRenderer",
     "build_default_registry",
+    "default_registry_kwargs",
     "configured_report_state_store",
     "create_report_state_store",
     "get_report_state_store",

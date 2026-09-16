@@ -2025,8 +2025,6 @@ async def test_health_report_is_direct_and_visible_only_when_flags_are_enabled(
         access_token="fixture-token",
     )
     config = ReportCenterToolConfig(
-        cube_health_connector=True,
-        cube_health_template=True,
         cube_health_report=True,
         cube_health_subscription=True,
         # Pin the v1 presentation so the status wording assertion below stays
@@ -2093,8 +2091,6 @@ async def test_health_subscription_supports_day_and_week_but_not_recent15m(
     store = ReportStateStore(tmp_path / "state.db")
     monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
     config = ReportCenterToolConfig(
-        cube_health_connector=True,
-        cube_health_template=True,
         cube_health_report=True,
         cube_health_subscription=True,
     )

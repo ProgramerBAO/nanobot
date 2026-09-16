@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import json_repair
 from loguru import logger
@@ -42,20 +42,28 @@ _SUBSCRIPTION_SIGNAL_RE = re.compile(
     r"(?:日报|周报|月报|简报|这份报表|该报表|TPM|tpm)",
     re.IGNORECASE,
 )
-_VALID_REPORT_TYPES = frozenset(
-    {
-        "usage_daily_brief",
-        "usage_weekly_brief",
-        "usage_monthly_brief",
-        "usage_customer_model_daily_brief",
-        "usage_customer_model_hourly_tpm",
-        "inherit",
-    }
+# Runtime validation sets derive from the Literal surfaces above so each
+# surface is defined exactly once. The classifier surface intentionally
+# excludes usage_customer_model_weekly_brief: the deterministic compiler
+# derives that template from period + scope instead of trusting the model
+# to name it. A contract test pins these sets equal to the schedules.py
+# single-source constants.
+_VALID_REPORT_TYPES = frozenset(get_args(SubscriptionReportType))
+_VALID_RECURRENCES = frozenset(get_args(SubscriptionRecurrence))
+_VALID_MODEL_SCOPES = frozenset(get_args(SubscriptionModelScope))
+# Shared "全部客户 / 全部模型" wording guards. The deterministic parser and
+# the channel-side intent compiler both treat these quantifier phrases as
+# explicit all-scope markers; they were previously duplicated as inline
+# patterns in both modules and could drift. (The legacy magik tool keeps its
+# own broader legacy variant, which additionally matches 各大/大客户.)
+EXPLICIT_ALL_TENANTS_RE = re.compile(
+    r"(?:全部|所有|全量|各个|每个|全体)\s*(?:客户|租户|用户)",
+    re.IGNORECASE,
 )
-_VALID_RECURRENCES = frozenset(
-    {"every_day", "workdays", "weekly", "monthly", "hourly"}
+EXPLICIT_ALL_MODELS_RE = re.compile(
+    r"(?:全部|所有|全量|各个|每个|全体)\s*模型",
+    re.IGNORECASE,
 )
-_VALID_MODEL_SCOPES = frozenset({"all", "selected", "summary", "inherit"})
 _PAYLOAD_FIELDS = frozenset(
     {
         "report_type",
@@ -197,7 +205,7 @@ def parse_deterministic_subscription_intent(
             inherit_report_scope=True,
         )
 
-    all_models = bool(re.search(r"(?:全部|所有|全量|各个|每个|全体)\s*模型", raw))
+    all_models = bool(EXPLICIT_ALL_MODELS_RE.search(raw))
     if recurrence == "hourly":
         # Deterministic hourly routing only covers the all-model hourly TPM
         # broadcast. Named models need the bounded classifier so the exact
@@ -207,8 +215,7 @@ def parse_deterministic_subscription_intent(
         if not all_models and re.search(r"[A-Za-z][A-Za-z0-9._-]{2,}", raw):
             return None
         tenant_scope: Literal["selected", "all", "inherit"] = (
-            "all" if re.search(r"(?:全部|所有|全量|各个|每个|全体)\s*(?:客户|租户|用户)", raw)
-            else "selected"
+            "all" if EXPLICIT_ALL_TENANTS_RE.search(raw) else "selected"
         )
         return CubeSubscriptionIntent(
             report_type="usage_customer_model_hourly_tpm",
@@ -235,8 +242,7 @@ def parse_deterministic_subscription_intent(
     else:
         return None
     tenant_scope: Literal["selected", "all", "inherit"] = (
-        "all" if re.search(r"(?:全部|所有|全量|各个|每个|全体)\s*(?:客户|租户|用户)", raw)
-        else "selected"
+        "all" if EXPLICIT_ALL_TENANTS_RE.search(raw) else "selected"
     )
     model_scope: SubscriptionModelScope = "all" if all_models else "summary"
     return CubeSubscriptionIntent(

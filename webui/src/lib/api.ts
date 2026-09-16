@@ -640,25 +640,31 @@ export async function fetchReportingSettings(
   );
 }
 
+// Single source of the reporting settings action names accepted by the
+// gateway. The component-level ReportAction union derives from this via
+// Exclude; the two lists were previously hand-maintained in parallel and
+// had already drifted (subscription_options existed only here).
+export type ReportingSettingsAction =
+  | "rbac"
+  | "grant"
+  | "revoke"
+  | "export"
+  | "feature_flag"
+  | "feature_flag_reset"
+  | "template_policy"
+  | "subscription_create"
+  | "subscription_enable"
+  | "subscription_disable"
+  | "subscription_schedule"
+  | "subscription_delete"
+  | "subscription_preview"
+  | "subscription_create_guided"
+  | "subscription_update"
+  | "subscription_options";
+
 export async function runReportingSettingsAction(
   token: string,
-  action:
-    | "rbac"
-    | "grant"
-    | "revoke"
-    | "export"
-    | "feature_flag"
-    | "feature_flag_reset"
-    | "template_policy"
-    | "subscription_create"
-    | "subscription_enable"
-    | "subscription_disable"
-    | "subscription_schedule"
-    | "subscription_delete"
-    | "subscription_preview"
-    | "subscription_create_guided"
-    | "subscription_update"
-    | "subscription_options",
+  action: ReportingSettingsAction,
   values: Record<string, unknown>,
   base: string = "",
 ): Promise<ReportingSettingsPayload> {

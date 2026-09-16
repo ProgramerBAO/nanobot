@@ -1646,8 +1646,11 @@ def build_default_registry(
     cube_provider_quality_detail_enabled: bool = False,
     timezone: str = "Asia/Shanghai",
     health_thresholds: Mapping[str, Any] | None = None,
-    wecom_renderer_enabled: bool = True,
-    dingtalk_renderer_enabled: bool = True,
+    # Defaults mirror ReportCenterToolConfig (False): a bare call must not
+    # register extension renderers the deployment has not enabled. Every
+    # deployment-aware caller resolves these via default_registry_kwargs.
+    wecom_renderer_enabled: bool = False,
+    dingtalk_renderer_enabled: bool = False,
 ) -> ReportPluginRegistry:
     registry = ReportPluginRegistry()
     registry.register_renderer(TextChannelRenderer())
@@ -1728,3 +1731,63 @@ def build_default_registry(
     if discover_external:
         registry.discover_entry_points()
     return registry
+
+
+def default_registry_kwargs(
+    reporting_config: Any,
+    magik_config: Any,
+    *,
+    magik_enabled: bool | None = None,
+) -> dict[str, Any]:
+    """Single source of the construction kwargs for :func:`build_default_registry`.
+
+    Every caller that needs a registry view of the configured deployment
+    (Gateway report tool, WebUI management payloads, Feishu onboarding, CLI,
+    channel delivery router) must resolve its kwargs here so all views agree.
+    Before this helper existed the four construction sites drifted: the Feishu
+    onboarding and CLI views skipped cost/provider-detail/wecom/dingtalk/grafana
+    parameters and used function defaults that contradicted the config
+    defaults, producing different "template catalogs" for the same deployment.
+
+    ``reporting_config`` is the ``tools.reporting`` config object (or the
+    ``ReportCenterToolConfig`` itself); ``magik_config`` is the
+    ``tools.magik_cube`` config. Both may be ``None`` or attribute-incomplete
+    (unit-test doubles): every read uses ``getattr`` with the source default.
+    ``magik_enabled`` lets the Gateway tool preserve its exact construction
+    rule (``magik_tool is not None and cube_connector``); when omitted it
+    resolves to ``magik_config.enable and cube_connector``.
+
+    Only construction-level semantics live here; enable/disable feature flags
+    deliberately do not gate registration (see the note inside
+    ``build_default_registry``). Credentials stay inside connector
+    configuration and are never copied into the mapping.
+    """
+
+    def flag(name: str, default: bool = False) -> bool:
+        return bool(getattr(reporting_config, name, default))
+
+    if magik_enabled is None:
+        magik_enabled = bool(getattr(magik_config, "enable", False)) and flag(
+            "cube_connector", True
+        )
+    return {
+        "magik_enabled": magik_enabled,
+        "grafana_config": (
+            getattr(reporting_config, "grafana", None)
+            if flag("grafana_connector")
+            else None
+        ),
+        "cube_config": magik_config,
+        "cube_templates_enabled": flag("cube_template", True),
+        "cube_health_semantics_v2": flag("cube_health_semantics_v2"),
+        "cube_health_card_v2": flag("cube_health_card_v2"),
+        "cube_ttft_detail_enabled": flag("cube_ttft_detail"),
+        "cube_usage_semantics_v2": flag("cube_usage_semantics_v2"),
+        "cube_cost_template_enabled": flag("cube_cost_connector")
+        and flag("cube_cost_template"),
+        "cube_provider_quality_detail_enabled": flag("cube_provider_quality_detail"),
+        "timezone": str(getattr(reporting_config, "timezone", "Asia/Shanghai")),
+        "health_thresholds": getattr(reporting_config, "health_thresholds", None),
+        "wecom_renderer_enabled": flag("wecom_renderer"),
+        "dingtalk_renderer_enabled": flag("dingtalk_renderer"),
+    }

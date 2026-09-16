@@ -19,7 +19,11 @@ from nanobot.config.loader import load_config, resolve_config_env_vars
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
-from nanobot.reporting import build_default_registry, get_report_state_store
+from nanobot.reporting import (
+    build_default_registry,
+    default_registry_kwargs,
+    get_report_state_store,
+)
 from nanobot.reporting.feature_flags import (
     RUNTIME_FEATURE_FLAG_KEYS,
     effective_feature_flags,
@@ -27,8 +31,11 @@ from nanobot.reporting.feature_flags import (
 )
 from nanobot.reporting.store import ReportSubscription
 from nanobot.reporting.subscriptions import (
+    DEFAULT_UNSUBSCRIBABLE_TEMPLATES,
+    POLICY_DENIED_ALLOWLIST,
     ReportSubscriptionService,
     SubscriptionServiceError,
+    evaluate_subscription_policy,
 )
 from nanobot.session.keys import session_key_for_channel
 from nanobot.utils.helpers import _write_text_atomic
@@ -292,41 +299,21 @@ def _magik_resolvers(config: Any):
 def _reporting_registry_kwargs(config: Any) -> dict[str, Any]:
     """Return one construction-flag mapping for runtime and management views.
 
-    Enable/disable feature flags no longer gate template registration: every
-    Cube template registers whenever the connector exists, and visibility is
+    Delegates to the shared :func:`nanobot.reporting.default_registry_kwargs`
+    so the WebUI registry view cannot drift from the Gateway's construction.
+    Enable/disable feature flags do not gate template registration: every
+    Cube template registers whenever its connector exists, and visibility is
     filtered per request from the effective flags (store override or config
     default). Only construction-level semantics (version switches,
-    thresholds, include_details, renderers) remain here. Credentials stay
-    inside connector configuration and are never copied into the mapping.
+    thresholds, include_details, renderers) are resolved there. Credentials
+    stay inside connector configuration and are never copied into the mapping.
     """
 
     tools = getattr(config, "tools", None)
-    reporting = getattr(tools, "reporting", None)
-    magik_config = getattr(tools, "magik_cube", None)
-
-    def flag(name: str, default: bool = False) -> bool:
-        return bool(getattr(reporting, name, default))
-
-    return {
-        "magik_enabled": bool(getattr(magik_config, "enable", False))
-        and flag("cube_connector", True),
-        "grafana_config": (
-            getattr(reporting, "grafana", None) if flag("grafana_connector") else None
-        ),
-        "cube_config": magik_config,
-        "cube_templates_enabled": flag("cube_template", True),
-        "cube_health_semantics_v2": flag("cube_health_semantics_v2"),
-        "cube_health_card_v2": flag("cube_health_card_v2"),
-        "cube_ttft_detail_enabled": flag("cube_ttft_detail"),
-        "cube_usage_semantics_v2": flag("cube_usage_semantics_v2"),
-        "cube_cost_template_enabled": flag("cube_cost_connector")
-        and flag("cube_cost_template"),
-        "cube_provider_quality_detail_enabled": flag("cube_provider_quality_detail"),
-        "timezone": str(getattr(reporting, "timezone", "Asia/Shanghai")),
-        "health_thresholds": getattr(reporting, "health_thresholds", None),
-        "wecom_renderer_enabled": flag("wecom_renderer"),
-        "dingtalk_renderer_enabled": flag("dingtalk_renderer"),
-    }
+    return default_registry_kwargs(
+        getattr(tools, "reporting", None),
+        getattr(tools, "magik_cube", None),
+    )
 
 
 def _subscription_service(
@@ -504,7 +491,7 @@ def reporting_settings_payload(query: QueryParams | None = None) -> dict[str, An
     persisted_policies = {
         item["template_id"]: item for item in store.template_policies()
     }
-    default_non_subscribable = {"machine_tpm_peak"}
+    default_non_subscribable = DEFAULT_UNSUBSCRIBABLE_TEMPLATES
     template_policies = []
     for item in registry.public_catalog().get("templates", []):
         stored = persisted_policies.get(str(item.get("id") or ""))
@@ -645,7 +632,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
         persisted_policies = {
             item["template_id"]: item for item in store.template_policies()
         }
-        default_non_subscribable = {"machine_tpm_peak"}
+        default_non_subscribable = DEFAULT_UNSUBSCRIBABLE_TEMPLATES
 
         def template_subscription_view(template_id: str) -> dict[str, Any]:
             """Keep editor options consistent with the persisted policy view."""
@@ -989,19 +976,17 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
             (item for item in store.template_policies() if item["template_id"] == template_id),
             None,
         )
-        default_disabled = template_id in {"machine_tpm_peak"}
-        if (
-            policy
-            and (not policy["enabled"] or policy["subscription_mode"] == "disabled")
-        ) or (policy is None and default_disabled):
+        reason = evaluate_subscription_policy(template_id, policy)
+        if reason == POLICY_DENIED_ALLOWLIST:
+            if not store.allowed(
+                _required(query, "channel", max_length=32),
+                _required(query, "user_id"),
+                "subscription_template",
+                template_id,
+            ):
+                raise ReportingSettingsError("user is not allowed to subscribe to this template", status=403)
+        elif reason is not None:
             raise ReportingSettingsError("this report template does not allow subscriptions", status=403)
-        if policy and policy["subscription_mode"] == "allowlist" and not store.allowed(
-            _required(query, "channel", max_length=32),
-            _required(query, "user_id"),
-            "subscription_template",
-            template_id,
-        ):
-            raise ReportingSettingsError("user is not allowed to subscribe to this template", status=403)
         channel = _required(query, "channel", max_length=32)
         chat_id = _required(query, "chat_id")
         user_id = _required(query, "user_id")

@@ -994,12 +994,17 @@ class ChannelManager:
             DeliveryRouter,
             build_default_registry,
             configured_report_state_store,
+            default_registry_kwargs,
         )
 
         report_registry = registry or build_default_registry(
-            grafana_config=getattr(self.config.tools.reporting, "grafana", None),
-            magik_enabled=bool(self.config.tools.magik_cube.enable),
-            cube_config=self.config.tools.magik_cube,
+            # Single construction source: the delivery router view must match
+            # the Gateway registry (the previous local call skipped the
+            # cube_connector/grafana_connector gates and the renderer flags).
+            **default_registry_kwargs(
+                self.config.tools.reporting,
+                self.config.tools.magik_cube,
+            )
         )
         report_store = store or configured_report_state_store()
         max_attempts = int(getattr(self.config.channels, "send_max_retries", 3) or 3)

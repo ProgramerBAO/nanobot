@@ -167,8 +167,6 @@ def test_provider_quality_requires_explicit_provider_quality_filters() -> None:
 def test_provider_quality_fixed_phrases_and_help_entry(tmp_path: Path) -> None:
     tool = ReportCenterTool(
         ReportCenterToolConfig(
-            cube_provider_quality_connector=True,
-            cube_provider_quality_template=True,
             cube_provider_quality_report=True,
         ),
         cron_service=None,

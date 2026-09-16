@@ -27,7 +27,12 @@ from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
 from nanobot.reporting.authorization import authorize_magik_params
 from nanobot.reporting.registry import ReportPluginRegistry
-from nanobot.reporting.schedules import build_subscription_schedule, describe_subscription_schedule
+from nanobot.reporting.schedules import (
+    RECURRENCE_SCHEDULE_PERIODS,
+    SUBSCRIPTION_RECURRENCES,
+    build_subscription_schedule,
+    describe_subscription_schedule,
+)
 from nanobot.reporting.store import ReportStateStore, ReportSubscription
 from nanobot.session.keys import session_key_for_channel
 
@@ -73,6 +78,53 @@ _ALLOWED_CHANNELS = frozenset({"feishu", "wecom", "dingtalk", "webhook", "text"}
 _UNSAFE_TEXT_RE = re.compile(r"(?:https?://|bearer\s+|password|api[_-]?key|secret)", re.I)
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _SAFE_CUBE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# Runtime view of the schedules.py recurrence single source.
+_RECURRENCE_CHOICES = frozenset(SUBSCRIPTION_RECURRENCES)
+# Templates that deny new subscriptions when the management plane is active
+# but no explicit policy row exists. Every enforcement and management-payload
+# surface (service check, channel-side denial, WebUI default display, legacy
+# creation path) must read this one set; it was previously repeated as inline
+# literals in five places and could drift silently.
+DEFAULT_UNSUBSCRIBABLE_TEMPLATES: frozenset[str] = frozenset({"machine_tpm_peak"})
+
+# Semantic denial reasons returned by evaluate_subscription_policy. Each
+# caller maps them to its own user-facing message (channel text vs WebUI
+# errors), so wording stays per-surface while the policy-table semantics
+# cannot drift.
+POLICY_DENIED_DEFAULT_DISABLED = "default_disabled"
+POLICY_DENIED_TEMPLATE_DISABLED = "template_disabled"
+POLICY_DENIED_MODE_DISABLED = "mode_disabled"
+POLICY_DENIED_ALLOWLIST = "allowlist"
+
+
+def evaluate_subscription_policy(
+    template_id: str,
+    policy: Mapping[str, Any] | None,
+) -> str | None:
+    """Single-source evaluation of the stored template policy for new subscriptions.
+
+    Returns ``None`` when the policy allows a new subscription, or one of the
+    ``POLICY_DENIED_*`` reasons. Callers keep their own message wording and
+    perform the allowlist ``subscription_template`` grant check themselves
+    (it needs the caller's store/user context); lifecycle, RBAC, and the
+    management-plane gate also stay per-caller because the channel path and
+    the service path intentionally apply them in different orders. Only the
+    policy-table semantics live here — three previous copies of this table
+    walk had already drifted in default handling.
+    """
+
+    if policy is None:
+        if template_id in DEFAULT_UNSUBSCRIBABLE_TEMPLATES:
+            return POLICY_DENIED_DEFAULT_DISABLED
+        return None
+    if not policy["enabled"]:
+        return POLICY_DENIED_TEMPLATE_DISABLED
+    mode = str(policy["subscription_mode"])
+    if mode == "disabled":
+        return POLICY_DENIED_MODE_DISABLED
+    if mode == "allowlist":
+        return POLICY_DENIED_ALLOWLIST
+    return None
 
 
 class SubscriptionServiceError(ValueError):
@@ -227,19 +279,14 @@ def _recurrence(value: Any) -> str:
         "每小时播报": "hourly",
     }
     result = aliases.get(str(value or "").strip(), str(value or "").strip() or "workdays")
-    if result not in {"every_day", "workdays", "weekly", "monthly", "hourly"}:
+    if result not in _RECURRENCE_CHOICES:
         raise SubscriptionServiceError("不支持的订阅频率")
     return result
 
 
 def _schedule_period(recurrence: str) -> str:
-    return {
-        "every_day": "day",
-        "workdays": "day",
-        "weekly": "week",
-        "monthly": "month",
-        "hourly": "recent1h",
-    }[recurrence]
+    # Shared single-source table; a validated recurrence always maps.
+    return RECURRENCE_SCHEDULE_PERIODS[recurrence]
 
 
 class ReportSubscriptionService:
@@ -312,25 +359,19 @@ class ReportSubscriptionService:
         if not self._management_enabled():
             return
         policy = self.store.template_policy(template_id)
-        default_disabled = template_id in {"machine_tpm_peak"}
-        if policy is None:
-            if default_disabled:
+        reason = evaluate_subscription_policy(template_id, policy)
+        if reason == POLICY_DENIED_ALLOWLIST:
+            if not self.store.allowed(
+                channel, user_id, "subscription_template", template_id
+            ):
                 raise SubscriptionServiceError(
-                    "this report template does not allow subscriptions", status=403
+                    "user is not allowed to subscribe to this template", status=403
                 )
-            return
-        if not policy["enabled"]:
+        elif reason == POLICY_DENIED_TEMPLATE_DISABLED:
             raise SubscriptionServiceError("this report template is disabled", status=403)
-        mode = str(policy["subscription_mode"])
-        if mode == "disabled":
+        elif reason is not None:
             raise SubscriptionServiceError(
                 "this report template does not allow subscriptions", status=403
-            )
-        if mode == "allowlist" and not self.store.allowed(
-            channel, user_id, "subscription_template", template_id
-        ):
-            raise SubscriptionServiceError(
-                "user is not allowed to subscribe to this template", status=403
             )
 
     def _authorize_compiled_scope(self, compiled: CompiledSubscriptionForm) -> None:

@@ -5117,7 +5117,11 @@ class FeishuChannel(BaseChannel):
         if not user_id or not chat_id or not self.is_allowed(user_id):
             return
         from nanobot.config.loader import load_config
-        from nanobot.reporting import build_default_registry, configured_report_state_store
+        from nanobot.reporting import (
+            build_default_registry,
+            configured_report_state_store,
+            default_registry_kwargs,
+        )
         from nanobot.reporting.capabilities import home_document
         from nanobot.reporting.feature_flags import effective_feature_flags
 
@@ -5130,25 +5134,14 @@ class FeishuChannel(BaseChannel):
         if store.onboarding_seen(self.name, user_id, version):
             return
         registry = build_default_registry(
-            magik_enabled=bool(config.tools.magik_cube.enable),
-            cube_config=config.tools.magik_cube,
-            cube_health_semantics_v2=bool(
-                getattr(reporting_config, "cube_health_semantics_v2", False)
-            ),
-            cube_health_card_v2=bool(
-                getattr(reporting_config, "cube_health_card_v2", False)
-            ),
-            cube_ttft_detail_enabled=bool(
-                getattr(reporting_config, "cube_ttft_detail", False)
-            ),
-            cube_usage_semantics_v2=bool(
-                getattr(reporting_config, "cube_usage_semantics_v2", False)
-            ),
-            cube_provider_quality_detail_enabled=bool(
-                getattr(reporting_config, "cube_provider_quality_detail", False)
-            ),
-            health_thresholds=getattr(reporting_config, "health_thresholds", None),
-            timezone=str(getattr(reporting_config, "timezone", "Asia/Shanghai")),
+            # Single construction source: the onboarding home must show the
+            # same connector/template set the Gateway report tool registers,
+            # including the cube_connector gate the previous local call
+            # skipped.
+            **default_registry_kwargs(
+                reporting_config,
+                config.tools.magik_cube,
+            )
         )
         # Home visibility reads the effective runtime flags (store override
         # or configured default) so page toggles apply without a restart.
@@ -5162,10 +5155,12 @@ class FeishuChannel(BaseChannel):
             channel=self.name,
             user_id=user_id,
             health_enabled=flags["cube_health_report"],
+            # Connector availability is derived from the registry exactly like
+            # the Gateway tool does; the former per-field config switches were
+            # read nowhere else and have been removed.
             provider_quality_enabled=(
                 flags["cube_provider_quality_report"]
-                and bool(getattr(reporting_config, "cube_provider_quality_connector", False))
-                and bool(getattr(reporting_config, "cube_provider_quality_template", False))
+                and registry.connector("cube_provider_quality") is not None
             ),
         )
         await self.send(

@@ -19,6 +19,8 @@ from loguru import logger
 from pydantic import Field, field_validator
 
 from nanobot.agent.reporting.cube_subscription_intent import (
+    EXPLICIT_ALL_MODELS_RE,
+    EXPLICIT_ALL_TENANTS_RE,
     CubeSubscriptionIntent,
     classify_subscription_intent,
     is_subscription_intent_candidate,
@@ -44,6 +46,7 @@ from nanobot.reporting import (
     ReportRunContext,
     ReportRunner,
     build_default_registry,
+    default_registry_kwargs,
 )
 from nanobot.reporting.authorization import authorize_magik_params
 from nanobot.reporting.capabilities import (
@@ -59,11 +62,23 @@ from nanobot.reporting.cube import normalize_health_thresholds
 from nanobot.reporting.feature_flags import RUNTIME_FEATURE_FLAG_KEYS
 from nanobot.reporting.interactions import report_interactions
 from nanobot.reporting.provider_quality import provider_quality_selector_document
-from nanobot.reporting.schedules import build_subscription_schedule
+from nanobot.reporting.schedules import (
+    BRIEF_PERIOD_TEMPLATES,
+    DAILY_MODES,
+    PERIOD_TEMPLATES,
+    RECURRENCE_SCHEDULE_PERIODS,
+    SUBSCRIPTION_RECURRENCES,
+    SUBSCRIPTION_REPORT_TYPE_ENUM,
+    SUBSCRIPTION_REPORT_TYPE_TABLE,
+    build_subscription_schedule,
+)
 from nanobot.reporting.store import ReportSubscription, get_report_state_store
 from nanobot.reporting.subscriptions import (
+    POLICY_DENIED_ALLOWLIST,
+    POLICY_DENIED_TEMPLATE_DISABLED,
     ReportSubscriptionService,
     SubscriptionServiceError,
+    evaluate_subscription_policy,
 )
 from nanobot.utils.report_failures import is_transient_report_failure
 
@@ -78,14 +93,6 @@ _SUBSCRIPTION_CONTROL_RE = re.compile(
 _BRIEF_SUBSCRIPTION_RE = re.compile(
     r"^订阅(?P<period>日报|周报|月报)简报：客户 (?P<tenant>[^，（]{1,128})"
     r"(?:（ID (?P<tenant_id>[^）]{1,128})）)?，模型 (?P<models>[^，]{1,512})$"
-)
-_EXPLICIT_ALL_TENANTS_RE = re.compile(
-    r"(?:全部|所有|全量|各个|每个|全体)\s*(?:客户|租户|用户)",
-    re.IGNORECASE,
-)
-_EXPLICIT_ALL_MODELS_RE = re.compile(
-    r"(?:全部|所有|全量|各个|每个|全体)\s*模型",
-    re.IGNORECASE,
 )
 # A quoted report owns its verified scope.  Only these explicit entity words
 # indicate that the user is asking to override that scope; schedule/recipient
@@ -217,20 +224,6 @@ _ALLOWED_REPORT_PARAM_KEYS = frozenset(
         "report_template_id",
     }
 )
-_PERIOD_TEMPLATES: dict[str, str] = {
-    "day": "usage_daily_matrix",
-    "week": "usage_weekly_matrix",
-    "month": "usage_monthly_matrix",
-    "recent7": "usage_custom_matrix",
-    "range": "usage_custom_matrix",
-}
-_BRIEF_PERIOD_TEMPLATES: dict[str, str] = {
-    "day": "usage_daily_brief",
-    "week": "usage_weekly_brief",
-    "month": "usage_monthly_brief",
-    "recent7": "usage_custom_brief",
-    "range": "usage_custom_brief",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,11 +262,11 @@ class ReportCenterToolConfig(Base):
     # Usage-family features default on (2026-09-15 product decision): they are
     # read-only Cube routes and fail closed without credentials. Runtime
     # on/off control lives in the report_feature_flags store overrides, so
-    # deployments no longer edit config.json per environment. The semantics
+    # deployments no longer edit config.json per environment. Connector and
+    # template availability is registry-derived at construction time, so there
+    # are no separate health connector/template switches. The semantics
     # and TTFT switches below select calculation/presentation versions and
     # stay config-level (restart to change).
-    cube_health_connector: bool = True
-    cube_health_template: bool = True
     cube_health_report: bool = True
     cube_health_subscription: bool = True
     cube_health_semantics_v2: bool = True
@@ -306,10 +299,11 @@ class ReportCenterToolConfig(Base):
     cube_cost_report: bool = False
     cube_cost_subscription: bool = False
     # Provider quality is a read-only Cube route and defaults on together
-    # with the usage family; include_details only enriches the report. The
+    # with the usage family; include_details only enriches the report.
+    # Connector availability is registry-derived (the connector registers
+    # whenever the Cube config exists), so there are no separate provider
+    # connector/template switches. The
     # subscription flag stays opt-in per the approved rollout scope.
-    cube_provider_quality_connector: bool = True
-    cube_provider_quality_template: bool = True
     cube_provider_quality_report: bool = True
     cube_provider_quality_detail: bool = True
     cube_provider_quality_subscription: bool = False
@@ -399,15 +393,7 @@ _REPORT_CENTER_PARAMETERS = {
         },
         "report_type": {
             "type": "string",
-            "enum": [
-                "usage_daily_brief",
-                "usage_weekly_brief",
-                "usage_monthly_brief",
-                "usage_customer_model_daily_brief",
-                "usage_customer_model_weekly_brief",
-                "usage_customer_model_hourly_tpm",
-                "inherit",
-            ],
+            "enum": list(SUBSCRIPTION_REPORT_TYPE_ENUM),
         },
         "tenant_scope": {"type": "string", "enum": ["selected", "all", "inherit"]},
         "tenant_aliases": {
@@ -442,7 +428,7 @@ _REPORT_CENTER_PARAMETERS = {
         },
         "recurrence": {
             "type": "string",
-            "enum": ["every_day", "workdays", "weekly", "monthly", "hourly"],
+            "enum": list(SUBSCRIPTION_RECURRENCES),
         },
         "tenant_query": {"type": "string", "maxLength": 128},
         "tenants": {
@@ -492,7 +478,7 @@ _REPORT_CENTER_PARAMETERS = {
         "interactive": {"type": "boolean"},
         "all_tenants": {"type": "boolean"},
         "send_time": {"type": "string", "maxLength": 5},
-        "daily_mode": {"type": "string", "enum": ["workdays", "every_day"]},
+        "daily_mode": {"type": "string", "enum": list(DAILY_MODES)},
         "weekday": {"type": "integer", "minimum": 1, "maximum": 7},
         "month_day": {"type": "integer", "minimum": 1, "maximum": 28},
         "report_params": {"type": "object"},
@@ -548,24 +534,17 @@ class ReportCenterTool(Tool):
             postgres_dsn_env=config.postgres_dsn_env,
         )
         self._registry = build_default_registry(
-            magik_enabled=magik_tool is not None and config.cube_connector,
-            grafana_config=(
-                getattr(config, "grafana", None)
-                if config.grafana_connector
-                else None
-            ),
-            cube_config=cube_config,
-            cube_templates_enabled=config.cube_template,
-            cube_health_semantics_v2=config.cube_health_semantics_v2,
-            cube_health_card_v2=config.cube_health_card_v2,
-            cube_ttft_detail_enabled=config.cube_ttft_detail,
-            cube_usage_semantics_v2=config.cube_usage_semantics_v2,
-            cube_cost_template_enabled=(config.cube_cost_connector and config.cube_cost_template),
-            cube_provider_quality_detail_enabled=config.cube_provider_quality_detail,
-            timezone=config.timezone,
-            health_thresholds=config.health_thresholds,
-            wecom_renderer_enabled=config.wecom_renderer,
-            dingtalk_renderer_enabled=config.dingtalk_renderer,
+            **default_registry_kwargs(
+                config,
+                cube_config,
+                # Preserve the exact Gateway construction rule: the magik tool
+                # instance must exist and the connector flag must be on.
+                # Production create() guarantees tool-exists == magik enabled;
+                # direct test constructions may pass a tool with
+                # cube_config=None, which must still register the shell
+                # connector rather than dropping it entirely.
+                magik_enabled=magik_tool is not None and config.cube_connector,
+            )
         )
         if config.rbac_enforced:
             self._store.set_rbac_enabled(True)
@@ -1028,7 +1007,7 @@ class ReportCenterTool(Tool):
         tenant_resolution = await self._resolve_catalog_tenant_mentions(
             text, intent.tenant_aliases
         )
-        explicit_all_tenants = bool(_EXPLICIT_ALL_TENANTS_RE.search(text))
+        explicit_all_tenants = bool(EXPLICIT_ALL_TENANTS_RE.search(text))
         if tenant_resolution.error == "catalog_unavailable":
             return {
                 "action": "subscription_scope_failed",
@@ -1084,14 +1063,14 @@ class ReportCenterTool(Tool):
         # the schema boundary.  The explicit phrase in the original message is
         # authoritative for model scope, so a single accidentally extracted
         # model must never narrow an ``all models`` subscription.
-        if _EXPLICIT_ALL_MODELS_RE.search(text):
+        if EXPLICIT_ALL_MODELS_RE.search(text):
             intent = replace(intent, model_scope="all", models=())
         if (
             intent.report_type in {"usage_daily_brief", "usage_customer_model_daily_brief"}
             and (
                 intent.report_type == "usage_customer_model_daily_brief"
                 or len(merged_aliases) > 1
-                or (_EXPLICIT_ALL_TENANTS_RE.search(text) and _EXPLICIT_ALL_MODELS_RE.search(text))
+                or (EXPLICIT_ALL_TENANTS_RE.search(text) and EXPLICIT_ALL_MODELS_RE.search(text))
             )
         ):
             # Keep the grouped template for a multi-customer daily subscription;
@@ -1100,8 +1079,8 @@ class ReportCenterTool(Tool):
             intent = replace(
                 intent,
                 report_type="usage_customer_model_daily_brief",
-                model_scope="all" if _EXPLICIT_ALL_MODELS_RE.search(text) else intent.model_scope,
-                models=() if _EXPLICIT_ALL_MODELS_RE.search(text) else intent.models,
+                model_scope="all" if EXPLICIT_ALL_MODELS_RE.search(text) else intent.model_scope,
+                models=() if EXPLICIT_ALL_MODELS_RE.search(text) else intent.models,
             )
         return self._subscription_preview_params(
             intent, reference_message_id=reference_message_id
@@ -1975,9 +1954,9 @@ class ReportCenterTool(Tool):
             }
             return await self._magik_tool.execute(**legacy_params)
         template_id = (
-            _BRIEF_PERIOD_TEMPLATES[period]
+            BRIEF_PERIOD_TEMPLATES[period]
             if report_template == "brief"
-            else _PERIOD_TEMPLATES[period]
+            else PERIOD_TEMPLATES[period]
         )
         intent = ReportIntent(
             connector_id="magik_cube",
@@ -2451,9 +2430,7 @@ class ReportCenterTool(Tool):
             # every callback back into this action, mirroring the multi-scope
             # brief workflow. Scope validation stays server-side.
             now = datetime.now(ZoneInfo(self._config.timezone))
-            previous_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(
-                hours=1
-            )
+            previous_hour = self._previous_complete_hour(now)
             result = await self._magik_tool.execute(
                 start_date=previous_hour.date().isoformat(),
                 end_date=previous_hour.date().isoformat(),
@@ -2533,9 +2510,7 @@ class ReportCenterTool(Tool):
             )
             if discovery_tenants:
                 now = datetime.now(ZoneInfo(self._config.timezone))
-                previous_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(
-                    hours=1
-                )
+                previous_hour = self._previous_complete_hour(now)
                 try:
                     discovered.update(
                         await self._load_tenant_model_catalog(
@@ -3024,19 +2999,17 @@ class ReportCenterTool(Tool):
                 return "Error: no permission to subscribe to this report template"
 
         policy = self._store.template_policy(template_id)
-        if policy is None and template_id in {"machine_tpm_peak"}:
-            return "Error: this report template does not allow subscriptions"
-        if policy is None:
+        reason = evaluate_subscription_policy(template_id, policy)
+        if reason == POLICY_DENIED_ALLOWLIST:
+            if not self._store.allowed(
+                channel, user_id, "subscription_template", template_id
+            ):
+                return "Error: no permission to subscribe to this report template"
             return None
-        if not policy["enabled"]:
+        if reason == POLICY_DENIED_TEMPLATE_DISABLED:
             return "Error: this report template is disabled"
-        mode = str(policy["subscription_mode"])
-        if mode == "disabled":
+        if reason is not None:
             return "Error: this report template does not allow subscriptions"
-        if mode == "allowlist" and not self._store.allowed(
-            channel, user_id, "subscription_template", template_id
-        ):
-            return "Error: no permission to subscribe to this report template"
         return None
 
     def _filter_usage_subscription_actions(
@@ -3182,14 +3155,10 @@ class ReportCenterTool(Tool):
                     )
                 )
 
-        safe_report_types = {
-            "usage_daily_brief": ("day", "usage_brief"),
-            "usage_weekly_brief": ("week", "usage_brief"),
-            "usage_monthly_brief": ("month", "usage_brief"),
-            "usage_customer_model_daily_brief": ("day", "customer_model_daily_brief"),
-            "usage_customer_model_weekly_brief": ("week", "customer_model_weekly_brief"),
-            "usage_customer_model_hourly_tpm": ("recent1h", "customer_model_hourly_tpm"),
-        }
+        # Shared single-source table: report type -> (data period, variant).
+        # Every concrete subscription report type must appear here or the
+        # preview rejects it as unsupported.
+        safe_report_types = SUBSCRIPTION_REPORT_TYPE_TABLE
         unresolved: list[dict[str, str]] = []
         display_names: list[str] = []
 
@@ -3257,14 +3226,7 @@ class ReportCenterTool(Tool):
                         "没有找到可继承的引用报表范围，请重新引用报表卡片。"
                     )
                 )
-            if reference.template_id not in {
-                "usage_daily_brief",
-                "usage_weekly_brief",
-                "usage_monthly_brief",
-                "usage_customer_model_daily_brief",
-                "usage_customer_model_weekly_brief",
-                "usage_customer_model_hourly_tpm",
-            }:
+            if reference.template_id not in SUBSCRIPTION_REPORT_TYPE_TABLE:
                 return self._result(
                     self._subscription_unavailable_document(
                         "该报表类型当前不允许创建订阅。请在 Report platform → 报表类型中，"
@@ -3623,7 +3585,7 @@ class ReportCenterTool(Tool):
             if str(params.get("report_variant") or "") == "customer_model_weekly_brief"
             else "usage_customer_model_hourly_tpm"
             if str(params.get("report_variant") or "") == "customer_model_hourly_tpm"
-            else _BRIEF_PERIOD_TEMPLATES[data_period]
+            else BRIEF_PERIOD_TEMPLATES[data_period]
         )
         policy_denial = self._subscription_policy_denial(
             channel=channel,
@@ -3633,13 +3595,7 @@ class ReportCenterTool(Tool):
         if policy_denial:
             return ToolResult.error(policy_denial)
 
-        schedule_period = {
-            "every_day": "day",
-            "workdays": "day",
-            "weekly": "week",
-            "monthly": "month",
-            "hourly": "recent1h",
-        }[recurrence]
+        schedule_period = RECURRENCE_SCHEDULE_PERIODS[recurrence]
         subscribe_params = {
             "action": "subscribe",
             "period": schedule_period,
@@ -3757,6 +3713,59 @@ class ReportCenterTool(Tool):
             return saved_period
         return ReportCenterTool._period_from_template(subscription.template_id)
 
+    @staticmethod
+    def _previous_complete_hour(now: datetime) -> datetime:
+        """Floor to the current hour and step back one hour.
+
+        The manual hourly report, its scope discovery, and the hourly
+        subscription run must all target the same just-completed hour; this
+        helper is the single definition of that window arithmetic.
+        """
+        return now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+
+    def _normalized_subscription_scope(
+        self, params: dict[str, Any]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Shared scope normalization for the cron-run intent branches.
+
+        Returns the deduplicated tenant tuple (falling back to selection
+        tenant ids when the top-level list is empty) and the canonicalized
+        model tuple. The hourly and multi-customer daily/weekly intent
+        branches previously repeated these extraction idioms verbatim;
+        branch-specific scope rules and empty checks stay with each branch.
+        """
+
+        tenants = tuple(
+            dict.fromkeys(
+                str(item).strip()
+                for item in params.get("tenants") or []
+                if str(item).strip()
+            )
+        )
+        if not tenants:
+            selections = [
+                item
+                for item in params.get("report_selections") or []
+                if isinstance(item, dict)
+            ]
+            tenants = tuple(
+                dict.fromkeys(
+                    str(item.get("tenant_query") or "").strip()
+                    for item in selections
+                    if str(item.get("tenant_query") or "").strip()
+                )
+            )
+        models = self._canonical_cube_models(
+            tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in params.get("models") or []
+                    if str(item).strip()
+                )
+            )
+        )
+        return tenants, models
+
     def _subscription_service_for_confirmed_scope(
         self,
         *,
@@ -3852,8 +3861,8 @@ class ReportCenterTool(Tool):
         if report_variant == "customer_model_weekly_brief":
             return "usage_customer_model_weekly_brief"
         if report_template == "brief":
-            return _BRIEF_PERIOD_TEMPLATES[data_period]
-        return _PERIOD_TEMPLATES[data_period]
+            return BRIEF_PERIOD_TEMPLATES[data_period]
+        return PERIOD_TEMPLATES[data_period]
 
     async def _revalidate_confirmed_usage_scope(
         self, params: dict[str, Any]
@@ -4198,38 +4207,10 @@ class ReportCenterTool(Tool):
                 return None
             if period != "recent1h":
                 return None
-            tenants = tuple(
-                dict.fromkeys(
-                    str(item).strip()
-                    for item in params.get("tenants") or []
-                    if str(item).strip()
-                )
-            )
-            selections = [
-                item
-                for item in params.get("report_selections") or []
-                if isinstance(item, dict)
-            ]
-            if not tenants:
-                tenants = tuple(
-                    dict.fromkeys(
-                        str(item.get("tenant_query") or "").strip()
-                        for item in selections
-                        if str(item.get("tenant_query") or "").strip()
-                    )
-                )
+            tenants, models = self._normalized_subscription_scope(params)
             if not tenants:
                 return None
             model_scope = str(params.get("model_scope") or "all")
-            models = self._canonical_cube_models(
-                tuple(
-                    dict.fromkeys(
-                        str(item).strip()
-                        for item in params.get("models") or []
-                        if str(item).strip()
-                    )
-                )
-            )
             if model_scope == "all":
                 if tenant_models is None:
                     return None
@@ -4310,36 +4291,8 @@ class ReportCenterTool(Tool):
                 end_date = date.fromisoformat(str(params["end_date"]))
             except (KeyError, TypeError, ValueError):
                 return None
-            tenants = tuple(
-                dict.fromkeys(
-                    str(item).strip()
-                    for item in params.get("tenants") or []
-                    if str(item).strip()
-                )
-            )
-            selections = [
-                item
-                for item in params.get("report_selections") or []
-                if isinstance(item, dict)
-            ]
-            if not tenants:
-                tenants = tuple(
-                    dict.fromkeys(
-                        str(item.get("tenant_query") or "").strip()
-                        for item in selections
-                        if str(item.get("tenant_query") or "").strip()
-                    )
-                )
+            tenants, models = self._normalized_subscription_scope(params)
             model_scope = str(params.get("model_scope") or "selected")
-            models = self._canonical_cube_models(
-                tuple(
-                    dict.fromkeys(
-                        str(item).strip()
-                        for item in params.get("models") or []
-                        if str(item).strip()
-                    )
-                )
-            )
             if model_scope == "all":
                 if not tenants or tenant_models is None:
                     return None
@@ -4547,9 +4500,7 @@ class ReportCenterTool(Tool):
                 # date of the just-completed hour; the exact hour window is
                 # planned by the template from the current clock.
                 now = datetime.now(ZoneInfo(self._config.timezone))
-                previous_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(
-                    hours=1
-                )
+                previous_hour = self._previous_complete_hour(now)
                 start_date = previous_hour.date()
                 end_date = previous_hour.date()
             else:
@@ -4672,7 +4623,7 @@ class ReportCenterTool(Tool):
                     return ToolResult.error("Error: Cube hourly TPM subscriptions are not enabled")
                 period = "recent1h"
                 params["report_template_id"] = "usage_customer_model_hourly_tpm"
-            elif period not in _PERIOD_TEMPLATES:
+            elif period not in PERIOD_TEMPLATES:
                 return ToolResult.error("Error: subscription period must be day, week, or month")
             # Day/week/month confirmations now use the same typed compiler as
             # the WebUI. Keep the bounded legacy path for custom windows, whose
@@ -4759,9 +4710,9 @@ class ReportCenterTool(Tool):
                 if report_family == "cost"
                 else "provider_quality"
                 if report_family == "provider_quality"
-                else _BRIEF_PERIOD_TEMPLATES[data_period]
+                else BRIEF_PERIOD_TEMPLATES[data_period]
                 if params.get("report_template") == "brief"
-                else _PERIOD_TEMPLATES[data_period]
+                else PERIOD_TEMPLATES[data_period]
             )
         template = self._registry.template(template_id)
         if (
@@ -4877,7 +4828,7 @@ class ReportCenterTool(Tool):
                     return ToolResult.error("Error: Cube hourly TPM subscriptions are not enabled")
                 period = "recent1h"
                 params["report_template_id"] = "usage_customer_model_hourly_tpm"
-            elif period not in _PERIOD_TEMPLATES:
+            elif period not in PERIOD_TEMPLATES:
                 return ToolResult.error("Error: subscription period must be day, week, or month")
         else:
             return ToolResult.error("Error: unsupported report family")
@@ -4934,9 +4885,9 @@ class ReportCenterTool(Tool):
                 if report_family == "cost"
                 else "provider_quality"
                 if report_family == "provider_quality"
-                else _BRIEF_PERIOD_TEMPLATES[period]
+                else BRIEF_PERIOD_TEMPLATES[period]
                 if params.get("report_template") == "brief"
-                else _PERIOD_TEMPLATES[period]
+                else PERIOD_TEMPLATES[period]
             )
         policy_denial = self._subscription_policy_denial(
             channel=channel,

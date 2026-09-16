@@ -113,13 +113,21 @@ config 字段（`ReportCenterToolConfig`，report_center.py:251-341，19 个字�
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 文档纠偏 + 本评审落盘（PRODUCT.md / report-management.md / WORK_CONTEXT.md） | ✅ 2026-09-16 完成 |
-| Phase 1 | 无行为变化收敛：registry kwargs 单一来源、枚举单源、校验共享、WebUI 类型对齐、死配置删除；focused 套件全绿 | ⬜ |
+| Phase 1 | 无行为变化收敛：registry kwargs 单一来源、枚举单源、校验共享、WebUI 类型对齐、死配置删除；focused 套件全绿 | ✅ 2026-09-16 完成（157 passed 含 3 个新契约测试；channels 213 passed/2 既有失败；WebUI 746 全过、3 个并发超时单跑复核通过；eslint/tsc build 通过） |
 | Phase 2 | 开关合并：2a 策略恒执行 → 2b flag→policy 迁移脚本（幂等 expand-only）→ 2c cost 并入运行时体系 → 2d 读取点切换 + 注册表收缩 + WebUI 收缩；门控矩阵测试 | ⬜ |
 | Phase 3 | 订阅链路收敛：创建/启停单入口、fingerprint 统一、聊天卡 revision、删除 REST/legacy/死 action、审计补齐、写 action 改 POST；等价性测试 | ⬜ |
 | Phase 4 | 管理面一致性：默认值与 Gateway 同源、构造级开关只读展示、home 统一、Grafana 死模板移除、i18n 补齐、文档终态重写 | ⬜ |
 | Phase 5 | 结构性拆分（独立排期）：report_center.py 分层拆模块、`_subscription_preview` 拆分、SettingsView.tsx 报表区块独立 | ⬜ |
 
 每阶段独立 commit、独立可发布、可回滚。Phase 2 迁移 expand-only（写 policy 行、不删 flag 覆盖行），store 备份后执行，旧覆盖行在验证窗口后清理。
+
+### Phase 1 落地记录（2026-09-16）
+
+- 新单一来源：`default_registry_kwargs`（builtins.py，5 个构造点统一，wecom/dingtalk 默认值对齐 config=False）；schedules.py 新增 `SUBSCRIPTION_RECURRENCES`/`DAILY_MODES`/`PERIOD_TEMPLATES`/`BRIEF_PERIOD_TEMPLATES`/`SUBSCRIPTION_REPORT_TYPE_TABLE`/`SUBSCRIPTION_REPORT_TYPE_ENUM`/`RECURRENCE_SCHEDULE_PERIODS`；`evaluate_subscription_policy` + `DEFAULT_UNSUBSCRIBABLE_TEMPLATES`（subscriptions.py）；`EXPLICIT_ALL_TENANTS_RE`/`EXPLICIT_ALL_MODELS_RE`（cube_subscription_intent.py）；RC 内 `_previous_complete_hour`、`_normalized_subscription_scope` 两个 helper。
+- 派生化：intent 模块校验集改 `get_args`；RC schema 的 recurrence/report_type/daily_mode 枚举、预览 safe_report_types、引用模板白名单全部改为引用共享表；subscriptions `_recurrence`/`_schedule_period` 改共享表。
+- 删除：4 个死配置字段（`cube_health_connector`/`cube_health_template`/`cube_provider_quality_connector`/`cube_provider_quality_template`，onboarding 改读 registry 实态）；前端 15 项 action 联合类型改由 api.ts 导出的 `ReportingSettingsAction` 派生；types.ts recurrence 补 `hourly`（纯类型，编辑器选项仍硬编码不含 hourly）。
+- 有意保留（非遗漏）：`authorization.py` 的 legacy 参数→模板映射（Phase 3 处理 legacy 路径时一并收敛）；magik 工具自有的更宽"各大/大客户"正则（legacy 语义不同）；`_subscription_preview` inherit 分支的 `reference_selection_models`（条件含 `item.get("models")` 非空检查，与 hourly 重建不同构，强行合并会改行为）。
+- 新增契约测试：`tests/reporting/test_subscription_enum_contracts.py` 钉住 schedules 常量 = intent Literal = tool schema 枚举。
 
 ## 6. 验证基线（每阶段通用）
 

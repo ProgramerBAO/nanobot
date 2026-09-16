@@ -985,7 +985,9 @@ export interface ReportingSubscriptionForm {
   model_scope: "all" | "selected" | "summary";
   models: string[];
   period: string;
-  recurrence: "every_day" | "workdays" | "weekly" | "monthly";
+  // "hourly" is chat-created only today (hourly TPM broadcasts); the guided
+  // editor does not offer it, but editing such a subscription must type-check.
+  recurrence: "every_day" | "workdays" | "weekly" | "monthly" | "hourly";
   send_time: string;
   weekday: number;
   month_day: number;

@@ -1,8 +1,77 @@
-"""Build and describe the supported deterministic report schedules."""
+"""Build and describe the supported deterministic report schedules.
+
+This module is also the single source for the subscription recurrence
+choices, the period -> template id maps, and the subscription report-type
+table; the NLU Literal surfaces, the report_center tool schema, the guided
+service validation, and the channel preview whitelists all derive from the
+constants defined here (contract tests pin them equal).
+"""
 
 from __future__ import annotations
 
 import re
+
+# Single source for the subscription recurrence choices. The NLU module's
+# Literal surface, the report_center tool schema enum, and the guided
+# service's validation set all derive from this tuple; it was previously
+# repeated as five hand-maintained sets that could drift silently.
+SUBSCRIPTION_RECURRENCES: tuple[str, ...] = (
+    "every_day",
+    "workdays",
+    "weekly",
+    "monthly",
+    "hourly",
+)
+# The two daily modes a UI may offer for the "day" period.
+DAILY_MODES: tuple[str, ...] = ("workdays", "every_day")
+
+# recurrence -> subscription period consumed by build_subscription_schedule.
+# The channel preview and the guided service both map through this table;
+# it was previously duplicated in both modules.
+RECURRENCE_SCHEDULE_PERIODS: dict[str, str] = {
+    "every_day": "day",
+    "workdays": "day",
+    "weekly": "week",
+    "monthly": "month",
+    "hourly": "recent1h",
+}
+
+# Subscription period -> matrix template id (custom windows share the custom
+# matrix template). Moved here from report_center so routing, subscription
+# compilation, and the guided service read one table instead of copies.
+PERIOD_TEMPLATES: dict[str, str] = {
+    "day": "usage_daily_matrix",
+    "week": "usage_weekly_matrix",
+    "month": "usage_monthly_matrix",
+    "recent7": "usage_custom_matrix",
+    "range": "usage_custom_matrix",
+}
+BRIEF_PERIOD_TEMPLATES: dict[str, str] = {
+    "day": "usage_daily_brief",
+    "week": "usage_weekly_brief",
+    "month": "usage_monthly_brief",
+    "recent7": "usage_custom_brief",
+    "range": "usage_custom_brief",
+}
+
+# Canonical subscription report types (these ids are template ids) with the
+# data period and compile variant each maps to. The preview's report-type
+# whitelist, the quoted-reference template whitelist, and the tool schema
+# enum all derive from this table; they were three hand-maintained copies.
+SUBSCRIPTION_REPORT_TYPE_TABLE: dict[str, tuple[str, str]] = {
+    "usage_daily_brief": ("day", "usage_brief"),
+    "usage_weekly_brief": ("week", "usage_brief"),
+    "usage_monthly_brief": ("month", "usage_brief"),
+    "usage_customer_model_daily_brief": ("day", "customer_model_daily_brief"),
+    "usage_customer_model_weekly_brief": ("week", "customer_model_weekly_brief"),
+    "usage_customer_model_hourly_tpm": ("recent1h", "customer_model_hourly_tpm"),
+}
+# The tool-parameter surface accepts every concrete type above plus the
+# special "inherit" marker used by quoted-report subscriptions.
+SUBSCRIPTION_REPORT_TYPE_ENUM: tuple[str, ...] = (
+    *SUBSCRIPTION_REPORT_TYPE_TABLE,
+    "inherit",
+)
 
 REPORT_TEMPLATE_LABELS = {
     "usage_daily_brief": "日报简报",
