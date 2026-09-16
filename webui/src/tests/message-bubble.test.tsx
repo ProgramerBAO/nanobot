@@ -208,7 +208,7 @@ describe("MessageBubble", () => {
     expect(screen.queryByText(/时间桶/)).not.toBeInTheDocument();
   });
 
-  it("renders inline hourly TPM metrics per model row", () => {
+  it("renders the hourly TPM report as a customer/model table", () => {
     const message: UIMessage = {
       id: "hourly-tpm-brief",
       role: "assistant",
@@ -221,24 +221,27 @@ describe("MessageBubble", () => {
         quality: "complete",
         blocks: [
           {
-            kind: "grouped_metrics",
+            kind: "table",
             data: {
-              collapse_no_usage: false,
-              groups: [
+              title: "模型明细",
+              columns: [
+                { tag: "column", name: "tenant", display_name: "客户", data_type: "text" },
+                { tag: "column", name: "model", display_name: "模型", data_type: "text" },
+                { tag: "column", name: "tpm_peak", display_name: "峰值", data_type: "text" },
+                { tag: "column", name: "tpm_avg", display_name: "均值", data_type: "text" },
+                { tag: "column", name: "machine_allocated", display_name: "机器占用", data_type: "text" },
+                { tag: "column", name: "machine_used", display_name: "机器真实使用", data_type: "text" },
+              ],
+              headers: ["客户", "模型", "峰值", "均值", "机器占用", "机器真实使用"],
+              page_size: 20,
+              rows: [
                 {
-                  id: "tenant-fo",
-                  label: "佛跳墙",
-                  items: [
-                    {
-                      label: "Kimi-K3",
-                      status: "active",
-                      metrics: [
-                        { label: "峰值", value: "6683万" },
-                        { label: "均值", value: "5014万" },
-                        { label: "机器", value: "39/38（闲1）" },
-                      ],
-                    },
-                  ],
+                  tenant: "佛跳墙",
+                  model: "Kimi-K3",
+                  tpm_peak: "6683万",
+                  tpm_avg: "5014万",
+                  machine_allocated: "39",
+                  machine_used: "38（闲1）",
                 },
               ],
             },
@@ -249,13 +252,18 @@ describe("MessageBubble", () => {
 
     render(<MessageBubble message={message} />);
 
+    // User-confirmed 2026-09-16 layout: a flat table with the two platform
+    // machine sources as dedicated columns; the idle flag stays in the
+    // usage column.
+    expect(screen.getByText("模型明细")).toBeInTheDocument();
+    expect(screen.getByText("客户")).toBeInTheDocument();
+    expect(screen.getByText("机器真实使用")).toBeInTheDocument();
     expect(screen.getByText("佛跳墙")).toBeInTheDocument();
     expect(screen.getByText("Kimi-K3")).toBeInTheDocument();
-    // Inline metric rows replace the comparison layout; the machine cell
-    // carries the allocation/usage pair with the idle flag.
-    expect(screen.getByText("峰值 6683万")).toBeInTheDocument();
-    expect(screen.getByText("均值 5014万")).toBeInTheDocument();
-    expect(screen.getByText("机器 39/38（闲1）")).toBeInTheDocument();
+    expect(screen.getByText("6683万")).toBeInTheDocument();
+    expect(screen.getByText("5014万")).toBeInTheDocument();
+    expect(screen.getByText("39")).toBeInTheDocument();
+    expect(screen.getByText("38（闲1）")).toBeInTheDocument();
   });
 
   it("collapses multi-customer report context and quality details", () => {

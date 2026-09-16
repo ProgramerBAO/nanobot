@@ -116,12 +116,14 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   out of the report. Machines are dual-source per unique model: allocation from
   `analysis/model-machine-usage/query` (current snapshot, quality-relevant) and
   actual usage from `analysis/machine-tpm-trend/query` (target-hour point-in-time,
-  informational — a missing usage value must not downgrade quality). Idle =
-  allocation minus usage, flagged as （闲N） from one machine difference and summed
-  into the subtitle as `N 机器空闲`; both values are platform-level and must never
-  be attributed to a customer. Hourly subscriptions run at five minutes past the
-  hour; a missing target-hour point stays 暂不可用 with `partial` quality and must
-  never be rendered as zero.
+  informational — a missing usage value must not downgrade quality). The data
+  section renders as a single six-column table (客户 | 模型 | 峰值 | 均值 |
+  机器占用 | 机器真实使用，user-confirmed 2026-09-16). Idle =
+  allocation minus usage, flagged as （闲N） inside the 机器真实使用 column from one
+  machine difference and summed into the subtitle as `N 机器空闲`; both values are
+  platform-level and must never be attributed to a customer. Hourly subscriptions
+  run at five minutes past the hour; a missing target-hour point stays 暂不可用
+  with `partial` quality and must never be rendered as zero.
 - Report feature flags default ON for the usage/health/provider/management
   families. Enable/disable flags no longer gate template registration (all Cube
   templates register whenever the connector exists); execution and visibility read

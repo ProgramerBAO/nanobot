@@ -29,7 +29,7 @@ Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管�
 | 进一步分析 | 简报卡片携带原客户、模型和时间窗口进入矩阵报表 | 服务端重新执行权限校验 |
 | 多客户多模型日报简报 | 按客户分组展示当前周期 Token 总数、同比和环比；手工多选最多 20 个模型，“全部模型”受 200 个客户/模型组合上限保护 | 模板策略（`usage_customer_model_daily_brief`） |
 | 多客户多模型周报简报 | 按客户分组展示上一完整自然周 Token 总数及前一完整自然周环比 | 模板策略（`usage_customer_model_weekly_brief`） |
-| 多客户多模型小时 TPM 报告 | 按客户分组展示上一完整小时各模型 TPM 峰值、均值与平台级机器数；支持每小时订阅播报（整点后 5 分钟） | 模板策略（`usage_customer_model_hourly_tpm`，订阅受众由同模板 `subscription_mode` 控制） |
+| 多客户多模型小时 TPM 报告 | 以六列表格展示上一完整小时各模型数据：客户、模型、TPM 峰值、均值、机器占用、机器真实使用；支持每小时订阅播报（整点后 5 分钟） | 模板策略（`usage_customer_model_hourly_tpm`，订阅受众由同模板 `subscription_mode` 控制） |
 | 单机折算 TPM 峰值 | 按模型、集群、卡型展示小时折算 TPM 峰值；不代表具体机器 | 模板策略（`machine_tpm_peak`） |
 | 成本与账户 | 上月应付金额对比前一自然月，钱包余额与未结算为当前快照 | 运行时开关 `cube_cost_report`（订阅另需 `cube_cost_subscription`），默认关闭；TokenAPI 连接为部署配置 |
 | Report platform | 管理模板启用/订阅策略、功能开关、订阅计划和订阅授权，并记录管理审计 | `report_management_v1`（仅门控管理页与引导表单；模板策略始终执行）；WebUI 管理 token |
@@ -47,7 +47,7 @@ Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管�
 
 平均 TPM 只使用 Cube `analysis/endpoint-max-tpm/daily/query` 的 `avgTpm`，不得跨客户或 Endpoint 聚合。接口失败、缺失和成功空数据必须保持不同状态，不得转换为 0。
 
-小时 TPM 报表只使用目标上一完整小时的 point：峰值取 `maxTpm`，均值取 `avgTpm`。请求必须携带 `time_level=TIME_LEVEL_HOUR`（小时粒度开关）且 `endDate` 为目标小时所在日的次日（同日范围只返回 00 点），再由本地过滤只保留目标小时；未流逝小时返回 0 占位并不得进入报表。接口未返回目标小时数据时，峰值/均值均显示“暂不可用”，不得使用其他小时或推算。机器为双来源：占用来自 `analysis/model-machine-usage/query`（发送时当前配置快照），真实使用来自 `analysis/machine-tpm-trend/query`（上一完整小时时点值），均按唯一模型查询一次、跨集群求和、平台级且不得复制为客户独占资源；空闲 = 占用−使用，≥1 台在模型行标注（闲N）并汇入副标题 `N 机器空闲`；真实使用缺失为信息性告警（显示 `占/-`、不计算空闲、不降级质量），占用缺失才降级 `partial`。多 Endpoint 模型的均值不得跨 Endpoint 汇总，模型行显示“多 Endpoint，不汇总”并提供 Endpoint 明细。
+小时 TPM 报表只使用目标上一完整小时的 point：峰值取 `maxTpm`，均值取 `avgTpm`。请求必须携带 `time_level=TIME_LEVEL_HOUR`（小时粒度开关）且 `endDate` 为目标小时所在日的次日（同日范围只返回 00 点），再由本地过滤只保留目标小时；未流逝小时返回 0 占位并不得进入报表。接口未返回目标小时数据时，峰值/均值均显示“暂不可用”，不得使用其他小时或推算。机器为双来源双列：占用来自 `analysis/model-machine-usage/query`（发送时当前配置快照），真实使用来自 `analysis/machine-tpm-trend/query`（上一完整小时时点值），均按唯一模型查询一次、跨集群求和、平台级且不得复制为客户独占资源，卡片以“机器占用”“机器真实使用”两列分别展示；空闲 = 占用−使用，≥1 台在“机器真实使用”列标注（闲N）并汇入副标题 `N 机器空闲`；真实使用缺失为信息性告警（占用列正常、使用列显示 —、不计算空闲、不降级质量），占用缺失才降级 `partial`（占用列“暂不可用”、使用列 —）。多 Endpoint 模型的均值不得跨 Endpoint 汇总，均值列显示“多 Endpoint，不汇总”并提供 Endpoint 明细表（拆为第 2 张卡）。
 
 灵活管理查询先 `search`，再 `describe`，最后 `call`。多步查询先取得父实体真实 ID；写接口、用户提供的 URL/API 路径和敏感字段始终阻断。
 
@@ -68,7 +68,7 @@ Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管�
 - 多条订阅的编号、状态与启停按钮在 Feishu 和 WebUI 中一一对应。
 - `每天上午十点发送阳春面、豆汁、佛跳墙全部模型的多客户日报简报` 必须在确认卡中保留三个客户，并创建 `usage_customer_model_daily_brief`。
 - 订阅多客户周报简报（明确指定周报或引用已生成的周报卡片）必须编译为 `usage_customer_model_weekly_brief`，确认卡保留全部所选客户和完整自然周口径；周报仅显示环比。
-- `查看阳春面、豆汁、佛跳墙全部模型上一小时 TPM` 生成按客户分组的紧凑卡片：模型行内联 `峰值 X · 均值 Y · 机器 占/用（闲N）`（万取整、机器纯整数），空闲 ≥1 台标注且副标题汇总 `N 机器空闲`；多 Endpoint 模型均值显示“多 Endpoint，不汇总”并提供明细续卡；小时快照无对比基准并在口径说明中显式声明。
+- `查看阳春面、豆汁、佛跳墙全部模型上一小时 TPM` 生成六列表格卡片（客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器真实使用；万取整、机器纯整数），空闲 ≥1 台在“机器真实使用”列标注（闲N）且副标题汇总 `N 机器空闲`；多 Endpoint 模型均值显示“多 Endpoint，不汇总”并提供明细续卡；小时快照无对比基准并在口径说明中显式声明。
 - `每小时播报上一小时阳春面、豆汁、佛跳墙全部模型的TPM` 生成确认卡（每小时、整点后 5 分钟、无时刻字段），确认后创建 `usage_customer_model_hourly_tpm` 订阅并按 `5 * * * *` 投递；目标小时 point 缺失显示“暂不可用”并标记 `partial`，不渲染为 0。
 - 引用日报卡片回复 `工作日上午十点发送给我` 时继承模板、客户和模型范围，但不继承历史查询日期；旧卡片、跨群引用和过期引用必须失败关闭。
 - “全部模型”订阅在每次执行前读取各客户的实时模型目录，新模型自动进入报表，持续无用量模型沿用现有隐藏规则。
@@ -83,6 +83,7 @@ Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管�
 
 ## 发布记录与待办
 
+- `2026-09-16`：小时 TPM 报表卡片数据区改为六列表格（用户确认布局）：客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器真实使用；机器占用/真实使用由原合并单元格 `占/用（闲N）` 拆为两列，空闲（闲N）标注移入"机器真实使用"列；占用缺失降 `partial`（占用列"暂不可用"）、使用缺失保持信息性告警（使用列 —，不降级）的分工不变；无用量模型峰值/均值列直接显示"暂无用量"。渲染层零改动（table 块为三端现成通路）；多 Endpoint 明细表同步对齐仓库表格列规范；Feishu 多 Endpoint 场景主表+明细表拆两张卡（带页码）。副标题、口径折叠、质量语义与数据查询链路均不变。
 - `2026-09-16`（收敛阶段 4 已落地，管理面一致性）：报表管理页的默认值与构造口径视图改从 Gateway 启动时的进程内配置快照读取（经 settings 路由注入，消除"编辑 config.json 未重启时页面显示与运行值漂移"）；payload 新增只读 `construction` 节并在页面页脚展示当前生效的计算口径（健康/用量语义版本、TTFT 明细、供应商明细、企微/钉钉渲染器、Grafana、成本连接，重启生效）；Feishu onboarding 引导卡与报表中心 home 使用同一能力口径（registry 存在性 + 模板策略 + 运行时开关），不再多展示或少展示能力；Grafana `cost_summary`/`capacity_summary` 两个无执行入口的死模板从注册表移除；`settings.nav.reports` 导航键补齐全部 10 个 locale（中文界面不再显示英文 "Reports"）。ReportsSettings 页面文案的完整 i18n 抽取另行排期（当前硬编码中文，对英文界面低价值）。
 - `2026-09-16`（收敛阶段 3 已落地，订阅链路单入口）：小时 TPM 订阅的聊天确认改走与日/周/月相同的 `ReportSubscriptionService`（模板/变体标记与 `5 * * * *` 调度不变）；`subscription_fingerprint` 成为全部创建入口的单一判重身份（含 chat_id/timezone），跨入口重复创建命中同一 `UNIQUE` 约束；订阅启停/删除按钮携带 revision（CAS），文本命令在服务端解析当前 revision，无 CAS 内联分支全部删除。**外部 API breaking**：订阅启停/删除必须携带 revision（缺失返回 400）、删除 REST 订阅路由（仅保留 options）、删除 legacy `subscription_create` 与 `subscription_schedule`。（曾随本阶段将报表 action 改为 POST，因嵌入式 WebUI 传输层——websockets 库的 HTTP/1.1 解析器——只接受 GET，POST 请求在路由前即被断连（浏览器表现为 "Failed to fetch"），已回退为 GET；副作用由 Bearer token 鉴权与管理审计约束。）审计补齐：`rbac`/`grant`/`revoke` 现写入管理审计。新增 CLI：`nanobot reports policy scan-duplicates`（仅报告统一指纹前遗留的语义重复订阅）；magik 执行兜底收敛为 `_run_subscription` 内单一判定点并注明删除条件。
 - `2026-09-16`（收敛阶段 0–2 已落地）：模板策略成为每模板唯一运行时开关并**始终执行**（`report_management_v1` 退化为管理页/引导表单可见性开关）；11 项每模板/订阅类运行时功能 flag 退役进模板策略（`enabled` 管执行+可见+新建订阅，`subscription_mode` 只管新建），无独立行为的 `cube_subscription_nlu_v3` 删除；成本报表两项从部署配置提升为运行时开关（默认仍关闭）；运行时功能开关注册表收缩为 10 项行为/路由开关。迁移：`nanobot reports policy migrate-flags [--dry-run]`（幂等、expand-only，同时转换 store 覆盖与配置级非默认值；执行前备份报表状态库）。被退役的 config 字段保留一个迁移窗口（设置非默认值时记录警告），窗口结束后删除。同日完成无行为变化的收敛：registry 构造参数、订阅枚举/映射、策略判定、hourly 窗口计算等收敛为单一来源（评审底稿见 `docs/REPORT_PLATFORM_REVIEW.md`）。

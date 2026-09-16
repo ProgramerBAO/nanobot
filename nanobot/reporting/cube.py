@@ -2239,23 +2239,27 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         ),)
 
     @staticmethod
-    def _machine_text(allocation: float | None, used: float | None) -> tuple[str, int]:
-        """Build the ``占用/使用（闲N）`` machine cell for one model row.
+    def _machine_columns(
+        allocation: float | None, used: float | None
+    ) -> tuple[str, str, int]:
+        """Build the ``机器占用`` / ``机器真实使用`` cells for one model row.
 
-        Idle is flagged when allocation minus usage reaches one machine
+        The two platform-level sources render as separate table columns
+        (user-confirmed 2026-09-16 table layout). Idle is flagged inside the
+        usage column when allocation minus usage reaches one machine
         (user-confirmed 2026-09-15). A missing usage value keeps the
         allocation visible without guessing idle; negative differences
-        (machines removed after the hour) stay as the raw pair with no tag.
+        (machines removed after the hour) stay as raw values with no tag.
         """
 
         if allocation is None:
-            return "暂不可用", 0
+            return "暂不可用", "—", 0
         if used is None:
-            return f"{allocation:.0f}/-", 0
+            return f"{allocation:.0f}", "—", 0
         idle = int(allocation - used)
         if idle >= 1:
-            return f"{allocation:.0f}/{used:.0f}（闲{idle}）", idle
-        return f"{allocation:.0f}/{used:.0f}", 0
+            return f"{allocation:.0f}", f"{used:.0f}（闲{idle}）", idle
+        return f"{allocation:.0f}", f"{used:.0f}", 0
 
     def analyze(self, datasets: tuple[ReportDataset, ...]) -> ReportDocument:
         """Group the previous complete hour's TPM by customer and model.
@@ -2303,12 +2307,14 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         for (tenant_id, model, endpoint), values in endpoint_values.items():
             tpm_by_scope[(tenant_id, model)][endpoint] = values
 
-        groups: list[dict[str, Any]] = []
+        table_rows: list[dict[str, Any]] = []
         endpoint_detail_rows: list[dict[str, Any]] = []
         # Idle machines per unique model (allocation minus usage); only
         # differences of at least one machine count as idle (user-confirmed
         # 2026-09-15) and feed the subtitle total.
         idle_by_model: dict[str, int] = {}
+        tenant_count = 0
+        displayed_models: set[str] = set()
         if isinstance(tenant_models, Mapping):
             group_items = list(tenant_models.items())
         else:
@@ -2321,9 +2327,10 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             ]
             if not model_list:
                 continue
+            tenant_count += 1
             tenant_label = str(tenant_name_map.get(tenant_id, tenant_id) or tenant_id)
-            items: list[dict[str, Any]] = []
             for model in sorted(set(model_list), key=str.casefold):
+                displayed_models.add(model)
                 endpoints = tpm_by_scope.get((tenant_id, model), {})
                 peaks = [
                     float(values["ai.tpm.peak"])
@@ -2335,37 +2342,35 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     for values in endpoints.values()
                     if isinstance(values.get("ai.tpm.avg"), (int, float))
                 ]
+                no_usage = bool(peaks) and max(peaks) == 0
                 if not peaks:
                     peak_text = "暂不可用"
-                    status = "unavailable"
+                elif no_usage:
+                    peak_text = "暂无用量"
                 else:
                     peak_text = _format_hourly_tpm(max(peaks))
-                    status = "no_usage" if max(peaks) == 0 else "active"
                 if not avgs:
                     avg_text = "暂不可用"
+                elif no_usage:
+                    avg_text = "暂无用量"
                 elif len(endpoints) > 1:
                     # avgTpm is reported per endpoint and must not be
                     # averaged across endpoint boundaries.
                     avg_text = "多 Endpoint，不汇总"
                 else:
                     avg_text = _format_hourly_tpm(avgs[0])
-                machine_text, idle = self._machine_text(
+                allocated_text, used_text, idle = self._machine_columns(
                     machine_by_model.get(model), machine_used_by_model.get(model)
                 )
                 if idle:
                     idle_by_model[model] = idle
-                items.append({
-                    "label": model,
-                    "metric": "ai.tpm.peak",
-                    "value": peak_text,
-                    "current_value": peak_text,
-                    "current_unit": "峰值",
-                    "status": status,
-                    "metrics": [
-                        {"label": "峰值", "value": peak_text},
-                        {"label": "均值", "value": avg_text},
-                        {"label": "机器", "value": machine_text},
-                    ],
+                table_rows.append({
+                    "tenant": tenant_label,
+                    "model": model,
+                    "tpm_peak": peak_text,
+                    "tpm_avg": avg_text,
+                    "machine_allocated": allocated_text,
+                    "machine_used": used_text,
                 })
                 if len(endpoints) > 1:
                     for endpoint, values in sorted(endpoints.items()):
@@ -2384,20 +2389,13 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                                 else "暂不可用"
                             ),
                         })
-            groups.append({"id": tenant_id, "label": tenant_label, "items": items})
-        displayed_models = {
-            str(item.get("label") or "")
-            for group in groups
-            for item in group.get("items") or []
-            if str(item.get("label") or "")
-        }
         hour_text = ""
         if window_start and window_end:
             # Compact hourly cadence: MM-DD HH:MM–HH:MM. The timezone lives in
             # the disclosure only.
             hour_text = f"{window_start[5:10]} {window_start[11:16]}–{window_end[11:16]}"
         idle_total = sum(idle_by_model.values())
-        subtitle = f"{hour_text} · {len(groups)} 客户 / {len(displayed_models)} 模型"
+        subtitle = f"{hour_text} · {tenant_count} 客户 / {len(displayed_models)} 模型"
         if idle_total >= 1:
             subtitle += f" · {idle_total} 机器空闲"
         context = ReportContext(
@@ -2455,20 +2453,39 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             quality_reasons=dataset.warnings,
             template_version=self.manifest.version,
         )
+        # Main data section: one flat table with customer and model columns
+        # (user-confirmed 2026-09-16 layout). The two platform-level machine
+        # sources render as dedicated columns; idle stays tagged inside the
+        # usage column and feeds the subtitle total.
         blocks: list[ReportBlock] = [
-            ReportBlock("grouped_metrics", {"groups": groups, "collapse_no_usage": False}),
+            ReportBlock("table", {
+                "title": "模型明细",
+                "columns": [
+                    {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
+                    {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
+                    {"tag": "column", "name": "tpm_peak", "display_name": "峰值", "data_type": "text"},
+                    {"tag": "column", "name": "tpm_avg", "display_name": "均值", "data_type": "text"},
+                    {"tag": "column", "name": "machine_allocated", "display_name": "机器占用", "data_type": "text"},
+                    {"tag": "column", "name": "machine_used", "display_name": "机器真实使用", "data_type": "text"},
+                ],
+                "headers": ["客户", "模型", "峰值", "均值", "机器占用", "机器真实使用"],
+                "rows": table_rows,
+                "page_size": 20,
+            }),
         ]
         if endpoint_detail_rows:
             blocks.append(ReportBlock("table", {
                 "title": "Endpoint 明细：多 Endpoint 模型不汇总均值",
                 "columns": [
-                    {"name": "tenant", "display_name": "客户", "data_type": "text"},
-                    {"name": "model", "display_name": "模型", "data_type": "text"},
-                    {"name": "endpoint", "display_name": "Endpoint", "data_type": "text"},
-                    {"name": "tpm_peak", "display_name": "TPM 峰值", "data_type": "text"},
-                    {"name": "tpm_avg", "display_name": "TPM 均值", "data_type": "text"},
+                    {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
+                    {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
+                    {"tag": "column", "name": "endpoint", "display_name": "Endpoint", "data_type": "text"},
+                    {"tag": "column", "name": "tpm_peak", "display_name": "TPM 峰值", "data_type": "text"},
+                    {"tag": "column", "name": "tpm_avg", "display_name": "TPM 均值", "data_type": "text"},
                 ],
+                "headers": ["客户", "模型", "Endpoint", "TPM 峰值", "TPM 均值"],
                 "rows": endpoint_detail_rows,
+                "page_size": 20,
             }))
         blocks.append(
             ReportBlock(
@@ -2492,18 +2509,15 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             )
         )
         fallback_lines: list[str] = []
-        for group in groups:
-            fallback_lines.append(f"客户 {group['label']}")
-            for item in group["items"]:
-                metrics = {
-                    str(metric.get("label") or ""): str(metric.get("value") or "")
-                    for metric in item["metrics"]
-                }
-                fallback_lines.append(
-                    f"{item['label']}：峰值 {metrics.get('峰值', '暂不可用')} · "
-                    f"均值 {metrics.get('均值', '暂不可用')} · "
-                    f"机器 {metrics.get('机器', '暂不可用')}"
-                )
+        current_tenant: str | None = None
+        for row in table_rows:
+            if row["tenant"] != current_tenant:
+                current_tenant = row["tenant"]
+                fallback_lines.append(f"客户 {current_tenant}")
+            fallback_lines.append(
+                f"{row['model']}：峰值 {row['tpm_peak']} · 均值 {row['tpm_avg']} · "
+                f"机器占用 {row['machine_allocated']} · 真实使用 {row['machine_used']}"
+            )
         return ReportDocument(
             title=self.manifest.display_name,
             subtitle=subtitle,

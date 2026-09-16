@@ -1692,7 +1692,7 @@ async def test_cube_connector_hourly_machine_usage_missing_does_not_downgrade() 
     assert not any(row["metric"] == "ai.machine.used" for row in result.rows)
 
 
-def test_hourly_tpm_template_groups_customers_with_inline_metrics() -> None:
+def test_hourly_tpm_template_renders_customer_model_table() -> None:
     dataset = ReportDataset(
         rows=(
             {
@@ -1765,33 +1765,39 @@ def test_hourly_tpm_template_groups_customers_with_inline_metrics() -> None:
     # Compact subtitle: MM-DD window, counts, and the idle machine total.
     assert document.subtitle == "09-13 10:00–11:00 · 2 客户 / 1 模型 · 2 机器空闲"
 
-    grouped_block = document.blocks[0]
-    assert grouped_block.kind == "grouped_metrics"
-    groups = grouped_block.data["groups"]
-    assert [group["label"] for group in groups] == ["佛跳墙", "豆汁"]
-    for group in groups:
-        assert len(group["items"]) == 1
-        item = group["items"][0]
-        assert item["label"] == "Kimi-K3"
-        metrics = {entry["label"]: entry for entry in item["metrics"]}
-        # Each customer shows its own tenant-scoped TPM values plus the same
-        # platform allocation/usage pair with the idle flag.
-        assert metrics["峰值"] not in ("暂不可用", None)
-        assert metrics["机器"]["value"] == "42/40（闲2）"
-    peak_values = {
-        group["label"]: next(
-            entry["value"]
-            for entry in group["items"][0]["metrics"]
-            if entry["label"] == "峰值"
-        )
-        for group in groups
-    }
-    assert peak_values["佛跳墙"] != peak_values["豆汁"]
+    # User-confirmed 2026-09-16 layout: the data section is a flat table with
+    # customer/model columns and the two platform machine sources as separate
+    # columns; the idle flag lives inside the usage column.
+    table_block = document.blocks[0]
+    assert table_block.kind == "table"
+    columns = table_block.data["columns"]
+    assert [column["name"] for column in columns] == [
+        "tenant", "model", "tpm_peak", "tpm_avg", "machine_allocated", "machine_used",
+    ]
+    assert [column["display_name"] for column in columns] == [
+        "客户", "模型", "峰值", "均值", "机器占用", "机器真实使用",
+    ]
+    assert all(column.get("tag") == "column" for column in columns)
+    assert table_block.data["headers"] == [
+        "客户", "模型", "峰值", "均值", "机器占用", "机器真实使用",
+    ]
+    # Feishu renders at most 20 rows per page.
+    assert table_block.data["page_size"] == 20
+    rows = table_block.data["rows"]
+    assert [row["tenant"] for row in rows] == ["佛跳墙", "豆汁"]
+    for row in rows:
+        assert row["model"] == "Kimi-K3"
+        # Platform allocation/usage are the same value pair for both customers.
+        assert row["machine_allocated"] == "42"
+        assert row["machine_used"] == "40（闲2）"
+    # Each customer shows its own tenant-scoped TPM values.
+    assert rows[0]["tpm_peak"] != rows[1]["tpm_peak"]
+    assert rows[0]["tpm_avg"] != rows[1]["tpm_avg"]
     # The disclosure note stays the last block and carries context flags.
     assert document.blocks[-1].kind == "note"
     assert document.blocks[-1].data["include_context"] is True
     assert "客户 佛跳墙" in document.fallback_text
-    assert "机器 42/40（闲2）" in document.fallback_text
+    assert "机器占用 42 · 真实使用 40（闲2）" in document.fallback_text
 
 
 def test_hourly_tpm_template_marks_missing_tpm_unavailable() -> None:
@@ -1822,19 +1828,19 @@ def test_hourly_tpm_template_marks_missing_tpm_unavailable() -> None:
 
     document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
 
-    grouped_block = document.blocks[0]
-    assert grouped_block.kind == "grouped_metrics"
-    for group in grouped_block.data["groups"]:
-        item = group["items"][0]
-        assert item["status"] == "unavailable"
-        metrics = {entry["label"]: entry["value"] for entry in item["metrics"]}
+    table_block = document.blocks[0]
+    assert table_block.kind == "table"
+    rows = table_block.data["rows"]
+    assert len(rows) == 2
+    for row in rows:
         # Missing TPM stays explicitly unavailable; the platform machine
-        # count never turns the report into a successful TPM answer, and a
-        # missing usage value leaves the allocation visible without an idle
-        # guess.
-        assert metrics["峰值"] == "暂不可用"
-        assert metrics["均值"] == "暂不可用"
-        assert metrics["机器"] == "42/-"
+        # count never turns the report into a successful TPM answer.
+        assert row["tpm_peak"] == "暂不可用"
+        assert row["tpm_avg"] == "暂不可用"
+        # A missing usage value leaves the allocation visible without an idle
+        # guess; the two machine sources split into dedicated columns.
+        assert row["machine_allocated"] == "42"
+        assert row["machine_used"] == "—"
     # No idle machines, so no idle suffix on the subtitle.
     assert "机器空闲" not in document.subtitle
     assert document.quality == "partial"
@@ -1866,7 +1872,9 @@ def test_hourly_tpm_template_idle_threshold_and_negative_difference() -> None:
         warnings=(),
         source="magik_cube",
         metadata={
-            "tenant_models": {"tenant-a": ["Kimi-K3", "GLM-5.2", "GLM-5.1"]},
+            # GLM-4 has no machine rows at all: allocation missing must show
+            # 暂不可用 while the usage column stays an explicit dash.
+            "tenant_models": {"tenant-a": ["Kimi-K3", "GLM-5.2", "GLM-5.1", "GLM-4"]},
             "tenant_names": {"tenant-a": "佛跳墙"},
             "window_start": "2026-09-13T10:00:00+08:00",
             "window_end": "2026-09-13T11:00:00+08:00",
@@ -1875,21 +1883,22 @@ def test_hourly_tpm_template_idle_threshold_and_negative_difference() -> None:
 
     document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
 
-    grouped_block = document.blocks[0]
-    items = {
-        item["label"]: next(
-            entry["value"] for entry in item["metrics"] if entry["label"] == "机器"
-        )
-        for group in grouped_block.data["groups"]
-        for item in group["items"]
+    table_block = document.blocks[0]
+    assert table_block.kind == "table"
+    machines = {
+        row["model"]: (row["machine_allocated"], row["machine_used"])
+        for row in table_block.data["rows"]
     }
-    # One idle machine already counts as idle (user-confirmed threshold).
-    assert items["Kimi-K3"] == "39/38（闲1）"
+    # One idle machine already counts as idle (user-confirmed threshold); the
+    # idle flag lives in the usage column.
+    assert machines["Kimi-K3"] == ("39", "38（闲1）")
     # Equal usage is not idle.
-    assert items["GLM-5.2"] == "45/45"
+    assert machines["GLM-5.2"] == ("45", "45")
     # A negative difference (machines removed after the hour) stays as the
-    # raw pair without an idle tag.
-    assert items["GLM-5.1"] == "38/39"
+    # raw values without an idle tag.
+    assert machines["GLM-5.1"] == ("38", "39")
+    # Allocation missing: the usage column never guesses a value.
+    assert machines["GLM-4"] == ("暂不可用", "—")
     # The subtitle sums positive idle differences only: 1 idle machine.
     assert document.subtitle.endswith("· 1 机器空闲")
 
@@ -1918,7 +1927,8 @@ def test_hourly_tpm_template_plan_spans_next_day_for_hourly_points() -> None:
     assert query.filters["models"] == ["Kimi-K3"]
 
 
-def test_markdown_renderer_shows_inline_grouped_metrics_and_no_baseline_context() -> None:
+def test_markdown_renderer_shows_grouped_metrics_rows() -> None:
+    """The grouped_metrics markdown path stays pinned for brief templates."""
     document = ReportDocument(
         title="多客户多模型小时 TPM 报告",
         document_id="usage_customer_model_hourly_tpm",
@@ -1956,3 +1966,62 @@ def test_markdown_renderer_shows_inline_grouped_metrics_and_no_baseline_context(
     assert isinstance(rendered, str)
     assert "## 佛跳墙" in rendered
     assert "- Kimi-K3｜峰值 6683万｜均值 5014万｜机器 39/38（闲1）" in rendered
+
+
+def test_markdown_renderer_shows_hourly_tpm_table_and_no_baseline_context() -> None:
+    """The hourly TPM template renders a GFM table with split machine columns."""
+    dataset = ReportDataset(
+        rows=(
+            {
+                "metric": "ai.tpm.peak",
+                "value": 900.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.avg",
+                "value": 600.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.machine.count",
+                "value": 42.0,
+                "model": "Kimi-K3",
+                "endpoint": "",
+                "tenant_id": "",
+                "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used",
+                "value": 40.0,
+                "model": "Kimi-K3",
+                "endpoint": "",
+                "tenant_id": "",
+                "metric_scope": "platform_model",
+            },
+        ),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {"tenant-a": ["Kimi-K3"]},
+            "tenant_names": {"tenant-a": "佛跳墙"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    rendered = document_to_markdown(
+        CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+    )
+
+    assert isinstance(rendered, str)
+    # GFM header row carries the six user-confirmed columns.
+    assert "| 客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器真实使用 |" in rendered
+    assert "| --- | --- | --- | --- | --- | --- |" in rendered
+    # The data row splits allocation and usage; the idle flag stays in the
+    # usage column.
+    assert "| 佛跳墙 | Kimi-K3 | 900 | 600 | 42 | 40（闲2） |" in rendered
