@@ -635,6 +635,79 @@ def test_template_policy_matrix_visibility_and_subscription(tmp_path) -> None:
         service.create(form)
 
 
+def test_delete_succeeds_for_orphaned_subscription(tmp_path) -> None:
+    """Deleting a subscription whose Cron job was removed manually must succeed.
+
+    Regression for the 2026-09-16 live deadlock: removing the Cron job first
+    (Automations surface) left the subscription row permanently undeletable
+    with 409 "subscription Cron job is missing or protected". The scheduler
+    side is already clean in that state, so the delete is the correct
+    completion of the operator's intent.
+    """
+
+    store = ReportStateStore(tmp_path / "state.db")
+    registry = build_default_registry(
+        discover_external=False,
+        magik_enabled=True,
+        cube_config=MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="",
+        ),
+    )
+    config = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(report_management_v1=True, timezone="Asia/Shanghai")
+        ),
+        agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+    )
+
+    def resolve_tenants(values: list[str]):
+        return (
+            [
+                {"query": value, "tenant_id": value, "display_name": value}
+                for value in values
+            ],
+            [],
+        )
+
+    cron = CronService(tmp_path / "cron" / "jobs.json")
+    service = ReportSubscriptionService(
+        config=config,
+        store=store,
+        registry=registry,
+        cron=cron,
+        tenant_resolver=resolve_tenants,
+    )
+    created = service.create(
+        {
+            "template_id": "usage_customer_model_daily_brief",
+            "channel": "feishu",
+            "chat_id": "chat-a",
+            "user_id": "ou-a",
+            "tenant_scope": "selected",
+            "tenants": ["tenant-a"],
+            "model_scope": "all",
+            "models": [],
+            "period": "day",
+            "recurrence": "every_day",
+            "send_time": "10:00",
+            "weekday": 1,
+            "month_day": 1,
+            "timezone": "Asia/Shanghai",
+        }
+    )
+
+    # The operator removes the Cron job directly through the Automations
+    # surface, orphaning the subscription row.
+    assert cron.remove_job(created.cron_job_id) == "removed"
+
+    # Deleting the orphaned subscription must now succeed (and audit).
+    service.delete(created.subscription_id, expected_revision=created.revision)
+    assert store.subscription(created.subscription_id) is None
+
+
 def test_declarative_template_rejects_executable_fields() -> None:
     with pytest.raises(ValueError, match="unsupported template fields"):
         parse_template_spec(

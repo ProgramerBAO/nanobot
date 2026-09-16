@@ -1209,12 +1209,27 @@ class ReportSubscriptionService:
         if current.revision != expected_revision:
             raise SubscriptionServiceError("subscription was updated by another operator", status=409)
         job = self.cron.get_job(current.cron_job_id)
+        job_snapshot: Any | None = None
         if job is None:
-            raise SubscriptionServiceError("subscription Cron job is missing or protected", status=409)
-        job_snapshot = deepcopy(job)
-        result = self.cron.remove_job(current.cron_job_id)
-        if result != "removed":
-            raise SubscriptionServiceError("subscription Cron job is missing or protected", status=409)
+            # The Cron job was already removed outside this service (for
+            # example manually through the Automations surface). The
+            # scheduler side is already clean, so deleting the orphaned row
+            # is the correct completion of the operator's intent — refusing
+            # here made an orphaned subscription permanently undeletable
+            # (observed live 2026-09-16). A job that exists but is protected
+            # still refuses below; enable/update keep their 409 because an
+            # orphan has nothing to toggle or edit — deleting is the remedy.
+            logger.warning(
+                "Deleting orphaned report subscription whose Cron job is gone: "
+                "subscription_id={} cron_job_id={}",
+                subscription_id,
+                current.cron_job_id,
+            )
+        else:
+            job_snapshot = deepcopy(job)
+            result = self.cron.remove_job(current.cron_job_id)
+            if result != "removed":
+                raise SubscriptionServiceError("subscription Cron job is missing or protected", status=409)
         try:
             removed = self.store.remove_subscription(
                 subscription_id,
@@ -1223,10 +1238,12 @@ class ReportSubscriptionService:
                 expected_revision=expected_revision,
             )
         except Exception:
-            self._restore_deleted_job(job_snapshot)
+            if job_snapshot is not None:
+                self._restore_deleted_job(job_snapshot)
             raise
         if not removed:
-            self._restore_deleted_job(job_snapshot)
+            if job_snapshot is not None:
+                self._restore_deleted_job(job_snapshot)
             raise SubscriptionServiceError("subscription was updated by another operator", status=409)
         self.store.record_admin_audit(
             action="subscription_delete",
