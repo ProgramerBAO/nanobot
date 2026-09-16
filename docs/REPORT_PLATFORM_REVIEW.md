@@ -141,8 +141,21 @@ config 字段（`ReportCenterToolConfig`，report_center.py:251-341，19 个字�
 
 - **3a（`1881e79`）**：hourly 聊天确认改走 `ReportSubscriptionService`（compile_form 增加 hourly 模板分支：variant/report_template_id 标记 + brief 模板 + `5 * * * *` 调度）；`subscription_fingerprint` 单一身份（channel/chat_id/user_id/template_id/schedule/timezone/params），service 与剩余 legacy 内联路径共用，`UNIQUE(channel,user_id,fingerprint)` 首次具备跨入口判重能力；`authorize_magik_params` 将 hourly variant 映射到自身模板授权（原误落 usage_daily_brief）。
 - **3b（`deba21d`）**：订阅卡启停/删除按钮携带 revision（action_id 追加 `:{revision}`，Feishu 解析器透传）；RC 与 WebUI 的无 CAS 内联分支删除——文本命令由服务端解析当前 revision 走同一 service 路径；WebUI 启停/删除缺 revision 返回 400（breaking）。
-- **3c-3e（`4200bdf`）**：删除 REST 订阅路由（仅保留被前端实际消费的 options 路径）、legacy `subscription_create`、无调用方的 `subscription_schedule`、前端死联合成员与两个退役 helper；`rbac`/`grant`/`revoke` 补管理审计；WebUI 报表 action 全部改 POST（分发层方法无关，兼容）；`_run_subscription` 的 Cube-vs-legacy 判定成为唯一文档化决策点（注明删除条件）；新增 `nanobot reports policy scan-duplicates` 报告统一指纹前遗留的语义重复订阅（仅报告）。
+- **3c-3e（`4200bdf`）**：删除 REST 订阅路由（仅保留被前端实际消费的 options 路径）、legacy `subscription_create`、无调用方的 `subscription_schedule`、前端死联合成员与两个退役 helper；`rbac`/`grant`/`revoke` 补管理审计；`_run_subscription` 的 Cube-vs-legacy 判定成为唯一文档化决策点（注明删除条件）；新增 `nanobot reports policy scan-duplicates` 报告统一指纹前遗留的语义重复订阅（仅报告）。
+- **追记（POST 化回退）**：3d 曾将 WebUI 报表 action 改为 POST，但嵌入式 WebUI 传输层（websockets 15.0.1 的 HTTP/1.1 解析器，http11.py 仅接受 GET）在路由前即断开非 GET 连接（浏览器 "Failed to fetch"；渠道 API 测试中 "not.toHaveBeenCalledWith method POST" 的既有断言本已编码了这一约束）——已回退为 GET 并在 api.ts 留下禁止改回 POST 的注释。教训已记入验证基线：涉及传输层行为的前端改造必须对运行中的网关做真实请求验证（GET/POST 各一次），单测 mock fetch 与路由层测试都不覆盖传输层。
 - 测试：hourly service 化 e2e（模板标记、调度、跨入口 409 判重 + Cron 补偿）、WebUI 缺 revision 400、重复扫描分组语义。
+
+### Phase 4 追记（2026-09-16，重启后故障修复）
+
+`e11a34e` 的同源接线存在一个部署期缺陷：`GatewayHTTPHandler.config` 实为
+WebSocket 渠道节（`WebSocketConfig`，无 `tools` 属性），被直接当作 startup 句柄
+传入报表设置 API，导致重启后所有报表设置 action 报 500（"reporting settings
+action failed"）——测试未覆盖真实 manager 接线，进程内探针用的又是根配置。
+`1be841e` 修复：ChannelManager 经 `build_gateway_services`/`GatewayHTTPHandler`
+显式传递已解析根配置；`_load_reporting_config` 对错误形状句柄回退为全新加载
+并记录告警。两个回归测试钉住（services 接线保持根句柄、错误形状回退）；
+真实机器配置进程内验证双路径通过；Gateway 已重启加载修复（双端口健康 200、
+未鉴权设置端点探活 401 而非 500）。
 
 ## 6. 验证基线（每阶段通用）
 

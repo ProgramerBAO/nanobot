@@ -683,14 +683,17 @@ export async function runReportingSettingsAction(
       query.set(key, String(value));
     });
   }
-  // All reporting settings actions are mutations or audited control-plane
-  // operations; they are sent as POST since the phase-3 consolidation
-  // (previously an implicit GET with side effects carried in the query
-  // string). The gateway action dispatch is method-agnostic.
-  const init: RequestInit = {
-    method: "POST",
-    ...(useStructuredHeader ? { headers: reportingValuesHeader(values) } : {}),
-  };
+  // The embedded WebUI transport is the websockets library's HTTP shim,
+  // whose HTTP/1.1 parser only accepts GET requests (websockets/http11.py
+  // rejects other methods before routing, so a POST never reaches the
+  // handler and the browser sees "Failed to fetch"). Every settings action
+  // therefore rides a GET with side effects, constrained by the bearer
+  // token and the admin audit trail. A POST-capable surface would require
+  // serving the settings API from the gateway's standalone HTTP server —
+  // do not "fix" this back to POST.
+  const init: RequestInit | undefined = useStructuredHeader
+    ? { headers: reportingValuesHeader(values) }
+    : undefined;
   const suffix = query.toString() ? `?${query}` : "";
   return request<ReportingSettingsPayload>(
     `${base}/api/settings/reporting/${action}${suffix}`,
