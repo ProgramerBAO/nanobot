@@ -88,6 +88,20 @@ RUNTIME_FEATURE_FLAGS: "OrderedDict[str, dict[str, str]]" = OrderedDict(
             "cube_provider_quality_subscription",
             {"label": "供应商质量订阅", "group": "供应商质量"},
         ),
+        # group: 成本报表
+        # Promoted from config-level gating in the 2026-09-16 consolidation
+        # (phase 2c): report execution and subscription creation are runtime
+        # switches now, while the TokenAPI connector/template registration
+        # stays config-level because the credential must exist at
+        # construction time. Configured defaults remain opt-in (False).
+        (
+            "cube_cost_report",
+            {"label": "成本报表", "group": "成本报表"},
+        ),
+        (
+            "cube_cost_subscription",
+            {"label": "成本报表订阅", "group": "成本报表"},
+        ),
         # group: 管理界面
         (
             "report_management_v1",

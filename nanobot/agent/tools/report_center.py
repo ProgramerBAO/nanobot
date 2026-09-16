@@ -1554,11 +1554,15 @@ class ReportCenterTool(Tool):
 
     @property
     def cost_reports_enabled(self) -> bool:
-        return self.cost_connector_enabled and self._config.cube_cost_report
+        # Runtime flag (store override over the configured default) since the
+        # 2026-09-16 consolidation; connector/template registration stays
+        # config-level because the TokenAPI credential must exist at
+        # construction time.
+        return self.cost_connector_enabled and self._flag("cube_cost_report")
 
     @property
     def cost_subscriptions_enabled(self) -> bool:
-        return self.cost_connector_enabled and self._config.cube_cost_subscription
+        return self.cost_connector_enabled and self._flag("cube_cost_subscription")
 
     @property
     def provider_quality_connector_enabled(self) -> bool:
@@ -4933,7 +4937,7 @@ class ReportCenterTool(Tool):
         cube_family_enabled = (
             (family == "usage" and self._flag("cube_subscription"))
             or (family == "health" and self._flag("cube_health_subscription"))
-            or (family == "cost" and self._config.cube_cost_subscription)
+            or (family == "cost" and self._flag("cube_cost_subscription"))
             or (family == "provider_quality" and self._flag("cube_provider_quality_subscription"))
         )
         if (

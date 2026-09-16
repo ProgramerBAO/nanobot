@@ -2011,6 +2011,42 @@ async def test_cost_report_is_feature_gated_and_uses_report_runner(monkeypatch, 
     magik.execute.assert_not_awaited()
 
 
+def test_cost_flags_are_runtime_switchable(monkeypatch, tmp_path) -> None:
+    """Phase 2c: cost report/subscription gates read the runtime flags.
+
+    The connector wiring (TokenAPI credential, template registration) is
+    covered by the dedicated cost runner test above; this test pins only the
+    store-override-over-configured-default resolution, which used to be a
+    bare config read that the WebUI flags page could not toggle.
+    """
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        report_center_module.ReportCenterTool,
+        "cost_connector_enabled",
+        property(lambda self: True),
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(cube_cost_report=True),
+        _FakeCron(),
+        AsyncMock(),
+    )
+
+    assert tool.cost_reports_enabled is True
+    assert tool.cost_subscriptions_enabled is False
+
+    store.set_feature_flag("cube_cost_report", False, updated_by="webui_admin")
+    assert tool.cost_reports_enabled is False
+    store.set_feature_flag("cube_cost_subscription", True, updated_by="webui_admin")
+    assert tool.cost_subscriptions_enabled is True
+
+    store.clear_feature_flag("cube_cost_report")
+    store.clear_feature_flag("cube_cost_subscription")
+    assert tool.cost_reports_enabled is True
+    assert tool.cost_subscriptions_enabled is False
+
+
 @pytest.mark.asyncio
 async def test_health_report_is_direct_and_visible_only_when_flags_are_enabled(
     monkeypatch, tmp_path
