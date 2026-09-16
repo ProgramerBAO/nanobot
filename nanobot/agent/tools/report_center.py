@@ -5286,58 +5286,51 @@ class ReportCenterTool(Tool):
             return ToolResult.error("Error: report subscription not found")
         if action in {"subscription_enable", "subscription_disable"}:
             enabled = action == "subscription_enable"
-            if revision is not None:
-                # Structured cards carry a CAS revision.  Route those actions
-                # through the same Cron-first compensation service used by the
-                # WebUI, while retaining the legacy branch below for older
-                # text commands that cannot provide a revision.
-                try:
-                    updated = self._subscription_service_for_confirmed_scope().set_enabled(
-                        subscription_id,
-                        enabled=enabled,
-                        expected_revision=revision,
-                        updated_by=user_id,
-                    )
-                except SubscriptionServiceError as exc:
-                    return ToolResult.error(f"Error: {exc.message}")
-                except Exception as exc:
-                    logger.warning(
-                        "Report subscription control failed: action={} error_type={}",
-                        action,
-                        type(exc).__name__,
-                    )
-                    return ToolResult.error("Error: subscription state could not be updated")
-                return self._result(
-                    subscriptions_document(self._store.subscriptions(channel, user_id))
-                ) if updated else ToolResult.error("Error: subscription state could not be updated")
-            job = self._cron.enable_job(subscription.cron_job_id, enabled) if self._cron else None
-            if job is None:
-                return ToolResult.error("Error: subscription Cron job not found")
-            self._store.set_subscription_enabled(
-                subscription_id, channel=channel, user_id=user_id, enabled=enabled
-            )
+            # Structured cards carry a CAS revision. The legacy text command
+            # cannot, so it resolves the current row revision at execution
+            # time — a typed one-shot command has no rendered stale state to
+            # race against. Both entries share the same Cron-first
+            # compensation service; the old inline no-CAS branch is gone.
+            expected_revision = revision
+            if expected_revision is None:
+                expected_revision = subscription.revision
+            try:
+                updated = self._subscription_service_for_confirmed_scope().set_enabled(
+                    subscription_id,
+                    enabled=enabled,
+                    expected_revision=expected_revision,
+                    updated_by=user_id,
+                )
+            except SubscriptionServiceError as exc:
+                return ToolResult.error(f"Error: {exc.message}")
+            except Exception as exc:
+                logger.warning(
+                    "Report subscription control failed: action={} error_type={}",
+                    action,
+                    type(exc).__name__,
+                )
+                return ToolResult.error("Error: subscription state could not be updated")
             return self._result(
                 subscriptions_document(self._store.subscriptions(channel, user_id))
-            )
+            ) if updated else ToolResult.error("Error: subscription state could not be updated")
         if action == "subscription_remove":
-            if revision is not None:
-                try:
-                    self._subscription_service_for_confirmed_scope().delete(
-                        subscription_id,
-                        expected_revision=revision,
-                        updated_by=user_id,
-                    )
-                except SubscriptionServiceError as exc:
-                    return ToolResult.error(f"Error: {exc.message}")
-                except Exception as exc:
-                    logger.warning(
-                        "Report subscription delete failed: error_type={}",
-                        type(exc).__name__,
-                    )
-                    return ToolResult.error("Error: subscription could not be deleted")
-                return ToolResult("订阅已删除。")
-            if self._cron:
-                self._cron.remove_job(subscription.cron_job_id)
-            self._store.remove_subscription(subscription_id, channel=channel, user_id=user_id)
+            try:
+                self._subscription_service_for_confirmed_scope().delete(
+                    subscription_id,
+                    # Same rule as enable/disable: typed commands resolve the
+                    # current revision; card actions carry theirs.
+                    expected_revision=(
+                        revision if revision is not None else subscription.revision
+                    ),
+                    updated_by=user_id,
+                )
+            except SubscriptionServiceError as exc:
+                return ToolResult.error(f"Error: {exc.message}")
+            except Exception as exc:
+                logger.warning(
+                    "Report subscription delete failed: error_type={}",
+                    type(exc).__name__,
+                )
+                return ToolResult.error("Error: subscription could not be deleted")
             return ToolResult("订阅已删除。")
         return ToolResult.error("Error: unsupported report center action")

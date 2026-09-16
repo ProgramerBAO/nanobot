@@ -227,8 +227,19 @@ def test_subscription_disable_updates_cron_and_database(monkeypatch, tmp_path) -
     )
     assert store.add_subscription(subscription, "fingerprint-a")
 
+    # Since the phase-3 consolidation the row revision is mandatory: a
+    # missing revision is rejected instead of falling back to the legacy
+    # inline path.
+    with pytest.raises(
+        reporting_api.ReportingSettingsError, match="revision is required"
+    ) as missing_revision:
+        reporting_api.reporting_settings_action(
+            "subscription_disable", _query(subscription_id="sub-a")
+        )
+    assert missing_revision.value.status == 400
+
     reporting_api.reporting_settings_action(
-        "subscription_disable", _query(subscription_id="sub-a")
+        "subscription_disable", _query(subscription_id="sub-a", revision="0")
     )
 
     assert store.subscription("sub-a").enabled is False

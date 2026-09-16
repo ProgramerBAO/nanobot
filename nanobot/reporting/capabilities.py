@@ -466,6 +466,13 @@ def subscriptions_document(rows: list[Any]) -> ReportDocument:
             fallback_sections.append(content)
             operation = "disable" if row.enabled else "enable"
             operation_label = "停用" if row.enabled else "启用"
+            action_id = f"subscription:{operation}:{row.subscription_id}"
+            if getattr(row, "revision", None) is not None:
+                # Structured cards carry the row revision so a stale button
+                # cannot overwrite a newer subscription state (CAS); the
+                # text-command fallback stays revision-less and resolves the
+                # current revision server-side.
+                action_id += f":{row.revision}"
             blocks.extend(
                 (
                     ReportBlock(
@@ -488,9 +495,7 @@ def subscriptions_document(rows: list[Any]) -> ReportDocument:
                         {
                             "actions": [
                                 {
-                                    "action_id": (
-                                        f"subscription:{operation}:{row.subscription_id}"
-                                    ),
+                                    "action_id": action_id,
                                     "label": f"{operation_label}订阅 {index}",
                                     "style": "default",
                                     "command": f"{operation_label}订阅：{row.subscription_id}",

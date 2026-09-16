@@ -836,90 +836,33 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
     elif action in {"subscription_enable", "subscription_disable", "subscription_delete"}:
         if not management_enabled:
             raise ReportingSettingsError("report management is disabled", status=404)
-        # Guided clients send the row revision so a stale button cannot mutate
-        # a newer subscription.  Legacy clients without a revision retain the
-        # original behavior during the migration window.
-        if query_first(query, "revision") is not None or query_first(
-            query, "expected_revision"
-        ) is not None:
-            subscription_id = _required(query, "subscription_id", max_length=64)
-            revision_key = "revision" if query_first(query, "revision") is not None else "expected_revision"
-            expected_revision = _integer_value(query, revision_key)
-            registry = _reporting_registry(config)
-            service, _catalog = _subscription_service(config, store, registry)
-            try:
-                if action == "subscription_delete":
-                    service.delete(subscription_id, expected_revision=expected_revision)
-                else:
-                    service.set_enabled(
-                        subscription_id,
-                        enabled=action == "subscription_enable",
-                        expected_revision=expected_revision,
-                    )
-            except SubscriptionServiceError as exc:
-                raise ReportingSettingsError(exc.message, status=exc.status) from exc
-            payload = reporting_settings_payload(query)
-            payload["last_action"] = {"ok": True, "action": action}
-            return payload
+        # The row revision is mandatory since the phase-3 consolidation: a
+        # stale control must never mutate a newer subscription state, and the
+        # legacy no-revision inline path is gone (breaking for external API
+        # clients that omitted it; the WebUI has always sent it).
         subscription_id = _required(query, "subscription_id", max_length=64)
-        subscription = store.subscription(subscription_id)
-        if subscription is None:
-            raise ReportingSettingsError("report subscription not found", status=404)
-        cron = _cron_service(config)
-        before = {"enabled": subscription.enabled, "schedule": subscription.schedule}
-        if action == "subscription_delete":
-            job_snapshot = cron.get_job(subscription.cron_job_id)
-            if job_snapshot is None:
-                raise ReportingSettingsError(
-                    "subscription Cron job is missing or protected", status=409
-                )
-            job_snapshot = deepcopy(job_snapshot)
-            result = cron.remove_job(subscription.cron_job_id)
-            if result != "removed":
-                raise ReportingSettingsError("subscription Cron job is missing or protected", status=409)
-            try:
-                removed = store.remove_subscription(
-                    subscription_id, channel=subscription.channel, user_id=subscription.user_id
-                )
-            except Exception as exc:
-                _restore_cron_job_or_raise(cron, job_snapshot)
-                raise ReportingSettingsError(
-                    "订阅删除失败，已恢复原计划", status=503
-                ) from exc
-            if not removed:
-                _restore_cron_job_or_raise(cron, job_snapshot)
-                raise ReportingSettingsError("subscription state changed during deletion", status=409)
-            after = {"deleted": True}
-        else:
-            enabled = action == "subscription_enable"
-            old_enabled = subscription.enabled
-            job = cron.enable_job(subscription.cron_job_id, enabled)
-            if job is None:
-                raise ReportingSettingsError("subscription Cron job was not found", status=409)
-            try:
-                updated = store.set_subscription_enabled(
-                    subscription_id,
-                    channel=subscription.channel,
-                    user_id=subscription.user_id,
-                    enabled=enabled,
-                )
-            except Exception as exc:
-                cron.enable_job(subscription.cron_job_id, old_enabled)
-                raise ReportingSettingsError(
-                    "订阅状态保存失败，已恢复原计划", status=503
-                ) from exc
-            if updated is None:
-                cron.enable_job(subscription.cron_job_id, old_enabled)
-                raise ReportingSettingsError("subscription state changed during update", status=409)
-            after = {"enabled": enabled, "schedule": subscription.schedule}
-        store.record_admin_audit(
-            action=action,
-            target_type="subscription",
-            target_id=subscription_id,
-            before_summary=before,
-            after_summary=after,
-            updated_by="webui_admin",
+        revision_key = (
+            "revision" if query_first(query, "revision") is not None else "expected_revision"
         )
+        if query_first(query, revision_key) is None:
+            raise ReportingSettingsError("revision is required", status=400)
+        expected_revision = _integer_value(query, revision_key)
+        registry = _reporting_registry(config)
+        service, _catalog = _subscription_service(config, store, registry)
+        try:
+            if action == "subscription_delete":
+                service.delete(subscription_id, expected_revision=expected_revision)
+            else:
+                service.set_enabled(
+                    subscription_id,
+                    enabled=action == "subscription_enable",
+                    expected_revision=expected_revision,
+                )
+        except SubscriptionServiceError as exc:
+            raise ReportingSettingsError(exc.message, status=exc.status) from exc
+        payload = reporting_settings_payload(query)
+        payload["last_action"] = {"ok": True, "action": action}
+        return payload
     elif action == "subscription_schedule":
         if not management_enabled:
             raise ReportingSettingsError("report management is disabled", status=404)

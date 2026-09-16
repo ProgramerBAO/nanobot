@@ -2437,15 +2437,22 @@ class FeishuChannel(BaseChannel):
                 "params": {"action": "request_access"},
                 "content": "申请报表权限",
             }
-        match = re.fullmatch(r"subscription:(enable|disable|remove):([0-9a-f]{1,64})", action_id)
+        match = re.fullmatch(
+            r"subscription:(enable|disable|remove):([0-9a-f]{1,64})(?::(\d+))?", action_id
+        )
         if match:
-            operation, subscription_id = match.groups()
+            operation, subscription_id, revision = match.groups()
+            params: dict[str, Any] = {
+                "action": f"subscription_{operation}",
+                "subscription_id": subscription_id,
+            }
+            if revision is not None:
+                # Cards rendered by subscriptions_document embed the row
+                # revision for CAS-protected enable/disable.
+                params["revision"] = int(revision)
             return {
                 "tool_name": "report_center",
-                "params": {
-                    "action": f"subscription_{operation}",
-                    "subscription_id": subscription_id,
-                },
+                "params": params,
                 "content": "管理固定报表订阅",
             }
         return None
