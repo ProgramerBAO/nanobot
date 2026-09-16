@@ -302,8 +302,13 @@ class AgentLoop:
         restart_mode: str = "auto",
         local_trigger_store: Any | None = None,
     ):
-        from nanobot.config.schema import ToolsConfig
+        from nanobot.config.schema import ToolsConfig, ensure_tool_config_resolved
 
+        # Direct AgentLoop construction can happen in import orders where the
+        # config schema's eager forward-ref resolution hit a cycle and was
+        # skipped; finish it lazily before constructing the default tools
+        # config (the config loader has always done the equivalent).
+        ensure_tool_config_resolved()
         _tc = tools_config or ToolsConfig()
         defaults = AgentDefaults()
         self.bus = bus

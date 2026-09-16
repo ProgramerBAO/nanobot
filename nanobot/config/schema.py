@@ -667,3 +667,20 @@ try:
     _resolve_tool_config_refs()
 except ImportError:
     pass
+
+
+def ensure_tool_config_resolved() -> None:
+    """Finish ToolsConfig/Config forward-ref resolution if the eager pass failed.
+
+    The eager resolution above is swallowed on ImportError: in some import
+    chains (for example one that loads a reporting or tool module before this
+    schema) one of the tool-config imports returns a partially initialized
+    module at schema import time. By the time runtime code constructs
+    ``ToolsConfig``/``Config`` directly (e.g. a bare ``AgentLoop``), the
+    import graph has settled and the rebuild succeeds. Idempotent and cheap
+    once the model is complete; the config loader keeps its own equivalent
+    guard.
+    """
+
+    if not getattr(ToolsConfig, "__pydantic_complete__", True):
+        _resolve_tool_config_refs()
