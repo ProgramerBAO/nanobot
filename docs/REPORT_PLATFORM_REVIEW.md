@@ -114,7 +114,7 @@ config 字段（`ReportCenterToolConfig`，report_center.py:251-341，19 个字�
 | --- | --- | --- |
 | Phase 0 | 文档纠偏 + 本评审落盘（PRODUCT.md / report-management.md / WORK_CONTEXT.md） | ✅ 2026-09-16 完成 |
 | Phase 1 | 无行为变化收敛：registry kwargs 单一来源、枚举单源、校验共享、WebUI 类型对齐、死配置删除；focused 套件全绿 | ✅ 2026-09-16 完成（157 passed 含 3 个新契约测试；channels 213 passed/2 既有失败；WebUI 746 全过、3 个并发超时单跑复核通过；eslint/tsc build 通过） |
-| Phase 2 | 开关合并：2a 策略恒执行 → 2b flag→policy 迁移脚本（幂等 expand-only）→ 2c cost 并入运行时体系 → 2d 读取点切换 + 注册表收缩 + WebUI 收缩；门控矩阵测试 | ⬜ |
+| Phase 2 | 开关合并：2a 策略恒执行 → 2b 迁移脚本（幂等 expand-only）→ 2c cost 并入运行时体系 → 2d 读取点切换 + 注册表收缩 + WebUI 收缩；门控矩阵测试 | ✅ 2026-09-16 完成（2a `9a7112b`、2b `828ab7a`+`42a2040`、2c `de4ccd2`、2d `5d2c383`；focused 171 全绿含门控矩阵/迁移契约测试、channels 基线不变、WebUI 746 全过） |
 | Phase 3 | 订阅链路收敛：创建/启停单入口、fingerprint 统一、聊天卡 revision、删除 REST/legacy/死 action、审计补齐、写 action 改 POST；等价性测试 | ⬜ |
 | Phase 4 | 管理面一致性：默认值与 Gateway 同源、构造级开关只读展示、home 统一、Grafana 死模板移除、i18n 补齐、文档终态重写 | ⬜ |
 | Phase 5 | 结构性拆分（独立排期）：report_center.py 分层拆模块、`_subscription_preview` 拆分、SettingsView.tsx 报表区块独立 | ⬜ |
@@ -128,6 +128,14 @@ config 字段（`ReportCenterToolConfig`，report_center.py:251-341，19 个字�
 - 删除：4 个死配置字段（`cube_health_connector`/`cube_health_template`/`cube_provider_quality_connector`/`cube_provider_quality_template`，onboarding 改读 registry 实态）；前端 15 项 action 联合类型改由 api.ts 导出的 `ReportingSettingsAction` 派生；types.ts recurrence 补 `hourly`（纯类型，编辑器选项仍硬编码不含 hourly）。
 - 有意保留（非遗漏）：`authorization.py` 的 legacy 参数→模板映射（Phase 3 处理 legacy 路径时一并收敛）；magik 工具自有的更宽"各大/大客户"正则（legacy 语义不同）；`_subscription_preview` inherit 分支的 `reference_selection_models`（条件含 `item.get("models")` 非空检查，与 hourly 重建不同构，强行合并会改行为）。
 - 新增契约测试：`tests/reporting/test_subscription_enum_contracts.py` 钉住 schedules 常量 = intent Literal = tool schema 枚举。
+
+### Phase 2 落地记录（2026-09-16）
+
+- **2a（`9a7112b`）**：模板策略始终执行——ReportRunner 移除 `template_policy_enforced` 参数恒查策略；`_subscription_policy_denial`、`_run_subscription`、`ReportSubscriptionService._check_template_policy`、capability catalog 全部移除 management 前置；`report_management_v1` 只剩管理页/引导表单可见性与 home 帮助文案职责。machine_tpm_peak 默认不可订阅不再依赖 management 开关（新增回归测试钉住）。
+- **2b（`828ab7a`+`42a2040`）**：`nanobot reports policy migrate-flags [--dry-run]`（`nanobot/reporting/flag_migration.py`）幂等 expand-only 转换 store 覆盖与配置级非默认值；管理员既有 policy 行永远优先；旧 `report_feature_flags` 覆盖行保留观察窗口。附带修复既有缺陷：`ToolsConfig` 前向引用在特定导入顺序下未解析导致裸构造 AgentLoop 崩溃（schema 增加 `ensure_tool_config_resolved()` 惰性解析，loop 构造前调用——WORK_CONTEXT 记载的"被 deselect 的既有失败"根因）。
+- **2c（`de4ccd2`）**：`cube_cost_report`/`cube_cost_subscription` 加入运行时注册表（成本报表组），RC 三处读取统一 `_flag()`；TokenAPI 连接注册保持 config 级。
+- **2d（`5d2c383`）**：注册表 21→10（删 7 项每模板家族 + 3 项订阅类 + 无独立行为的 nlu_v3）；执行/预览/订阅/编译/可见层全部改读 `template_enabled`（capabilities 公共单源）；FSRUN onboarding 改 registry 派生；被退役 config 字段保留一个迁移窗口并记录警告；迁移 CLI 同时转换配置级非默认值。新增门控矩阵测试（enabled×subscription_mode×可见/创建）与迁移默认值契约测试。
+- 行为变化声明：management 关闭时策略不再被绕过（此前依赖"关=放行"语义的部署需按上述语义评估）；每模板家族默认从 flag 默认值变为 policy 默认值（无行=启用），原有非默认状态由迁移 CLI 承接。
 
 ## 6. 验证基线（每阶段通用）
 
