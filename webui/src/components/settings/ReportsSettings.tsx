@@ -58,6 +58,9 @@ type GuidedFormState = {
   // Comma/顿号 separated clock hours for the hourly cadence; empty means
   // every hour. Kept as text so partial input stays editable.
   hours: string;
+  // Comma/顿号 separated delivery chat targets; empty falls back to the
+  // single chat_id (solo subscription).
+  chat_ids: string;
   timezone: string;
   project: string;
   endpoint: string;
@@ -87,6 +90,7 @@ const EMPTY_SUBSCRIPTION: GuidedFormState = {
   weekday: 1,
   month_day: 1,
   hours: "",
+  chat_ids: "",
   timezone: "Asia/Shanghai",
   project: "",
   endpoint: "",
@@ -118,10 +122,14 @@ function parseHourList(value: string): number[] {
 }
 
 function toFormValues(form: GuidedFormState): Record<string, unknown> {
+  const chatTargets = splitList(form.chat_ids);
   return {
     template_id: form.template_id,
     channel: form.channel.trim(),
-    chat_id: form.chat_id.trim(),
+    // The single chat target stays for the solo-subscription path; a
+    // non-empty target list fans the broadcast out server-side.
+    chat_id: chatTargets[0] ?? form.chat_id.trim(),
+    chat_ids: chatTargets,
     user_id: form.user_id.trim(),
     tenant_scope: form.tenant_scope,
     tenants: splitList(form.tenants),
@@ -191,6 +199,10 @@ function fromSubscription(item: ReportingSubscription): GuidedFormState {
     weekday: form.weekday,
     month_day: form.month_day,
     hours: (form.hours ?? []).join("、"),
+    // Delivery targets come from the derived group; older payloads without
+    // the field fall back to the single chat target.
+    chat_ids: (item.delivery_targets ?? []).map((target) => target.chat_id).join("、")
+      || form.chat_id,
     timezone: form.timezone || item.timezone,
     project: form.project ?? "",
     endpoint: form.endpoint ?? "",
@@ -335,6 +347,14 @@ function SubscriptionRow({
               ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
               : "border-border text-muted-foreground",
           )}>{item.enabled ? t("settings.reports.sub.enabled", { defaultValue: "启用" }) : t("settings.reports.sub.disabled", { defaultValue: "停用" })}</span>
+          {(item.delivery_targets?.length ?? 0) > 1 ? (
+            <span
+              className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-700 dark:text-sky-300"
+              title={t("settings.reports.sub.deliveryTargetsTitle", { defaultValue: `投递组会话：${item.delivery_targets?.map((target) => target.chat_id).join("、") ?? ""}`, targets: item.delivery_targets?.map((target) => target.chat_id).join("、") ?? "" })}
+            >
+              {t("settings.reports.sub.deliveryCount", { defaultValue: `投递 ${item.delivery_targets?.length ?? 0} 会话`, count: item.delivery_targets?.length ?? 0 })}
+            </span>
+          ) : null}
         </div>
         <p className="mt-2 break-words text-sm text-foreground/85">{item.scope_summary || t("settings.reports.sub.noScope", { defaultValue: "未指定范围" })}</p>
         <p className="mt-1 break-all text-xs text-muted-foreground">
@@ -584,7 +604,11 @@ function SubscriptionEditor({
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <label className={FIELD_LABEL_CLASS}>{t("settings.reports.editor.channel", { defaultValue: "推送渠道" })}<select className={SELECT_CLASS} value={form.channel} onChange={(event) => onChange({ channel: event.target.value })} disabled={busy}><option value="feishu">{t("settings.reports.editor.channelFeishu", { defaultValue: "Feishu（当前可用）" })}</option><option value="wecom" disabled>{t("settings.reports.editor.channelWecom", { defaultValue: "企业微信（能力保留，暂不可投递）" })}</option><option value="dingtalk" disabled>{t("settings.reports.editor.channelDingtalk", { defaultValue: "钉钉（能力保留，暂不可投递）" })}</option></select></label>
         <label className={FIELD_LABEL_CLASS}>{t("settings.reports.editor.recipient", { defaultValue: "接收人" })}<Input value={form.user_id} onChange={(event) => onChange({ user_id: event.target.value })} placeholder={t("settings.reports.editor.recipientPlaceholder", { defaultValue: "用户标识" })} disabled={busy} /></label>
-        <label className={FIELD_LABEL_CLASS}>{t("settings.reports.editor.chat", { defaultValue: "会话" })}<Input value={form.chat_id} onChange={(event) => onChange({ chat_id: event.target.value })} placeholder={t("settings.reports.editor.chatPlaceholder", { defaultValue: "会话或群标识" })} disabled={busy} /></label>
+        <label className={FIELD_LABEL_CLASS}>
+          {t("settings.reports.editor.deliveryTargets", { defaultValue: "投递会话" })}
+          <Input value={form.chat_ids} onChange={(event) => onChange({ chat_ids: event.target.value })} placeholder={t("settings.reports.editor.deliveryTargetsPlaceholder", { defaultValue: "会话/群标识，用顿号分隔（首个为主投递）" })} disabled={busy} />
+          <span className="text-[11px] text-muted-foreground">{t("settings.reports.editor.deliveryTargetsHint", { defaultValue: "同一内容和发送计划会同时投递到所有列出的会话。" })}</span>
+        </label>
         <label className={FIELD_LABEL_CLASS}>{t("settings.reports.editor.projectFilter", { defaultValue: "项目过滤（可选）" })}<Input value={form.project} onChange={(event) => onChange({ project: event.target.value })} disabled={busy} /></label>
         <label className={FIELD_LABEL_CLASS}>{t("settings.reports.editor.endpointFilter", { defaultValue: "Endpoint 过滤（可选）" })}<Input value={form.endpoint} onChange={(event) => onChange({ endpoint: event.target.value })} disabled={busy} /></label>
         <label className={FIELD_LABEL_CLASS}>{t("settings.reports.editor.providerFilter", { defaultValue: "Provider 过滤（可选）" })}<Input value={form.provider} onChange={(event) => onChange({ provider: event.target.value })} disabled={busy} /></label>
@@ -593,7 +617,7 @@ function SubscriptionEditor({
 
       <div className="flex flex-wrap items-center gap-2 border-t border-border/50 pt-4">
         <Button size="sm" variant="outline" disabled={busy || !form.template_id} onClick={onPreview}><Check className="h-4 w-4" />{t("settings.reports.editor.preview", { defaultValue: "预览配置" })}</Button>
-        <Button size="sm" disabled={busy || !form.template_id || !form.user_id || !form.chat_id} onClick={onSubmit}>{editing ? t("settings.reports.editor.save", { defaultValue: "保存修改" }) : t("settings.reports.editor.create", { defaultValue: "创建订阅" })}</Button>
+        <Button size="sm" disabled={busy || !form.template_id || !form.user_id || !(splitList(form.chat_ids)[0] ?? form.chat_id.trim())} onClick={onSubmit}>{editing ? t("settings.reports.editor.save", { defaultValue: "保存修改" }) : t("settings.reports.editor.create", { defaultValue: "创建订阅" })}</Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>{t("settings.reports.editor.cancel", { defaultValue: "取消" })}</Button>
       </div>
     </div>

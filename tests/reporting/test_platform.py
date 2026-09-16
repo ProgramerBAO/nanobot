@@ -37,7 +37,11 @@ from nanobot.reporting.registry import (
 )
 from nanobot.reporting.renderer import document_to_markdown
 from nanobot.reporting.store import ReportMessageReference, ReportSubscription
-from nanobot.reporting.subscriptions import ReportSubscriptionService, SubscriptionServiceError
+from nanobot.reporting.subscriptions import (
+    ReportSubscriptionService,
+    SubscriptionServiceError,
+    subscription_group_key,
+)
 from nanobot.reporting.templates import (
     load_builtin_template_specs,
     parse_template_spec,
@@ -1402,6 +1406,114 @@ def test_guided_subscription_compiles_explicit_broadcast_hours(tmp_path) -> None
                 "hours": [24],
                 "timezone": "Asia/Shanghai",
             }
+        )
+
+
+def test_delivery_group_create_update_and_target_diff(tmp_path) -> None:
+    """One broadcast fans out to one independent row per chat target (2026-09-16)."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    cube_config = MagikCubeToolConfig(
+        enable=True,
+        base_url="https://cube.example.internal",
+        # Fixture-only config; no real credential is embedded.
+        access_token="",
+    )
+    registry = build_default_registry(
+        discover_external=False,
+        magik_enabled=True,
+        cube_config=cube_config,
+    )
+    config = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(
+                report_management_v1=False,
+                timezone="Asia/Shanghai",
+            )
+        ),
+        agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+    )
+    cron = CronService(tmp_path / "cron" / "jobs.json")
+
+    def resolve_tenants(values: list[str]):
+        return (
+            [{"query": value, "tenant_id": value, "display_name": value} for value in values],
+            [],
+        )
+
+    def resolve_models(tenant_ids: list[str], models: list[str]):
+        return {tenant_id: ["Kimi-K3"] for tenant_id in tenant_ids}, []
+
+    service = ReportSubscriptionService(
+        config=config,
+        store=store,
+        registry=registry,
+        cron=cron,
+        tenant_resolver=resolve_tenants,
+        model_resolver=resolve_models,
+    )
+    base_form = {
+        "template_id": "usage_customer_model_hourly_tpm",
+        "channel": "feishu",
+        "user_id": "ou-a",
+        "tenant_scope": "selected",
+        "tenants": ["tenant-a"],
+        "model_scope": "all",
+        "models": [],
+        "period": "recent1h",
+        "recurrence": "hourly",
+        "send_time": "00:00",
+        "timezone": "Asia/Shanghai",
+    }
+
+    # Two targets create two independent rows sharing one derived group key,
+    # each with its own Cron job (per-target delivery and idempotency).
+    result = service.create_group({**base_form, "chat_ids": ["chat-a", "chat-b"]})
+    assert len(result["created"]) == 2
+    assert result["skipped"] == ()
+    rows = store.subscriptions("feishu", "ou-a")
+    assert sorted(row.chat_id for row in rows) == ["chat-a", "chat-b"]
+    assert len({subscription_group_key(row) for row in rows}) == 1
+    assert len({row.subscription_id for row in rows}) == 2
+    assert len(cron.list_jobs()) == 2
+
+    # A duplicate target is skipped per target while a new one is created.
+    partial = service.create_group({**base_form, "chat_ids": ["chat-a", "chat-c"]})
+    assert [row.chat_id for row in partial["created"]] == ["chat-c"]
+    assert partial["skipped"] == ("chat-a",)
+    rows = store.subscriptions("feishu", "ou-a")
+    assert sorted(row.chat_id for row in rows) == ["chat-a", "chat-b", "chat-c"]
+
+    # An all-duplicate group raises the same 409 as the single-target path.
+    with pytest.raises(SubscriptionServiceError) as duplicate_error:
+        service.create_group(
+            {**base_form, "chat_ids": ["chat-a", "chat-b", "chat-c"]}
+        )
+    assert duplicate_error.value.status == 409
+
+    # A group update diffs the target list and syncs the common fields:
+    # staying targets get the new schedule, new targets are created with it,
+    # absent targets (and their jobs) are deleted.
+    primary = next(
+        row for row in store.subscriptions("feishu", "ou-a") if row.chat_id == "chat-a"
+    )
+    updated = service.update(
+        primary.subscription_id,
+        {**base_form, "chat_ids": ["chat-a", "chat-d"], "hours": [9, 10]},
+        expected_revision=primary.revision,
+    )
+    assert updated.chat_id == "chat-a"
+    rows = store.subscriptions("feishu", "ou-a")
+    assert sorted(row.chat_id for row in rows) == ["chat-a", "chat-d"]
+    assert {row.schedule for row in rows} == {"5 9,10 * * *"}
+    assert len({subscription_group_key(row) for row in rows}) == 1
+    assert len(cron.list_jobs()) == 2
+
+    # The target cap fails closed before any row is created.
+    with pytest.raises(SubscriptionServiceError, match="投递会话最多"):
+        service.create_group(
+            {**base_form, "chat_ids": [f"chat-{index}" for index in range(21)]}
         )
 
 

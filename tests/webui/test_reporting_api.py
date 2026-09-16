@@ -286,6 +286,66 @@ def test_subscription_form_snapshot_recovers_broadcast_hours() -> None:
     assert weekly["hours"] == []
 
 
+def test_reporting_settings_payload_aggregates_delivery_groups(
+    monkeypatch, tmp_path
+) -> None:
+    """Group members carry the shared delivery_targets list (2026-09-16)."""
+
+    store = ReportStateStore(tmp_path / "reporting.db")
+    monkeypatch.setattr(reporting_api, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *_args, **_kwargs: store)
+    now = datetime.now(UTC).isoformat()
+    # Two rows of one broadcast group (same identity minus chat target) and
+    # one unrelated solo subscription.
+    shared = {
+        "subscription_id": "",
+        "channel": "feishu",
+        "user_id": "ou-a",
+        "connector_id": "magik_cube",
+        "template_id": "usage_customer_model_hourly_tpm",
+        "template_version": "2.1",
+        "schedule": "5 9,10 * * *",
+        "timezone": "Asia/Shanghai",
+        "report_params": {"subscription_period": "recent1h", "model_scope": "all"},
+        "cron_job_id": "job-group",
+        "enabled": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    for index, chat_id in enumerate(("chat-a", "chat-b")):
+        row = ReportSubscription(**{**shared, "subscription_id": f"sub-{index}", "chat_id": chat_id})
+        assert store.add_subscription(row, f"fingerprint-{index}")
+    solo = ReportSubscription(
+        subscription_id="sub-solo",
+        channel="feishu",
+        chat_id="chat-a",
+        user_id="ou-a",
+        connector_id="magik_cube",
+        template_id="usage_daily_brief",
+        template_version="2.0",
+        schedule="0 9 * * *",
+        timezone="Asia/Shanghai",
+        report_params={"subscription_period": "day"},
+        cron_job_id="job-solo",
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    assert store.add_subscription(solo, "fingerprint-solo")
+
+    payload = reporting_api.reporting_settings_payload()
+
+    by_id = {item["subscription_id"]: item for item in payload["subscriptions"]}
+    group_ids = {"sub-0", "sub-1"}
+    for subscription_id in group_ids:
+        targets = by_id[subscription_id]["delivery_targets"]
+        assert {item["chat_id"] for item in targets} == {"chat-a", "chat-b"}
+        assert {item["subscription_id"] for item in targets} == group_ids
+    # A solo subscription keeps the same shape with itself as the only
+    # target so the editor code path stays uniform.
+    assert [item["chat_id"] for item in by_id["sub-solo"]["delivery_targets"]] == ["chat-a"]
+
+
 def test_subscription_disable_updates_cron_and_database(monkeypatch, tmp_path) -> None:
     store = ReportStateStore(tmp_path / "reporting.db")
     config = _config(tmp_path)

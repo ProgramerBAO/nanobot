@@ -15,7 +15,7 @@ import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -41,6 +41,11 @@ TenantResolver = Callable[[list[str]], tuple[list[dict[str, str]], list[dict[str
 ModelResolver = Callable[
     [list[str], list[str]], tuple[dict[str, list[str]], list[dict[str, str]]]
 ]
+
+# Upper bound for one delivery group's chat targets (user-confirmed
+# 2026-09-16): keeps a stray form value from fanning a broadcast out to an
+# unbounded number of sessions.
+MAX_DELIVERY_TARGETS = 20
 
 _SAFE_REPORT_PARAM_KEYS = frozenset(
     {
@@ -329,6 +334,33 @@ def subscription_fingerprint(
             "utf-8"
         )
     ).hexdigest()
+
+
+def subscription_group_key(subscription: ReportSubscription) -> str:
+    """Delivery-group key: the fingerprint identity minus the chat target.
+
+    Rows sharing this key form one logical broadcast (user-confirmed
+    2026-09-16): same channel/user/template/schedule/timezone/params across
+    different chat targets. The group is derived at read time — there is no
+    group-id column, and each row keeps its own Cron job, fingerprint, and
+    delivery idempotency key so the proven single-target pipeline stays
+    untouched.
+    """
+
+    value = [
+        subscription.channel,
+        subscription.user_id,
+        subscription.template_id,
+        subscription.schedule,
+        subscription.timezone,
+        json.dumps(
+            subscription.report_params,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    ]
+    return hashlib.sha256("\n".join(value).encode("utf-8")).hexdigest()
 
 
 def find_duplicate_subscriptions(store: Any) -> list[dict[str, Any]]:
@@ -1021,6 +1053,84 @@ class ReportSubscriptionService:
         )
         return subscription
 
+    @staticmethod
+    def _delivery_targets(form: Mapping[str, Any]) -> list[str]:
+        """Normalize the ``chat_ids`` delivery list from a guided form.
+
+        Returns the deduplicated target order; an empty or missing list is
+        invalid here because every group operation needs at least one
+        target. Non-list shapes are rejected — the WebUI form contract is
+        an array of strings.
+        """
+
+        raw_targets = form.get("chat_ids")
+        if not isinstance(raw_targets, list):
+            raise SubscriptionServiceError("chat_ids must be a non-empty list")
+        targets = list(
+            dict.fromkeys(
+                str(value).strip() for value in raw_targets if str(value).strip()
+            )
+        )
+        if not targets:
+            raise SubscriptionServiceError("chat_ids must be a non-empty list")
+        if len(targets) > MAX_DELIVERY_TARGETS:
+            raise SubscriptionServiceError(f"投递会话最多 {MAX_DELIVERY_TARGETS} 个")
+        return targets
+
+    def create_group(
+        self, form: Mapping[str, Any], *, updated_by: str = "webui_admin"
+    ) -> dict[str, Any]:
+        """Create one subscription row per delivery target (2026-09-16).
+
+        Each target becomes an independent row with its own Cron job and
+        fingerprint (the chat target is part of the identity), so delivery,
+        retry, and idempotency stay per-session. A target that already has
+        an identical subscription is skipped and reported instead of
+        failing the whole group; any other failure compensates the rows
+        created so far and re-raises.
+        """
+
+        targets = self._delivery_targets(form)
+        base_form = {key: value for key, value in form.items() if key != "chat_ids"}
+        created: list[ReportSubscription] = []
+        skipped: list[str] = []
+        for target in targets:
+            try:
+                created.append(
+                    self.create({**base_form, "chat_id": target}, updated_by=updated_by)
+                )
+            except SubscriptionServiceError as exc:
+                if exc.status == 409 and "identical" in exc.message:
+                    skipped.append(target)
+                    continue
+                for subscription in created:
+                    self._delete_compensate(subscription, updated_by=updated_by)
+                raise
+        if not created:
+            raise SubscriptionServiceError(
+                "an identical report subscription already exists", status=409
+            )
+        return {"created": tuple(created), "skipped": tuple(skipped)}
+
+    def _delete_compensate(
+        self, subscription: ReportSubscription, *, updated_by: str
+    ) -> None:
+        """Best-effort removal of a row created by an aborted group create."""
+
+        try:
+            self.delete(
+                subscription.subscription_id,
+                expected_revision=subscription.revision,
+                updated_by=updated_by,
+            )
+        except SubscriptionServiceError as exc:
+            logger.error(
+                "Failed to compensate group subscription create: "
+                "subscription_id={} status={}",
+                subscription.subscription_id,
+                exc.status,
+            )
+
     def update(
         self,
         subscription_id: str,
@@ -1029,13 +1139,25 @@ class ReportSubscriptionService:
         expected_revision: int,
         updated_by: str = "webui_admin",
     ) -> ReportSubscription:
-        """Replace editable fields atomically with Cron/database compensation."""
+        """Replace editable fields atomically with Cron/database compensation.
+
+        A form carrying ``chat_ids`` switches to delivery-group semantics
+        (2026-09-16): the target list is diffed against the edited row's
+        group and applied row by row (see ``_update_delivery_group``).
+        """
 
         current = self.store.subscription(subscription_id)
         if current is None:
             raise SubscriptionServiceError("report subscription not found", status=404)
         if current.revision != expected_revision:
             raise SubscriptionServiceError("subscription was updated by another operator", status=409)
+        if isinstance(form.get("chat_ids"), list) and form.get("chat_ids"):
+            return self._update_delivery_group(
+                current,
+                form,
+                expected_revision=expected_revision,
+                updated_by=updated_by,
+            )
         compiled = self.compile_form(form, existing=current)
         self._check_template_policy(
             compiled.template_id,
@@ -1043,6 +1165,98 @@ class ReportSubscriptionService:
             user_id=compiled.user_id,
         )
         self._authorize_compiled_scope(compiled)
+        return self._apply_compiled_to_row(
+            current,
+            compiled,
+            expected_revision=expected_revision,
+            updated_by=updated_by,
+        )
+
+    def _update_delivery_group(
+        self,
+        current: ReportSubscription,
+        form: Mapping[str, Any],
+        *,
+        expected_revision: int,
+        updated_by: str,
+    ) -> ReportSubscription:
+        """Replace the delivery target list of one broadcast group.
+
+        Staying targets receive the compiled common fields first, new
+        targets are created, and absent targets are deleted last — a
+        mid-way failure leaves the already-applied rows in place instead
+        of silently dropping targets. Operations run per row with per-row
+        CAS, so a group edit is not atomic; the raised error identifies
+        the failed row.
+        """
+
+        targets = self._delivery_targets(form)
+        desired = set(targets)
+        common_form = {key: value for key, value in form.items() if key != "chat_ids"}
+        common_form["chat_id"] = current.chat_id
+        compiled = self.compile_form(common_form, existing=current)
+        self._check_template_policy(
+            compiled.template_id,
+            channel=compiled.channel,
+            user_id=compiled.user_id,
+        )
+        self._authorize_compiled_scope(compiled)
+        group_key = subscription_group_key(current)
+        group_rows = [
+            row
+            for row in self.store.subscriptions(current.channel, current.user_id)
+            if row.subscription_id == current.subscription_id
+            or subscription_group_key(row) == group_key
+        ]
+        updated_current: ReportSubscription | None = None
+        for row in group_rows:
+            if row.chat_id not in desired:
+                continue
+            row_compiled = replace(compiled, chat_id=row.chat_id)
+            row_revision = (
+                expected_revision
+                if row.subscription_id == current.subscription_id
+                else row.revision
+            )
+            result = self._apply_compiled_to_row(
+                row,
+                row_compiled,
+                expected_revision=row_revision,
+                updated_by=updated_by,
+            )
+            if row.subscription_id == current.subscription_id:
+                updated_current = result
+        existing_chats = {row.chat_id for row in group_rows}
+        for target in targets:
+            if target in existing_chats:
+                continue
+            created = self.create(
+                {**common_form, "chat_id": target}, updated_by=updated_by
+            )
+            if updated_current is None:
+                updated_current = created
+        for row in group_rows:
+            if row.chat_id in desired:
+                continue
+            self.delete(
+                row.subscription_id,
+                expected_revision=row.revision,
+                updated_by=updated_by,
+            )
+        if updated_current is None:
+            raise SubscriptionServiceError("report subscription not found", status=404)
+        return updated_current
+
+    def _apply_compiled_to_row(
+        self,
+        current: ReportSubscription,
+        compiled: CompiledSubscriptionForm,
+        *,
+        expected_revision: int,
+        updated_by: str,
+    ) -> ReportSubscription:
+        """Apply one compiled form to an existing row with Cron-first compensation."""
+
         job = self.cron.get_job(current.cron_job_id)
         if job is None:
             raise SubscriptionServiceError("subscription Cron job was not found", status=409)
@@ -1050,7 +1264,7 @@ class ReportSubscriptionService:
         old_name = job.name
         old_session = job.payload.session_key
         old_origin_channel = job.payload.origin_channel
-        old_origin_chat = job.payload.origin_chat_id
+        old_origin_chat_id = job.payload.origin_chat_id
         old_origin_metadata = dict(job.payload.origin_metadata)
         updated_job = self.cron.update_job(
             current.cron_job_id,
@@ -1070,7 +1284,7 @@ class ReportSubscriptionService:
             origin_metadata={
                 INBOUND_META_DIRECT_TOOL: {
                     "name": "report_center",
-                    "params": {"action": "run_subscription", "subscription_id": subscription_id},
+                    "params": {"action": "run_subscription", "subscription_id": current.subscription_id},
                 },
                 "direct_request_text": "执行固定报表订阅",
             },
@@ -1079,7 +1293,7 @@ class ReportSubscriptionService:
             raise SubscriptionServiceError("subscription Cron job cannot be updated", status=409)
         try:
             updated = self.store.update_subscription(
-                subscription_id,
+                current.subscription_id,
                 channel=compiled.channel,
                 chat_id=compiled.chat_id,
                 user_id=compiled.user_id,
@@ -1099,7 +1313,7 @@ class ReportSubscriptionService:
                 old_name,
                 old_session,
                 old_origin_channel,
-                old_origin_chat,
+                old_origin_chat_id,
                 old_origin_metadata,
             )
             raise
@@ -1110,14 +1324,14 @@ class ReportSubscriptionService:
                 old_name,
                 old_session,
                 old_origin_channel,
-                old_origin_chat,
+                old_origin_chat_id,
                 old_origin_metadata,
             )
             raise SubscriptionServiceError("subscription was updated by another operator", status=409)
         self.store.record_admin_audit(
             action="subscription_update",
             target_type="subscription",
-            target_id=subscription_id,
+            target_id=current.subscription_id,
             before_summary={"template_id": current.template_id, "revision": current.revision},
             after_summary={"template_id": updated.template_id, "revision": updated.revision},
             updated_by=updated_by[:256] or "webui_admin",

@@ -98,3 +98,50 @@ describe("ReportsSettings feature flags", () => {
     );
   });
 });
+
+describe("ReportsSettings delivery groups", () => {
+  beforeEach(() => {
+    vi.mocked(fetchReportingSettings).mockReset();
+    vi.mocked(runReportingSettingsAction).mockReset();
+  });
+
+  it("badges group members and edits targets as one list", async () => {
+    const user = userEvent.setup();
+    const payload = payloadWithFlags();
+    payload.subscriptions = [
+      {
+        subscription_id: "sub-0",
+        channel: "feishu",
+        chat_id: "chat-a",
+        user_id: "ou-a",
+        connector_id: "magik_cube",
+        template_id: "usage_customer_model_hourly_tpm",
+        template_version: "2.1",
+        schedule: "5 9,10 * * *",
+        timezone: "Asia/Shanghai",
+        enabled: true,
+        revision: 0,
+        report_params: {},
+        scope_summary: "佛跳墙 · 全部模型",
+        schedule_label: "每天 9、10 点（整点后 5 分钟）",
+        delivery_targets: [
+          { subscription_id: "sub-0", chat_id: "chat-a", enabled: true, revision: 0 },
+          { subscription_id: "sub-1", chat_id: "chat-b", enabled: true, revision: 0 },
+        ],
+        updated_at: "2026-09-17T00:00:00Z",
+      },
+    ];
+    vi.mocked(fetchReportingSettings).mockResolvedValue(payload);
+
+    render(<ReportsSettings token="token" />);
+    await user.click(await screen.findByRole("tab", { name: /Subscriptions/ }));
+
+    // Group members carry the shared target-count badge (2026-09-16).
+    expect(await screen.findByText("Delivers to 2 chats")).toBeInTheDocument();
+
+    // Editing loads the derived delivery target list into one field.
+    await user.click(await screen.findByRole("button", { name: /Edit/ }));
+    const targetsInput = await screen.findByLabelText(/Delivery chats/);
+    expect((targetsInput as HTMLInputElement).value).toBe("chat-a、chat-b");
+  });
+});

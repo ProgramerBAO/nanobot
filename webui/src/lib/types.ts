@@ -1016,6 +1016,15 @@ export interface ReportingSubscription {
   report_params: Record<string, unknown>;
   scope_summary: string;
   schedule_label: string;
+  /** Derived delivery group (2026-09-16): every row of the same broadcast,
+   *  this row included. Solo subscriptions list themselves as the only
+   *  target so consumers can treat the field uniformly. */
+  delivery_targets?: Array<{
+    subscription_id: string;
+    chat_id: string;
+    enabled: boolean;
+    revision: number;
+  }>;
   /** Older subscriptions may not have a normalized snapshot until reloaded. */
   form?: ReportingSubscriptionForm;
   updated_at: string;

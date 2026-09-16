@@ -13,6 +13,7 @@ from nanobot.reporting.schedules import (
     report_template_label,
 )
 from nanobot.reporting.store import ReportStateStore
+from nanobot.reporting.subscriptions import subscription_group_key
 
 ONBOARDING_VERSION = 1
 
@@ -448,6 +449,14 @@ def subscriptions_document(rows: list[Any]) -> ReportDocument:
             )
         ]
         fallback_sections: list[str] = []
+        # Delivery groups are derived at read time (fingerprint identity
+        # minus the chat target, 2026-09-16): rows of one broadcast fan-out
+        # stay individually operable and get a group badge so the card never
+        # presents them as unrelated subscriptions.
+        group_sizes: dict[str, int] = {}
+        for row in rows:
+            key = subscription_group_key(row)
+            group_sizes[key] = group_sizes.get(key, 0) + 1
         for index, row in enumerate(rows, start=1):
             report_label = report_template_label(row.template_id)
             schedule = describe_subscription_schedule(row.schedule)
@@ -456,9 +465,11 @@ def subscriptions_document(rows: list[Any]) -> ReportDocument:
                 "calculation_version", row.template_version
             )
             status = "启用" if row.enabled else "停用"
+            group_size = group_sizes.get(subscription_group_key(row), 1)
+            group_note = f"｜投递组 {group_size} 会话" if group_size > 1 else ""
             scope = _subscription_scope_text(row.report_params)
             content = (
-                f"**订阅 {index} · {report_label}**｜{status}\n"
+                f"**订阅 {index} · {report_label}**｜{status}{group_note}\n"
                 f"发送计划：{schedule}｜时区：{row.timezone}\n"
                 f"统计范围：{scope}\n"
                 f"数据周期：{data_period}｜口径版本：{calculation_version}"

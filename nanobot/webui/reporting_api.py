@@ -31,6 +31,7 @@ from nanobot.reporting.subscriptions import (
     DEFAULT_UNSUBSCRIBABLE_TEMPLATES,
     ReportSubscriptionService,
     SubscriptionServiceError,
+    subscription_group_key,
 )
 from nanobot.utils.helpers import _write_text_atomic
 from nanobot.webui.http_utils import query_first
@@ -48,10 +49,10 @@ _ADMIN_REPORT_PARAM_KEYS = frozenset(
 _STRUCTURED_VALUES_KEY = "__reporting_values"
 _GUIDED_FORM_KEYS = frozenset(
     {
-        "template_id", "channel", "chat_id", "user_id", "tenant_scope", "tenants",
-        "tenant_aliases", "model_scope", "models", "period", "recurrence", "send_time",
-        "weekday", "month_day", "hours", "timezone", "project", "endpoint", "provider",
-        "cluster",
+        "template_id", "channel", "chat_id", "chat_ids", "user_id", "tenant_scope",
+        "tenants", "tenant_aliases", "model_scope", "models", "period", "recurrence",
+        "send_time", "weekday", "month_day", "hours", "timezone", "project",
+        "endpoint", "provider", "cluster",
     }
 )
 
@@ -347,6 +348,35 @@ def _safe_schedule_label(schedule: str) -> str:
     return describe_subscription_schedule(schedule)
 
 
+def _attach_delivery_groups(
+    items: list[ReportSubscription], payloads: list[dict[str, Any]]
+) -> None:
+    """Attach the derived delivery-group target list to each payload row.
+
+    A group is every row sharing the group key (fingerprint identity minus
+    the chat target), derived at read time — no group column exists. Rows
+    are aggregated within the fetched page only, so a group split across
+    pagination boundaries shows partially; operations re-derive the full
+    group server-side and stay correct.
+    """
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item, payload in zip(items, payloads):
+        groups.setdefault(subscription_group_key(item), []).append(payload)
+    for members in groups.values():
+        targets = [
+            {
+                "subscription_id": member["subscription_id"],
+                "chat_id": member["chat_id"],
+                "enabled": member["enabled"],
+                "revision": member["revision"],
+            }
+            for member in members
+        ]
+        for member in members:
+            member["delivery_targets"] = targets
+
+
 def _subscription_scope_summary(item: ReportSubscription) -> str:
     params = item.report_params
     labels = [str(value).strip() for value in params.get("tenant_labels") or [] if str(value).strip()]
@@ -568,17 +598,18 @@ def reporting_settings_payload(
         offset = _pagination_value(
             query, "offset", default=0, minimum=0, maximum=1_000_000
         )
-        payload["subscriptions"] = [
-            _subscription_payload(item)
-            for item in store.all_subscriptions(limit=limit, offset=offset)
-        ]
+        items = store.all_subscriptions(limit=limit, offset=offset)
+        payloads = [_subscription_payload(item) for item in items]
+        _attach_delivery_groups(items, payloads)
+        payload["subscriptions"] = payloads
     if channel and user_id:
         payload["grants"] = store.grants(channel, user_id)
         payload["recent_runs"] = store.recent_runs(channel, user_id, limit=10)
         if not payload["policy"]["management_enabled"]:
-            payload["subscriptions"] = [
-                _subscription_payload(item) for item in store.subscriptions(channel, user_id)
-            ]
+            items = store.subscriptions(channel, user_id)
+            payloads = [_subscription_payload(item) for item in items]
+            _attach_delivery_groups(items, payloads)
+            payload["subscriptions"] = payloads
     return payload
 
 
@@ -809,11 +840,23 @@ def reporting_settings_action(
                 load_catalog=_guided_form_requires_catalog(form),
             )
             try:
-                service.create(form)
+                # A chat_ids list fans the broadcast out to one row per
+                # target (2026-09-16); duplicates are skipped per target.
+                group_result: dict[str, Any] | None = None
+                if isinstance(form.get("chat_ids"), list) and form.get("chat_ids"):
+                    group_result = service.create_group(form)
+                else:
+                    service.create(form)
             except SubscriptionServiceError as exc:
                 raise ReportingSettingsError(exc.message, status=exc.status) from exc
             payload = reporting_settings_payload(query, startup_config=startup_config)
-            payload["last_action"] = {"ok": True, "action": "subscription_create_guided"}
+            payload["last_action"] = {
+                "ok": True,
+                "action": "subscription_create_guided",
+                "skipped_targets": (
+                    list(group_result["skipped"]) if group_result else []
+                ),
+            }
             return payload
     if action == "rbac":
         # Phase-3 audit closure: the RBAC toggle previously mutated report
