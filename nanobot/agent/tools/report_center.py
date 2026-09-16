@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import re
 import secrets
 import time
@@ -80,6 +78,7 @@ from nanobot.reporting.subscriptions import (
     ReportSubscriptionService,
     SubscriptionServiceError,
     evaluate_subscription_policy,
+    subscription_fingerprint,
 )
 from nanobot.utils.report_failures import is_transient_report_failure
 
@@ -3890,6 +3889,8 @@ class ReportCenterTool(Tool):
             return "usage_customer_model_daily_brief"
         if report_variant == "customer_model_weekly_brief":
             return "usage_customer_model_weekly_brief"
+        if report_variant == "customer_model_hourly_tpm":
+            return "usage_customer_model_hourly_tpm"
         if report_template == "brief":
             return BRIEF_PERIOD_TEMPLATES[data_period]
         return PERIOD_TEMPLATES[data_period]
@@ -4084,7 +4085,7 @@ class ReportCenterTool(Tool):
     ) -> ToolResult:
         """Create usage subscriptions through the shared guided service."""
 
-        if period not in {"day", "week", "month"}:
+        if period not in {"day", "week", "month", "recent1h"}:
             return ToolResult.error("Error: subscription period must be day, week, or month")
         params = dict(report_params)
         records, model_records, catalog, error = await self._revalidate_confirmed_usage_scope(
@@ -4104,7 +4105,9 @@ class ReportCenterTool(Tool):
         )
         # The guided service enforces the template policy itself; the retired
         # multi-scope runtime flag no longer gates this path.
-        if period == "week":
+        if period == "recent1h":
+            recurrence = "hourly"
+        elif period == "week":
             recurrence = "weekly"
         elif period == "month":
             recurrence = "monthly"
@@ -4647,21 +4650,26 @@ class ReportCenterTool(Tool):
                 params["report_template_id"] = "usage_customer_model_hourly_tpm"
             elif period not in PERIOD_TEMPLATES:
                 return ToolResult.error("Error: subscription period must be day, week, or month")
-            # Day/week/month confirmations now use the same typed compiler as
-            # the WebUI. Keep the bounded legacy path for custom windows, whose
-            # historical schedule semantics still need migration.
-            if period in {"day", "week", "month"} and not (
-                len(
-                    [
-                        item
-                        for item in params.get("report_selections") or []
-                        if isinstance(item, dict)
-                    ]
-                )
-                > 1
-                and str(params.get("report_variant") or "")
-                != "customer_model_daily_brief"
-            ):
+            # Day/week/month confirmations use the same typed compiler as the
+            # WebUI; multi-selection matrix subscriptions keep the bounded
+            # legacy path for custom windows. Hourly (recent1h) always uses
+            # the service — its schedule is clock-driven and carries no
+            # legacy semantics.
+            selections_count = len(
+                [
+                    item
+                    for item in params.get("report_selections") or []
+                    if isinstance(item, dict)
+                ]
+            )
+            legacy_matrix_shape = (
+                selections_count > 1
+                and str(params.get("report_variant") or "") != "customer_model_daily_brief"
+                and str(params.get("report_variant") or "") != "customer_model_hourly_tpm"
+            )
+            if (
+                period in {"day", "week", "month"} and not legacy_matrix_shape
+            ) or period == "recent1h":
                 if not user_id or not self._authorized_for_magik(channel, user_id):
                     return ToolResult.error("Error: no permission for the Magik Cube connector")
                 params.setdefault(
@@ -4757,13 +4765,17 @@ class ReportCenterTool(Tool):
             return ToolResult.error(policy_denial)
         if report_family == "health":
             params["threshold_version"] = "health-default-v1"
-        fingerprint_payload = json.dumps(
-            [channel, user_id, template_id, cron_expr, params],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        # Legacy-path fingerprint uses the same single-source identity as the
+        # guided service so cross-entry duplicates are detected.
+        fingerprint = subscription_fingerprint(
+            channel=channel,
+            chat_id=chat_id,
+            user_id=user_id,
+            template_id=template_id,
+            schedule=cron_expr,
+            timezone_name=self._config.timezone,
+            report_params=params,
         )
-        fingerprint = hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest()
         subscription_id = uuid.uuid4().hex[:16]
         origin_metadata = {
             key: value

@@ -289,6 +289,42 @@ def _schedule_period(recurrence: str) -> str:
     return RECURRENCE_SCHEDULE_PERIODS[recurrence]
 
 
+def subscription_fingerprint(
+    *,
+    channel: str,
+    chat_id: str,
+    user_id: str,
+    template_id: str,
+    schedule: str,
+    timezone_name: str,
+    report_params: Mapping[str, Any],
+) -> str:
+    """Single-source subscription fingerprint.
+
+    The guided service, the channel confirmation path, and the remaining
+    legacy creation paths must all deduplicate on the same identity
+    ([channel, chat_id, user_id, template_id, schedule, timezone, params]).
+    Three per-entry algorithms previously made the
+    UNIQUE(channel, user_id, fingerprint) constraint unable to detect
+    cross-entry duplicates.
+    """
+
+    value = [
+        channel,
+        chat_id,
+        user_id,
+        template_id,
+        schedule,
+        timezone_name,
+        report_params,
+    ]
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
 class ReportSubscriptionService:
     """Compile and mutate subscriptions through one validated control plane.
 
@@ -742,6 +778,17 @@ class ReportSubscriptionService:
                     "report_template": "brief",
                 }
             )
+        if template_id == "usage_customer_model_hourly_tpm":
+            # Hourly runs are clock-driven; the variant and template-id markers
+            # let the RBAC param mapping and the cron-run compiler recognize
+            # the hourly branch deterministically.
+            params.update(
+                {
+                    "report_variant": "customer_model_hourly_tpm",
+                    "report_template": "brief",
+                    "report_template_id": "usage_customer_model_hourly_tpm",
+                }
+            )
         if len(tenant_ids) == 1:
             params["tenant_query"] = tenant_ids[0]
         for key in ("project", "endpoint", "provider", "cluster"):
@@ -790,20 +837,15 @@ class ReportSubscriptionService:
 
     @staticmethod
     def _fingerprint(compiled: CompiledSubscriptionForm) -> str:
-        value = [
-            compiled.channel,
-            compiled.chat_id,
-            compiled.user_id,
-            compiled.template_id,
-            compiled.schedule,
-            compiled.timezone,
-            compiled.report_params,
-        ]
-        return hashlib.sha256(
-            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        ).hexdigest()
+        return subscription_fingerprint(
+            channel=compiled.channel,
+            chat_id=compiled.chat_id,
+            user_id=compiled.user_id,
+            template_id=compiled.template_id,
+            schedule=compiled.schedule,
+            timezone_name=compiled.timezone,
+            report_params=compiled.report_params,
+        )
 
     def _new_job(self, compiled: CompiledSubscriptionForm, subscription_id: str):
         direct_tool = {

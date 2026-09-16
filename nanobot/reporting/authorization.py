@@ -19,6 +19,10 @@ def template_id_for_magik_params(params: dict[str, Any]) -> str:
             if period == "week"
             else "usage_customer_model_daily_brief"
         )
+    if str(params.get("report_variant") or "") == "customer_model_hourly_tpm":
+        # Hourly TPM subscriptions authorize against their own template grant
+        # instead of the brief-period fallback.
+        return "usage_customer_model_hourly_tpm"
     if str(params.get("report_family") or "") == "cost":
         return "cost_account"
     if str(params.get("report_family") or "") == "health":

@@ -25,6 +25,10 @@ from nanobot.cron.session_turns import CRON_TRIGGER_META
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.reporting import CubeConnector, ReportDataset, ReportStateStore
 from nanobot.reporting.store import ReportMessageReference, ReportSubscription
+from nanobot.reporting.subscriptions import (
+    ReportSubscriptionService,
+    SubscriptionServiceError,
+)
 
 
 class _FakeCron:
@@ -1150,6 +1154,133 @@ def test_subscription_params_still_reject_unknown_external_controls(
 
     with pytest.raises(ValueError, match="unsupported report subscription parameters"):
         tool._safe_report_params({"save_snapshot": True, "url": "https://invalid.example"})
+
+
+@pytest.mark.asyncio
+async def test_hourly_subscribe_uses_service_and_shares_fingerprint(
+    monkeypatch, tmp_path
+) -> None:
+    """Phase 3a: hourly chat confirmations create through the guided service.
+
+    The subscription must carry the hourly template/variant markers and the
+    clock-driven schedule, and an equivalent direct service create must hit
+    the shared-fingerprint duplicate (one identity across entries).
+    """
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    cron = _FakeCron()
+    magik = AsyncMock()
+    magik.resolve_tenant_queries.return_value = (
+        [{"query": "tenant-a", "tenant_id": "tenant-a", "display_name": "客户A"}],
+        [],
+    )
+    magik.resolve_models_for_tenants.return_value = ({"tenant-a": ["Kimi-K3"]}, [])
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(),
+        cron,
+        magik,
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="",
+        ),
+    )
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou_a",
+        session_key="feishu:chat-a",
+    )
+    hourly_params = {
+        "report_variant": "customer_model_hourly_tpm",
+        "report_template_id": "usage_customer_model_hourly_tpm",
+        "report_template": "brief",
+        "report_family": "usage",
+        "subscription_period": "recent1h",
+        "tenant_scope": "selected",
+        "tenants": ["tenant-a"],
+        "model_scope": "selected",
+        "models": ["Kimi-K3"],
+        "report_selections": [
+            {"tenant_query": "tenant-a", "model_scope": "selected", "models": ["Kimi-K3"]}
+        ],
+    }
+    with request_context(context):
+        created = await tool.execute(
+            action="subscribe",
+            period="recent1h",
+            send_time="10:00",
+            report_params=hourly_params,
+        )
+
+    assert not created.is_error
+    subscriptions = store.subscriptions("feishu", "ou_a")
+    assert len(subscriptions) == 1
+    subscription = subscriptions[0]
+    assert subscription.template_id == "usage_customer_model_hourly_tpm"
+    assert subscription.schedule == "5 * * * *"
+    assert subscription.report_params["report_variant"] == "customer_model_hourly_tpm"
+    assert (
+        subscription.report_params["report_template_id"]
+        == "usage_customer_model_hourly_tpm"
+    )
+    assert len(cron.jobs) == 1
+
+    def resolve_tenants(values: list[str]):
+        # Must return the same display name the chat-path catalog mock used:
+        # tenant_labels are part of the fingerprint identity.
+        return (
+            [
+                {"query": value, "tenant_id": value, "display_name": "客户A"}
+                for value in values
+            ],
+            [],
+        )
+
+    def resolve_models(tenant_ids: list[str], models: list[str]):
+        return {tenant_id: list(models) for tenant_id in tenant_ids}, []
+
+    service = ReportSubscriptionService(
+        config=SimpleNamespace(
+            workspace_path=tmp_path,
+            tools=SimpleNamespace(
+                reporting=SimpleNamespace(
+                    report_management_v1=True, timezone="Asia/Shanghai"
+                )
+            ),
+            agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+        ),
+        store=store,
+        registry=tool._registry,
+        cron=cron,
+        tenant_resolver=resolve_tenants,
+        model_resolver=resolve_models,
+    )
+    with pytest.raises(SubscriptionServiceError, match="identical"):
+        service.create(
+            {
+                "template_id": "usage_customer_model_hourly_tpm",
+                "channel": "feishu",
+                "chat_id": "chat-a",
+                "user_id": "ou_a",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-a"],
+                "model_scope": "selected",
+                "models": ["Kimi-K3"],
+                "period": "recent1h",
+                "recurrence": "hourly",
+                "send_time": "10:00",
+                "weekday": 1,
+                "month_day": 1,
+                "timezone": "Asia/Shanghai",
+            },
+            updated_by="ou_a",
+        )
+    # The duplicate attempt compensated its Cron side effect (_FakeCron
+    # records removals without mutating the jobs list).
+    assert cron.removed == [cron.jobs[1].id]
+    assert len(store.subscriptions("feishu", "ou_a")) == 1
 
 
 @pytest.mark.asyncio
