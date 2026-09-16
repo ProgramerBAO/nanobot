@@ -58,14 +58,17 @@ describe("ReportsSettings feature flags", () => {
     vi.mocked(runReportingSettingsAction).mockResolvedValue(payloadWithFlags());
 
     render(<ReportsSettings token="token" />);
-    await user.click(await screen.findByRole("tab", { name: /功能开关/ }));
+    // Component chrome renders through i18n; the test environment runs the
+    // default English locale, while the flag labels below come from the
+    // server payload and stay as provided.
+    await user.click(await screen.findByRole("tab", { name: /Feature flags/ }));
 
     // The label renders once as the row text and once as the switch's
     // accessible name.
     expect((await screen.findAllByText("小时 TPM 报告")).length).toBeGreaterThan(0);
-    expect(screen.getByText("cube_customer_model_hourly_tpm · 默认值")).toBeInTheDocument();
+    expect(screen.getByText("cube_customer_model_hourly_tpm · default")).toBeInTheDocument();
     // Override-backed rows expose a reset affordance; default rows do not.
-    expect(screen.getByTitle("恢复默认值")).toBeInTheDocument();
+    expect(screen.getByTitle("Reset to default")).toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "小时 TPM 报告" }));
     await waitFor(() =>
@@ -83,8 +86,8 @@ describe("ReportsSettings feature flags", () => {
     vi.mocked(runReportingSettingsAction).mockResolvedValue(payloadWithFlags());
 
     render(<ReportsSettings token="token" />);
-    await user.click(await screen.findByRole("tab", { name: /功能开关/ }));
-    await user.click(await screen.findByTitle("恢复默认值"));
+    await user.click(await screen.findByRole("tab", { name: /Feature flags/ }));
+    await user.click(await screen.findByTitle("Reset to default"));
 
     await waitFor(() =>
       expect(runReportingSettingsAction).toHaveBeenCalledWith(
