@@ -51,6 +51,10 @@ def build_gateway_services(
     local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
     channel_feature_action: Callable[..., Any] | None = None,
     channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+    # The resolved root config the Gateway process runs with; the reporting
+    # settings surface reads its defaults from this handle. Distinct from
+    # ``config`` (the WebSocket channel section).
+    startup_config: Any = None,
     logger: Any = default_logger,
 ) -> GatewayServices:
     tokens = GatewayTokenStore()
@@ -94,6 +98,7 @@ def build_gateway_services(
         local_trigger_pending_ids=local_trigger_pending_ids,
         channel_feature_action=channel_feature_action,
         channel_runtime_status=channel_runtime_status,
+        startup_config=startup_config,
         log=logger,
     )
     return GatewayServices(

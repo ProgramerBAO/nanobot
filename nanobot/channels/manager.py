@@ -161,6 +161,10 @@ class ChannelManager:
             workspace = Path(self.config.workspace_path)
             gateway = build_gateway_services(
                 config=parsed,
+                # The resolved root config: the reporting settings surface
+                # reads its defaults from the running process's view, not
+                # from a re-read config.json.
+                startup_config=self.config,
                 bus=self.bus,
                 session_manager=self._session_manager,
                 static_dist_path=static_path,

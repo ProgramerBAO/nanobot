@@ -35,6 +35,37 @@ def _query(**values: object) -> dict[str, list[str]]:
     return {key: [str(value)] for key, value in values.items()}
 
 
+def test_reporting_settings_fall_back_on_wrong_shape_startup_handle(
+    monkeypatch, tmp_path
+) -> None:
+    """A channel-section startup handle must never crash the settings surface.
+
+    Regression for the 2026-09-16 phase-4 wiring bug: the WebSocket channel
+    section (WebSocketConfig, no ``tools`` attribute) reached the reporting
+    API as the startup config and every settings action failed with the
+    generic 500 "reporting settings action failed".
+    """
+
+    class _ChannelSection:
+        max_message_bytes = 1
+
+    monkeypatch.setattr(reporting_api, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(reporting_api, "resolve_config_env_vars", lambda value: value)
+
+    # The wrong-shape handle falls back to a fresh resolved load instead of
+    # raising AttributeError on .tools.reporting.
+    payload = reporting_api.reporting_settings_payload(
+        startup_config=_ChannelSection()
+    )
+    assert payload["storage"]["backend"] == "sqlite"
+
+    # A correctly shaped handle is used as-is (the running process's view).
+    payload = reporting_api.reporting_settings_payload(
+        startup_config=_config(tmp_path)
+    )
+    assert payload["storage"]["backend"] == "sqlite"
+
+
 def test_template_policy_action_enforces_revision(monkeypatch, tmp_path) -> None:
     store = ReportStateStore(tmp_path / "reporting.db")
     monkeypatch.setattr(reporting_api, "load_config", lambda: _config(tmp_path))

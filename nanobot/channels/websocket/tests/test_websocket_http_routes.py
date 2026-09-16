@@ -7,6 +7,7 @@ import socket
 import time
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import quote, urlencode
@@ -79,11 +80,13 @@ def _make_handler(
     local_trigger_pending_ids: Any | None = None,
     channel_feature_action: Any | None = None,
     channel_runtime_status: Any | None = None,
+    startup_config: Any = None,
 ) -> GatewayServices:
     config = WebSocketConfig.model_validate(cfg) if isinstance(cfg, dict) else cfg
     workspace = workspace_path or Path.cwd()
     return build_gateway_services(
         config=config,
+        startup_config=startup_config,
         bus=bus,
         session_manager=session_manager,
         static_dist_path=static_dist_path,
@@ -147,6 +150,43 @@ def bus() -> MagicMock:
     b = MagicMock()
     b.publish_inbound = AsyncMock()
     return b
+
+
+def test_gateway_services_pass_root_startup_config_to_reporting(
+    bus: MagicMock,
+) -> None:
+    """The reporting settings surface must receive the ROOT config.
+
+    Regression for the 2026-09-16 phase-4 wiring bug: GatewayHTTPHandler's
+    own ``config`` is the WebSocket channel section (no ``tools``
+    attribute), and the settings router originally received that handle,
+    making every reporting settings action fail with a generic 500. The
+    channel manager must pass its resolved root config instead.
+    """
+
+    root = SimpleNamespace(
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(
+                state_backend="sqlite",
+                postgres_dsn_env="NANOBOT_REPORTING_POSTGRES_DSN",
+            )
+        )
+    )
+    services = _make_handler(
+        {
+            "enabled": True,
+            "allowFrom": ["*"],
+            "host": "127.0.0.1",
+            "port": _PORT,
+            "path": "/",
+            "websocketRequiresToken": False,
+        },
+        bus,
+        startup_config=root,
+    )
+    # The settings router holds the root config, not the channel section.
+    assert services.http.settings_routes._startup_config is root
+    assert not hasattr(services.http.config, "tools")
 
 
 def _seed_session(workspace: Path, key: str = "websocket:test") -> SessionManager:

@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.config.loader import load_config, resolve_config_env_vars
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.service import CronService
@@ -72,7 +74,17 @@ def _load_reporting_config(startup_config: Any = None) -> Any:
     """
 
     if startup_config is not None:
-        return startup_config
+        tools = getattr(startup_config, "tools", None)
+        if tools is not None and getattr(tools, "reporting", None) is not None:
+            return startup_config
+        # A wrong-shape handle (for example a channel section such as
+        # WebSocketConfig) must never crash the whole settings surface; fall
+        # back to a fresh resolved load and leave a diagnosable warning.
+        logger.warning(
+            "startup reporting config handle lacks tools.reporting "
+            "(type={}); falling back to a fresh resolved load",
+            type(startup_config).__name__,
+        )
     return resolve_config_env_vars(load_config())
 
 

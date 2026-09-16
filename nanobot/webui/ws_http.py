@@ -170,9 +170,14 @@ class GatewayHTTPHandler:
         local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
         channel_feature_action: Callable[..., Any] | None = None,
         channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+        startup_config: Any = None,
         log: Any = logger,
     ) -> None:
         self.config = config
+        # The resolved ROOT config the Gateway process runs with — not the
+        # WebSocketConfig above, which is only this channel's section. The
+        # reporting settings surface reads its defaults from this handle.
+        self._startup_config = startup_config
         self.session_manager = session_manager
         self.static_dist_path = static_dist_path
         self.runtime_model_name = runtime_model_name
@@ -205,7 +210,7 @@ class GatewayHTTPHandler:
             runtime_capabilities=self._capabilities,
             channel_feature_action=channel_feature_action,
             channel_runtime_status=channel_runtime_status,
-            startup_config=config,
+            startup_config=self._startup_config,
         )
 
     def workspace_controls_available(self, connection: Any) -> bool:
