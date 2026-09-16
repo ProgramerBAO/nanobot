@@ -117,7 +117,7 @@ config 字段（`ReportCenterToolConfig`，report_center.py:251-341，19 个字�
 | Phase 2 | 开关合并：2a 策略恒执行 → 2b 迁移脚本（幂等 expand-only）→ 2c cost 并入运行时体系 → 2d 读取点切换 + 注册表收缩 + WebUI 收缩；门控矩阵测试 | ✅ 2026-09-16 完成（2a `9a7112b`、2b `828ab7a`+`42a2040`、2c `de4ccd2`、2d `5d2c383`；focused 171 全绿含门控矩阵/迁移契约测试、channels 基线不变、WebUI 746 全过） |
 | Phase 3 | 订阅链路收敛：创建/启停单入口、fingerprint 统一、聊天卡 revision、删除 REST/legacy/死 action、审计补齐、写 action 改 POST；等价性测试 | ✅ 2026-09-16 完成（3a `1881e79`、3b `deba21d`、3c-3e `4200bdf`；focused 177 全绿含 hourly service 化 + 跨入口判重 + 重复扫描测试、WebUI 746/eslint/tsc 全过） |
 | Phase 4 | 管理面一致性：默认值与 Gateway 同源、构造级开关只读展示、home 统一、Grafana 死模板移除、i18n 补齐、文档终态重写 | ✅ 2026-09-16 完成（ReportsSettings 页面文案完整 i18n 抽取另行排期；Python 455 全绿含 websocket 路由树、WebUI 746/eslint/tsc 全过） |
-| Phase 5 | 结构性拆分（独立排期）：report_center.py 分层拆模块、`_subscription_preview` 拆分、SettingsView.tsx 报表区块独立 | ◐ 2026-09-16 部分完成（`4760c00`：report_center 5,352 行 → 8 文件职责包，纯移动+3 处最小编辑，行为不变；验证全绿含真实网关注册与页面渲染。**遗留**：`_subscription_preview`（573 行）整体移入 subscription_flow 未内部分解；SettingsView 报表区块确认已独立（ReportsSettings.tsx），其完整 i18n 抽取与 preview 分解另行排期） |
+| Phase 5 | 结构性拆分（独立排期）：report_center.py 分层拆模块、`_subscription_preview` 拆分、SettingsView.tsx 报表区块独立 | ✅ 2026-09-16 完成（模块拆分 `4760c00`；preview 八阶段分解 `6ffdeb1`；ReportsSettings i18n 三连 `912cf48`+`2a536de`+`09c53c6`：134+3 键 × 10 locale、插值变量修复经真实浏览器中英双语冒烟验证；SettingsView 报表区块确认早已独立为 ReportsSettings.tsx） |
 
 每阶段独立 commit、独立可发布、可回滚。Phase 2 迁移 expand-only（写 policy 行、不删 flag 覆盖行），store 备份后执行，旧覆盖行在验证窗口后清理。
 
