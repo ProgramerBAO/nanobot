@@ -1631,7 +1631,6 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
-                template_policy_enforced=self._flag("report_management_v1"),
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行 Cube 健康报告的权限，请联系管理员授权。")
@@ -1741,7 +1740,6 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
-                template_policy_enforced=self._flag("report_management_v1"),
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行 Cube 供应商质量报告的权限，请联系管理员授权。")
@@ -1851,7 +1849,6 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
-                template_policy_enforced=self._flag("report_management_v1"),
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行 Cube 成本与账户报表的权限，请联系管理员授权。")
@@ -2002,7 +1999,6 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
-                template_policy_enforced=self._flag("report_management_v1"),
             ).run(intent, context)
         except PermissionError:
             return ToolResult.error("当前账号没有执行该 Cube 报表的权限，请联系管理员授权。")
@@ -2378,7 +2374,6 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
-                template_policy_enforced=self._flag("report_management_v1"),
             ).run(
                 intent,
                 ReportRunContext(
@@ -2633,7 +2628,6 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
-                template_policy_enforced=self._flag("report_management_v1"),
             ).run(
                 intent,
                 ReportRunContext(
@@ -2707,7 +2701,6 @@ class ReportCenterTool(Tool):
                 self._registry,
                 self._store,
                 semantic_shadow_enabled=self._config.cube_semantics_shadow,
-                template_policy_enforced=self._flag("report_management_v1"),
             ).run(
                 intent,
                 ReportRunContext(
@@ -2968,11 +2961,11 @@ class ReportCenterTool(Tool):
     ) -> str | None:
         """Return a safe denial for a template before subscription side effects.
 
-        The management plane is deliberately the single source of truth for
-        lifecycle, audience, and opt-in policy.  When that plane is disabled,
-        the legacy subscription behavior remains available for backwards
-        compatibility; once enabled, wider-scope templates require an explicit
-        policy row instead of inheriting an accidental default.
+        The template policy table is the single source of truth for lifecycle,
+        audience, and opt-in policy and is always enforced (2026-09-16
+        consolidation): the report_management_v1 runtime flag now gates only
+        the WebUI management surface, never enforcement. Unsubscribable-by-
+        default templates still require an explicit policy row.
         """
 
         template = self._registry.template(template_id)
@@ -2980,8 +2973,6 @@ class ReportCenterTool(Tool):
             return "Error: report subscription template is unavailable"
         if template.manifest.lifecycle_state not in {"publish", "canary"}:
             return "Error: this report template is not available"
-        if not self._flag("report_management_v1"):
-            return None
 
         if self._store.rbac_enabled():
             required_grants = [
@@ -4538,7 +4529,6 @@ class ReportCenterTool(Tool):
             self._registry,
             self._store,
             semantic_shadow_enabled=self._config.cube_semantics_shadow,
-            template_policy_enforced=self._flag("report_management_v1"),
         )
         outcome = await runner.run(intent, context)
         report_attempts = 1
@@ -4924,10 +4914,9 @@ class ReportCenterTool(Tool):
         subscription = self._store.subscription(subscription_id)
         if subscription is None or not subscription.enabled:
             return ToolResult.error("Error: report subscription is missing or disabled")
-        if self._flag("report_management_v1"):
-            policy = self._store.template_policy(subscription.template_id)
-            if policy is not None and not policy["enabled"]:
-                return ToolResult.error("Error: report template is disabled")
+        policy = self._store.template_policy(subscription.template_id)
+        if policy is not None and not policy["enabled"]:
+            return ToolResult.error("Error: report template is disabled")
         family = str(subscription.report_params.get("report_family") or "usage")
         if self._magik_tool is None and family != "provider_quality":
             return ToolResult.error("Error: Magik Cube connector is unavailable")

@@ -47,20 +47,20 @@ class ReportRunner:
         store: ReportStateStore,
         *,
         semantic_shadow_enabled: bool = False,
-        template_policy_enforced: bool = False,
     ) -> None:
         self._registry = registry
         self._store = store
         self._query_slots = asyncio.Semaphore(2)
         self._semantic_shadow_enabled = semantic_shadow_enabled
-        self._template_policy_enforced = template_policy_enforced
 
     def _authorize(self, intent: ReportIntent, context: ReportRunContext) -> None:
+        # Template policy is always enforced (2026-09-16 consolidation): the
+        # report_management_v1 runtime flag gates only the WebUI management
+        # surface, never execution. A stored enabled=False row blocks the run.
         validate_report_intent(intent)
-        if self._template_policy_enforced:
-            policy = self._store.template_policy(intent.template_id)
-            if policy is not None and not policy["enabled"]:
-                raise PermissionError("report template is disabled")
+        policy = self._store.template_policy(intent.template_id)
+        if policy is not None and not policy["enabled"]:
+            raise PermissionError("report template is disabled")
         checks = [
             ("connector", intent.connector_id),
             ("template", intent.template_id),

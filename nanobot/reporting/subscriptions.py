@@ -323,10 +323,6 @@ class ReportSubscriptionService:
             dict(item) for item in (catalog_tenants or ()) if isinstance(item, Mapping)
         )
 
-    def _management_enabled(self) -> bool:
-        reporting_config = getattr(getattr(self.config, "tools", None), "reporting", self.config)
-        return bool(getattr(reporting_config, "report_management_v1", False))
-
     def _template(self, template_id: str):
         template = self.registry.template(template_id)
         if template is None:
@@ -353,11 +349,9 @@ class ReportSubscriptionService:
                     raise SubscriptionServiceError(
                         "user is not authorized for this report subscription", status=403
                     )
-        # The management policy is an additive control plane.  When it is not
-        # enabled, legacy subscription APIs retain their historical behavior;
-        # RBAC and template lifecycle checks above still apply.
-        if not self._management_enabled():
-            return
+        # Template policy is always enforced (2026-09-16 consolidation); the
+        # report_management_v1 runtime flag gates only the WebUI management
+        # surface. RBAC and template lifecycle checks above still apply.
         policy = self.store.template_policy(template_id)
         reason = evaluate_subscription_policy(template_id, policy)
         if reason == POLICY_DENIED_ALLOWLIST:

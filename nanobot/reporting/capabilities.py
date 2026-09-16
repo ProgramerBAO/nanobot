@@ -31,13 +31,9 @@ def _allowed(
     return store.allowed(channel, user_id, "capability", capability_id)
 
 
-def _template_enabled(
-    store: ReportStateStore, template_id: str, *, policy_enforced: bool
-) -> bool:
-    """Hide administratively disabled templates when management policies are active."""
+def _template_enabled(store: ReportStateStore, template_id: str) -> bool:
+    """Hide administratively disabled templates (policy always enforced)."""
 
-    if not policy_enforced:
-        return True
     policy = store.template_policy(template_id)
     return policy is None or bool(policy["enabled"])
 
@@ -52,7 +48,6 @@ def capability_catalog(
     cost_enabled: bool = False,
     provider_quality_enabled: bool = False,
     brief_default: bool = False,
-    template_policy_enforced: bool = False,
 ) -> tuple[Capability, ...]:
     has_cube = registry.connector("magik_cube") is not None and store.allowed(
         channel, user_id, "connector", "magik_cube"
@@ -74,7 +69,7 @@ def capability_catalog(
         and health_template is not None
         and health_template in registry.compatible_templates("magik_cube")
         and store.allowed(channel, user_id, "template", "health_sre")
-        and _template_enabled(store, "health_sre", policy_enforced=template_policy_enforced)
+        and _template_enabled(store, "health_sre")
     ):
         items.append(
             Capability(
@@ -95,9 +90,7 @@ def capability_catalog(
         and provider_quality_template is not None
         and provider_quality_template in registry.compatible_templates("cube_provider_quality")
         and store.allowed(channel, user_id, "template", "provider_quality")
-        and _template_enabled(
-            store, "provider_quality", policy_enforced=template_policy_enforced
-        )
+        and _template_enabled(store, "provider_quality")
     ):
         items.append(
             Capability(
@@ -114,7 +107,7 @@ def capability_catalog(
         and cost_template is not None
         and cost_template in registry.compatible_templates("magik_cube")
         and store.allowed(channel, user_id, "template", "cost_account")
-        and _template_enabled(store, "cost_account", policy_enforced=template_policy_enforced)
+        and _template_enabled(store, "cost_account")
     ):
         items.append(
             Capability(
@@ -130,11 +123,7 @@ def capability_catalog(
             multi_template is not None
             and multi_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", multi_template.manifest.template_id)
-            and _template_enabled(
-                store,
-                multi_template.manifest.template_id,
-                policy_enforced=template_policy_enforced,
-            )
+            and _template_enabled(store, multi_template.manifest.template_id)
         ):
             items.append(
                 Capability(
@@ -149,11 +138,7 @@ def capability_catalog(
             weekly_multi_template is not None
             and weekly_multi_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", weekly_multi_template.manifest.template_id)
-            and _template_enabled(
-                store,
-                weekly_multi_template.manifest.template_id,
-                policy_enforced=template_policy_enforced,
-            )
+            and _template_enabled(store, weekly_multi_template.manifest.template_id)
         ):
             items.append(
                 Capability(
@@ -185,9 +170,7 @@ def capability_catalog(
             action_info = period_actions.get(manifest.template_id)
             if action_info is None or not store.allowed(
                 channel, user_id, "template", manifest.template_id
-            ) or not _template_enabled(
-                store, manifest.template_id, policy_enforced=template_policy_enforced
-            ):
+            ) or not _template_enabled(store, manifest.template_id):
                 continue
             period, title, description = action_info
             items.append(
@@ -204,7 +187,7 @@ def capability_catalog(
             )
         recent_template = "usage_custom_brief" if brief_default else "usage_weekly_matrix"
         if store.allowed(channel, user_id, "template", recent_template) and _template_enabled(
-            store, recent_template, policy_enforced=template_policy_enforced
+            store, recent_template
         ):
             items.append(
                 Capability(
@@ -219,9 +202,7 @@ def capability_catalog(
             machine_template is not None
             and machine_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", "machine_tpm_peak")
-            and _template_enabled(
-                store, "machine_tpm_peak", policy_enforced=template_policy_enforced
-            )
+            and _template_enabled(store, "machine_tpm_peak")
         ):
             items.append(
                 Capability(
@@ -236,11 +217,7 @@ def capability_catalog(
             hourly_template is not None
             and hourly_template in registry.compatible_templates("magik_cube")
             and store.allowed(channel, user_id, "template", "usage_customer_model_hourly_tpm")
-            and _template_enabled(
-                store,
-                "usage_customer_model_hourly_tpm",
-                policy_enforced=template_policy_enforced,
-            )
+            and _template_enabled(store, "usage_customer_model_hourly_tpm")
         ):
             items.append(
                 Capability(
@@ -304,7 +281,6 @@ def home_document(
         cost_enabled=cost_enabled,
         provider_quality_enabled=provider_quality_enabled,
         brief_default=brief_default,
-        template_policy_enforced=management_enabled,
     )
     if capabilities and capabilities[0].capability_id == "request_access":
         intro = "当前账号尚未获得报表数据源权限，请联系管理员授权。"

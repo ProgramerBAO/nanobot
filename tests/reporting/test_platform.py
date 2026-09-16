@@ -374,6 +374,118 @@ def test_template_policy_uses_revision_and_subscription_grant(tmp_path) -> None:
     assert store.allowed("feishu", "ou-a", "subscription_template", "machine_tpm_peak")
 
 
+@pytest.mark.asyncio
+async def test_runner_denies_disabled_template_without_management_flag(tmp_path) -> None:
+    """Policy enforcement is unconditional (2026-09-16 consolidation).
+
+    Before the consolidation a disabled policy row only blocked runs while
+    report_management_v1 was on; the flag now gates only the WebUI
+    management surface, so a stored enabled=False row must always deny.
+    """
+
+    registry = ReportPluginRegistry()
+    registry.register_connector(_Connector())
+    registry.register_template(_Template())
+    store = ReportStateStore(tmp_path / "state.db")
+    store.set_template_policy(
+        "test_daily",
+        enabled=False,
+        subscription_mode="all_authorized",
+        updated_by="test-admin",
+        expected_revision=0,
+    )
+    runner = ReportRunner(registry, store)
+    with pytest.raises(PermissionError, match="report template is disabled"):
+        await runner.run(
+            ReportIntent(
+                connector_id="test_connector",
+                template_id="test_daily",
+                period="day",
+                start_date=date(2026, 8, 25),
+                end_date=date(2026, 8, 25),
+            ),
+            ReportRunContext(
+                channel="test",
+                chat_id="chat",
+                user_id="user",
+                timezone="Asia/Shanghai",
+                trace_id="trace-policy",
+                template_version="1.0",
+            ),
+        )
+
+
+def test_service_denies_machine_tpm_peak_without_management_flag(tmp_path) -> None:
+    """machine_tpm_peak stays unsubscribable-by-default with management off.
+
+    Regression for the 2026-09-16 consolidation: the default-unsubscribable
+    set used to apply only while report_management_v1 was enabled.
+    """
+
+    store = ReportStateStore(tmp_path / "state.db")
+    registry = build_default_registry(
+        discover_external=False,
+        magik_enabled=True,
+        # No Cube query is issued in this test (resolvers are stubs), so the
+        # config carries no credential material at all.
+        cube_config=MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            access_token="",
+        ),
+    )
+    config = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(
+                report_management_v1=False,
+                timezone="Asia/Shanghai",
+            )
+        ),
+        agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+    )
+
+    def resolve_tenants(values: list[str]):
+        return (
+            [
+                {"query": value, "tenant_id": value, "display_name": value}
+                for value in values
+            ],
+            [],
+        )
+
+    def resolve_models(tenant_ids: list[str], models: list[str]):
+        return {tenant_id: list(models) for tenant_id in tenant_ids}, []
+
+    service = ReportSubscriptionService(
+        config=config,
+        store=store,
+        registry=registry,
+        cron=CronService(tmp_path / "cron" / "jobs.json"),
+        tenant_resolver=resolve_tenants,
+        model_resolver=resolve_models,
+    )
+    with pytest.raises(SubscriptionServiceError, match="does not allow subscriptions"):
+        service.create(
+            {
+                "template_id": "machine_tpm_peak",
+                "channel": "feishu",
+                "chat_id": "chat-a",
+                "user_id": "ou-a",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-a"],
+                "model_scope": "selected",
+                "models": ["Kimi-K3"],
+                "period": "day",
+                "recurrence": "every_day",
+                "send_time": "10:00",
+                "weekday": 1,
+                "month_day": 1,
+                "timezone": "Asia/Shanghai",
+            }
+        )
+
+
 def test_declarative_template_rejects_executable_fields() -> None:
     with pytest.raises(ValueError, match="unsupported template fields"):
         parse_template_spec(
