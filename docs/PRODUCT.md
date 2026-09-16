@@ -27,14 +27,16 @@ Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管�
 | 简报默认路由 | 普通周期问法进入简报；详细和完整问法保留旧模板 | `cube_usage_brief_default` |
 | Cube 灵活查询 | 租户、模型、Endpoint、账单、集群、日志和配置的只读查询 | `cube_admin_skill_help`，且 Admin Tool 已启用 |
 | 进一步分析 | 简报卡片携带原客户、模型和时间窗口进入矩阵报表 | 服务端重新执行权限校验 |
-| 多客户多模型日报简报 | 按客户分组展示当前周期 Token 总数、同比和环比；手工多选最多 20 个模型，“全部模型”受 200 个客户/模型组合上限保护 | `cube_multi_scope_brief`，默认关闭 |
-| 多客户多模型周报简报 | 按客户分组展示上一完整自然周 Token 总数及前一完整自然周环比 | `cube_multi_scope_weekly_brief`，默认关闭 |
-| 多客户多模型小时 TPM 报告 | 按客户分组展示上一完整小时各模型 TPM 峰值、均值与平台级机器数；支持每小时订阅播报（整点后 5 分钟） | `cube_customer_model_hourly_tpm`（订阅另需 `cube_customer_model_hourly_tpm_subscription`），默认关闭 |
-| 单机折算 TPM 峰值 | 按模型、集群、卡型展示小时折算 TPM 峰值；不代表具体机器 | `cube_machine_tpm_report`，默认关闭 |
-| Report platform | 管理模板启用/订阅策略、订阅计划和订阅授权，并记录管理审计 | `report_management_v1`，默认关闭；WebUI 管理 token |
+| 多客户多模型日报简报 | 按客户分组展示当前周期 Token 总数、同比和环比；手工多选最多 20 个模型，“全部模型”受 200 个客户/模型组合上限保护 | `cube_multi_scope_brief` |
+| 多客户多模型周报简报 | 按客户分组展示上一完整自然周 Token 总数及前一完整自然周环比 | `cube_multi_scope_weekly_brief` |
+| 多客户多模型小时 TPM 报告 | 按客户分组展示上一完整小时各模型 TPM 峰值、均值与平台级机器数；支持每小时订阅播报（整点后 5 分钟） | `cube_customer_model_hourly_tpm`（订阅另需 `cube_customer_model_hourly_tpm_subscription`） |
+| 单机折算 TPM 峰值 | 按模型、集群、卡型展示小时折算 TPM 峰值；不代表具体机器 | `cube_machine_tpm_report` |
+| Report platform | 管理模板启用/订阅策略、功能开关、订阅计划和订阅授权，并记录管理审计 | `report_management_v1`；WebUI 管理 token |
 | 自然语言与引用订阅 | 结构化 LLM 只提取客户别名、模型范围和发送计划；服务端解析真实 ID、重做 RBAC 并展示确认卡 | `cube_subscription_nlu_v2`、`cube_report_reference_subscription` |
-| 多客户自然语言订阅 | 从原文提取并与实时 Cube 客户目录合并，保留全部客户和“全部模型”语义；确认前不创建任务 | `cube_subscription_nlu_v2`；V3 增强解析默认关闭 |
+| 多客户自然语言订阅 | 从原文提取并与实时 Cube 客户目录合并，保留全部客户和“全部模型”语义；确认前不创建任务 | `cube_subscription_nlu_v2`、`cube_subscription_nlu_v3` |
 | 引用报表创建订阅 | 同群报表卡片通过服务端 `message_id` 引用恢复已验证范围，历史日期不进入周期订阅 | `cube_report_reference_subscription` |
+
+上表所列功能开关自 2026-09-15 起默认开启（部署配置可覆盖默认值；WebUI 功能开关页的 store 覆盖优先、即时生效）。模板订阅策略默认值独立于功能开关：仅 `machine_tpm_peak` 默认不可订阅，其余模板默认 `all_authorized`。
 
 区间和近 7 天的进一步分析使用独立 `usage_custom_matrix`，标题与基准均按“区间 / 前一等长周期”展示，不借用周报名称。
 
@@ -76,10 +78,11 @@ Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管�
 
 所有 Cube 调用必须只读、有 timeout、受控重试和输出脱敏。发布时先注册模板，再对白名单开启默认路由；观察报表成功率、`partial/missing` 比例、执行 P95 和投递失败率。
 
-回滚可分别关闭 `cube_multi_scope_brief`、`cube_multi_scope_weekly_brief`、`cube_customer_model_hourly_tpm`、`cube_customer_model_hourly_tpm_subscription`、`cube_machine_tpm_report` 和 `report_management_v1`。策略表与审计表保留但不参与执行，旧简报、已有订阅和历史记录不删除；不涉及 Cube 远端写入。
+回滚可分别关闭 `cube_multi_scope_brief`、`cube_multi_scope_weekly_brief`、`cube_customer_model_hourly_tpm`、`cube_customer_model_hourly_tpm_subscription`、`cube_machine_tpm_report` 和 `report_management_v1`（均为运行时开关，WebUI 功能开关页切换即时生效）。策略表与审计表保留但不参与执行，旧简报、已有订阅和历史记录不删除；不涉及 Cube 远端写入。
 
 ## 发布记录与待办
 
+- `2026-09-16`：完成报表平台全量逻辑评审并批准收敛整改方案（完整评审与阶段状态见 `docs/REPORT_PLATFORM_REVIEW.md`）。已确认的主要问题：模板策略与每模板家族功能开关在 Cube 报表家族语义重叠（两层互不感知）、`report_management_v1` 同时是策略执行的元开关、cost 家族脱离运行时开关体系、订阅创建三入口三种 fingerprint、枚举与校验多层复制。目标架构：模板策略成为每模板唯一运行时开关、功能开关退化为纯行为/路由开关、订阅单一入口、关键枚举单一来源。本条目为计划记录，各阶段以对应发布记录为准；同日纠正本文档与 `docs/report-management.md` 中"默认关闭"的过期表述，并补记"功能开关"页签与即时回滚语义。
 - `2026-09-15`：报表功能开关体系重构。用量/健康/供应商质量/管理界面共 19 项功能 flag 默认开启；模板注册与启用 flag 解耦（Cube 连接器存在即注册全部模板）；新增 store 持久化的运行时开关覆盖（`report_feature_flags` 表 + 管理审计），WebUI Report platform 新增"功能开关"页，切换即时生效、无需重启，支持恢复默认值；计算口径（semantics v2 家族、TTFT、阈值）与扩展连接（Grafana/企业微信/钉钉/成本 TokenAPI）仍属部署配置。
 - `2026-09-15`：机器数升级为占用/真实使用双来源：占用来自 `model-machine-usage` 当前配置快照，真实使用来自 `machine-tpm-trend` 上一完整小时时点值；空闲 = 占用−使用 ≥1 台在模型行标注（闲N）并汇入副标题 `N 机器空闲`；真实使用缺失为信息性告警不降级质量，占用缺失仍降级 partial。卡片行内改为紧凑三指标（峰值/均值/机器，万取整），副标题精简为 `MM-DD HH:MM–HH:MM · N 客户 / M 模型`。
 - `2026-09-15`：小时 TPM 报表完成契约实证与全链路重做。实证 `time_level`（蛇形）为小时粒度开关、`endDate` 须为次日才能取到全天逐小时点、未流逝小时为 0 占位，修正了此前“目标小时拿不到数据”的根因；机器数改为按唯一模型调用 `machine-tpm-trend` 跨集群求和并固定平台级标注；卡片改为客户分组 + 模型行内联“峰值/均值/机器数”；补齐“每小时播报”订阅链路（自然语言解析、Cron intent 编译、执行前活跃模型发现、整点后 5 分钟投递），并修复订阅编译层对 recent1h 的崩溃与 `hourly_requested` 未定义缺陷。

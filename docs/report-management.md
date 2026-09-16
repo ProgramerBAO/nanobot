@@ -2,15 +2,15 @@
 
 ## 产品定位
 
-`Report platform` 是 Nanobot WebUI 内的报表控制面，供持有 Gateway/WebUI 管理 token 的管理员管理模板策略、订阅计划和订阅授权。它不允许编辑模板代码、指标公式、Cube API 路径或凭据，也不替代 Feishu 用户侧报表查询。
+`Report platform` 是 Nanobot WebUI 内的报表控制面，供持有 Gateway/WebUI 管理 token 的管理员管理模板策略、功能开关、订阅计划和订阅授权。它不允许编辑模板代码、指标公式、Cube API 路径或凭据，也不替代 Feishu 用户侧报表查询。
 
-功能由 `tools.reporting.reportManagementV1` 控制，默认关闭。关闭时页面只读，既有 `/api/settings/reporting` 查询保持兼容，已有订阅和历史运行不受影响。
+管理功能由运行时功能开关 `report_management_v1` 控制（2026-09-15 起默认开启；WebUI 功能开关页切换即时生效，无需重启）。关闭时报表类型与订阅管理页签只读，功能开关页仍可操作（用于重新开启），既有 `/api/settings/reporting` 查询保持兼容，已有订阅和历史运行不受影响。
 
 ## 使用入口
 
 1. 启动 Gateway 并打开 WebUI。
 2. 进入 `Settings -> Report platform`。
-3. 使用三个标签页：`报表类型`、`订阅管理`、`权限管理`。
+3. 使用四个标签页：`报表类型`、`订阅管理`、`权限管理`、`功能开关`。
 
 ## 报表类型
 
@@ -22,6 +22,14 @@
 - `subscription_mode=disabled`：阻止新建订阅，不自动停用已有订阅。
 
 保存时必须提交当前 `revision`。其他管理员已先修改时返回 `409`，页面刷新后才能基于最新版本重试，避免静默覆盖。
+
+## 功能开关
+
+`功能开关` 页管理 19 项运行时功能开关（用量报表、小时 TPM、订阅、健康报告、供应商质量、管理界面六组）。每项开关的持久化覆盖写入 store 的 `report_feature_flags` 表并记录管理审计；覆盖优先于部署配置默认值，未覆盖时回落默认（2026-09-15 起默认全部开启，部署配置仍可改默认值）。切换即时生效，无需重启；已覆盖的行可"恢复默认值"（删除覆盖行）。
+
+该页不受 `report_management_v1` 门控，管理功能整体关闭时仍可操作，用于应急重新开启。
+
+计算口径与构造级开关（semantics v2 家族、TTFT 明细、健康阈值、企微/钉钉渲染器、Grafana、成本 TokenAPI 连接）不属于运行时开关，仍属部署配置、需重启生效，页面上不展示。
 
 ## 订阅管理
 
@@ -64,11 +72,11 @@ SQLite 和 PostgreSQL 启动时增量创建：
 - `409`：revision 冲突、Cron 不存在或订阅状态并发变化；刷新后核对 Cron 与数据库状态。
 - 非法时区、Cron 或参数：修正输入后重试，不创建部分订阅。
 
-回滚时关闭 `reportManagementV1` 并重启 Gateway。策略表和审计表保留但不参与执行，已有订阅、历史运行和 Cube 数据不删除。发布后观察管理操作失败率、revision 冲突、Cron 同步失败、订阅重复执行和未授权请求。
+回滚时在功能开关页关闭 `report_management_v1`（运行时开关，即时生效，无需重启）。策略表和审计表保留但不参与执行，已有订阅、历史运行和 Cube 数据不删除。发布后观察管理操作失败率、revision 冲突、Cron 同步失败、订阅重复执行和未授权请求。
 
 ## 当前发布状态
 
 - 已实现：模板策略、`show_subscription_button`、订阅列表/编辑/启停/删除、revision 并发保护、Cron 补偿、审计和 Feishu 引用范围持久化。
-- 默认关闭：`report_management_v1`、`report_subscription_guided_ui`、`report_subscription_button_policy`、`cube_subscription_nlu_v3`。现有兼容路径保持可回滚。
+- 默认开启：2026-09-15 起 `report_management_v1`、`report_subscription_guided_ui`、`report_subscription_button_policy`、`cube_subscription_nlu_v3` 等全部 19 项运行时功能开关默认开启（部署配置可覆盖默认值，store 覆盖优先）。现有兼容路径保持可回滚。
 - 已验证：引导式订阅服务、过期/非法范围拒绝、CAS 冲突、Cron 恢复和目标后端测试；WebUI 生产构建通过。
 - 待验证：使用 staging read-only Cube 目录和 Feishu 测试账号完成真实三客户预览、确认及单周期投递。
