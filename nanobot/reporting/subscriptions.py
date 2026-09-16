@@ -32,6 +32,7 @@ from nanobot.reporting.schedules import (
     SUBSCRIPTION_RECURRENCES,
     build_subscription_schedule,
     describe_subscription_schedule,
+    normalize_subscription_hours,
 )
 from nanobot.reporting.store import ReportStateStore, ReportSubscription
 from nanobot.session.keys import session_key_for_channel
@@ -156,6 +157,10 @@ class CompiledSubscriptionForm:
     report_params: dict[str, Any]
     tenant_names: tuple[str, ...]
     models: tuple[str, ...]
+    # Explicit hourly-broadcast hours; None means the every-hour default.
+    # The cron expression remains the persisted source of truth — this field
+    # only gives create/preview callers an exact echo.
+    hours: tuple[int, ...] | None = None
 
     @property
     def schedule_label(self) -> str:
@@ -182,6 +187,7 @@ class CompiledSubscriptionForm:
             "send_time": self.send_time,
             "weekday": self.weekday,
             "month_day": self.month_day,
+            "hours": list(self.hours) if self.hours else [],
             "timezone": self.timezone,
             "project": str(params.get("project") or ""),
             "endpoint": str(params.get("endpoint") or ""),
@@ -701,6 +707,23 @@ class ReportSubscriptionService:
             minimum=1,
             maximum=28,
         )
+        # Explicit broadcast hours narrow the hourly cadence only
+        # (user-confirmed 2026-09-16); the compiled cron ("5 9,10 * * *") is
+        # the persisted source of truth and the form snapshot re-derives
+        # hours from it, so hours never enter report_params.
+        if period == "recent1h" and recurrence != "hourly":
+            # Mirror of the chat preview gate: an hourly TPM report only
+            # makes sense on the hourly cadence.
+            raise SubscriptionServiceError("小时 TPM 报表当前仅支持每小时播报")
+        if recurrence == "hourly" and period != "recent1h":
+            raise SubscriptionServiceError("每小时播报仅支持小时 TPM 报表")
+        hours_value = self._form_value(form, previous, "hours", None)
+        normalized_hours: tuple[int, ...] | None = None
+        if hours_value not in (None, []):
+            try:
+                normalized_hours = normalize_subscription_hours(hours_value)
+            except ValueError as exc:
+                raise SubscriptionServiceError("播报小时必须为 0-23 的小时列表") from exc
         inferred_tenant_scope = (
             "all"
             if previous.get("all_tenants") is True
@@ -778,6 +801,7 @@ class ReportSubscriptionService:
             daily_mode="workdays" if recurrence == "workdays" else "every_day",
             weekday=weekday,
             month_day=month_day,
+            hours=normalized_hours,
         )
         connector_id = next(iter(template.manifest.connector_ids), "magik_cube")
         if template_id.endswith("_brief"):
@@ -855,6 +879,7 @@ class ReportSubscriptionService:
             timezone=timezone_name,
             weekday=weekday,
             month_day=month_day,
+            hours=normalized_hours,
             schedule=schedule,
             report_params=params,
             tenant_names=tenant_names,

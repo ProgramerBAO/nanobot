@@ -852,6 +852,7 @@ class ReportCenterTool(  # noqa: UP046
         all_tenants: bool = False,
         report_selections: list[dict[str, Any]] | None = None,
         recurrence: str = "workdays",
+        hours: list[int] | None = None,
         inherit_report_scope: bool = False,
         reference_message_id: str = "",
         revision: int | None = None,
@@ -1035,6 +1036,7 @@ class ReportCenterTool(  # noqa: UP046
                 send_time=send_time,
                 weekday=weekday,
                 month_day=month_day,
+                hours=hours,
                 inherit_report_scope=inherit_report_scope,
                 reference_message_id=reference_message_id,
             )
@@ -1062,6 +1064,7 @@ class ReportCenterTool(  # noqa: UP046
                 daily_mode=daily_mode,
                 weekday=weekday,
                 month_day=month_day,
+                hours=hours,
             )
         if action == "run_subscription":
             return await self._run_subscription(subscription_id, metadata)

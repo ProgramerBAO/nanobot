@@ -225,6 +225,67 @@ def test_guided_form_accepts_legacy_zero_revision() -> None:
         reporting_api._form_integer({}, "revision")
 
 
+def _snapshot_row(schedule: str, template_id: str, params: dict) -> ReportSubscription:
+    now = datetime.now(UTC).isoformat()
+    return ReportSubscription(
+        subscription_id="sub-a",
+        channel="feishu",
+        chat_id="chat-a",
+        user_id="ou-a",
+        connector_id="magik_cube",
+        template_id=template_id,
+        template_version="2.1",
+        schedule=schedule,
+        timezone="Asia/Shanghai",
+        report_params=params,
+        cron_job_id="job-a",
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_subscription_form_snapshot_recovers_broadcast_hours() -> None:
+    """Hour-list crons must not degrade into every_day/09:05 on edit."""
+
+    hourly_params = {"subscription_period": "recent1h", "model_scope": "all"}
+
+    listed = reporting_api._subscription_form_snapshot(
+        _snapshot_row("5 9,10 * * *", "usage_customer_model_hourly_tpm", hourly_params)
+    )
+    assert listed["recurrence"] == "hourly"
+    assert listed["hours"] == [9, 10]
+    assert listed["period"] == "recent1h"
+
+    wildcard = reporting_api._subscription_form_snapshot(
+        _snapshot_row("5 * * * *", "usage_customer_model_hourly_tpm", hourly_params)
+    )
+    assert wildcard["recurrence"] == "hourly"
+    assert wildcard["hours"] == []
+
+    # A single listed hour is shape-wise identical to a daily schedule; only
+    # the hourly TPM template (period pinned to recent1h) resolves it as a
+    # broadcast hour.
+    single_hourly = reporting_api._subscription_form_snapshot(
+        _snapshot_row("5 9 * * *", "usage_customer_model_hourly_tpm", hourly_params)
+    )
+    assert single_hourly["recurrence"] == "hourly"
+    assert single_hourly["hours"] == [9]
+    daily = reporting_api._subscription_form_snapshot(
+        _snapshot_row("5 9 * * *", "usage_daily_brief", {"subscription_period": "day"})
+    )
+    assert daily["recurrence"] == "every_day"
+    assert daily["send_time"] == "09:05"
+    assert daily["hours"] == []
+
+    # Non-hourly crons keep the pre-existing inference.
+    weekly = reporting_api._subscription_form_snapshot(
+        _snapshot_row("0 9 * * 1", "usage_weekly_brief", {"subscription_period": "week"})
+    )
+    assert weekly["recurrence"] == "weekly"
+    assert weekly["hours"] == []
+
+
 def test_subscription_disable_updates_cron_and_database(monkeypatch, tmp_path) -> None:
     store = ReportStateStore(tmp_path / "reporting.db")
     config = _config(tmp_path)

@@ -397,6 +397,41 @@ def test_tool_schema_accepts_hourly_subscription_preview_params() -> None:
         )
         assert errors == [], f"{report_type}/{recurrence}: {errors}"
 
+    # Explicit broadcast hours (2026-09-16) must pass the same schema and
+    # arrive as a plain list.
+    hours_intent = CubeSubscriptionIntent(
+        report_type="usage_customer_model_hourly_tpm",
+        tenant_scope="selected",
+        tenant_aliases=(),
+        model_scope="all",
+        models=(),
+        recurrence="hourly",
+        send_time="00:00",
+        hours=(10, 9),
+    )
+    hours_params = report_center_module.ReportCenterTool._subscription_preview_params(
+        hours_intent
+    )
+    assert hours_params["hours"] == [10, 9]
+    errors = Schema.validate_json_schema_value(
+        hours_params, report_center_module._REPORT_CENTER_PARAMETERS, "report_center"
+    )
+    assert errors == []
+    # The every-hour default omits the key entirely: the schema types hours
+    # as a non-nullable array.
+    plain_params = report_center_module.ReportCenterTool._subscription_preview_params(
+        CubeSubscriptionIntent(
+            report_type="usage_customer_model_hourly_tpm",
+            tenant_scope="selected",
+            tenant_aliases=(),
+            model_scope="all",
+            models=(),
+            recurrence="hourly",
+            send_time="00:00",
+        )
+    )
+    assert "hours" not in plain_params
+
 
 @pytest.mark.asyncio
 async def test_quoted_hourly_card_per_tenant_models_skip_cross_validation(
@@ -660,6 +695,119 @@ async def test_quoted_hourly_all_model_card_skips_selected_validation(
     # All-model inheritance resolves models per run; the flat model resolver
     # must not be consulted at preview time.
     magik.resolve_models_for_tenants.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_quoted_hourly_card_with_explicit_hours_confirms_hour_list(
+    monkeypatch, tmp_path
+):
+    """“每小时9点、10点…” previews the hour list and carries it into confirm."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    magik = AsyncMock()
+    magik.resolve_tenant_queries.return_value = (
+        [
+            {"query": "tenant-fo", "tenant_id": "tenant-fo", "display_name": "佛跳墙"},
+            {"query": "tenant-douzhi", "tenant_id": "tenant-douzhi", "display_name": "豆汁"},
+        ],
+        [],
+    )
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(
+            cube_customer_model_hourly_tpm=True,
+            cube_customer_model_hourly_tpm_subscription=True,
+        ),
+        _FakeCron(),
+        magik,
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+        ),
+    )
+    store.save_message_reference(
+        ReportMessageReference(
+            channel="feishu",
+            chat_id="chat-a",
+            message_id="om-hourly-hours",
+            run_id="run-hourly-hours",
+            document_id="usage_customer_model_hourly_tpm",
+            connector_id="magik_cube",
+            template_id="usage_customer_model_hourly_tpm",
+            period="recent1h",
+            scope={
+                "report_variant": "customer_model_hourly_tpm",
+                "report_template_id": "usage_customer_model_hourly_tpm",
+                "tenants": ["tenant-fo", "tenant-douzhi"],
+                "tenant_labels": ["佛跳墙", "豆汁"],
+                "model_scope": "all",
+                "models": [],
+                "report_selections": [
+                    {"tenant_query": "tenant-fo", "model_scope": "all", "models": []},
+                    {"tenant_query": "tenant-douzhi", "model_scope": "all", "models": []},
+                ],
+            },
+            created_at="2026-09-15T00:00:00+00:00",
+            expires_at="2099-09-15T00:00:00+00:00",
+        )
+    )
+
+    preview_params = await tool.classify_referenced_subscription(
+        "每小时9点、10点发送给我一次这个报表",
+        MagicMock(),
+        channel="feishu",
+        chat_id="chat-a",
+        reference_message_id="om-hourly-hours",
+    )
+    assert preview_params["action"] == "subscription_preview"
+    assert preview_params["hours"] == [9, 10]
+
+    context = RequestContext(
+        channel="feishu",
+        chat_id="chat-a",
+        sender_id="ou-a",
+        session_key="feishu:chat-a",
+        metadata={"parent_id": "om-hourly-hours"},
+    )
+    with request_context(context):
+        preview = await tool.execute(
+            action="subscription_preview",
+            report_type="inherit",
+            tenant_scope="inherit",
+            tenant_aliases=[],
+            model_scope="inherit",
+            models=[],
+            recurrence="hourly",
+            send_time="00:00",
+            weekday=1,
+            month_day=1,
+            hours=[9, 10],
+            inherit_report_scope=True,
+            reference_message_id="om-hourly-hours",
+        )
+
+    ui = preview.metadata[OUTBOUND_META_AGENT_UI]
+    # The confirmation card shows the hour-list cadence wording that
+    # describe_subscription_schedule also renders in "我的订阅".
+    markdown = next(
+        block["data"]["content"]
+        for block in ui["blocks"]
+        if block["kind"] == "markdown"
+    )
+    assert "每天 9、10 点（整点后 5 分钟）" in markdown
+    actions = [
+        item
+        for block in ui["blocks"]
+        if block["kind"] == "actions"
+        for item in block["data"]["actions"]
+    ]
+    confirm = next(
+        (item for item in actions if item["action_id"] == "subscription_confirm"),
+        None,
+    )
+    assert confirm is not None
+    assert confirm["params"]["hours"] == [9, 10]
+    assert confirm["params"]["period"] == "recent1h"
 
 
 @pytest.mark.asyncio

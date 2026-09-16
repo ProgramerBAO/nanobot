@@ -985,12 +985,14 @@ export interface ReportingSubscriptionForm {
   model_scope: "all" | "selected" | "summary";
   models: string[];
   period: string;
-  // "hourly" is chat-created only today (hourly TPM broadcasts); the guided
-  // editor does not offer it, but editing such a subscription must type-check.
+  // "hourly" is offered for the hourly TPM template only; the guided editor
+  // gates it on the template offering the recent1h period.
   recurrence: "every_day" | "workdays" | "weekly" | "monthly" | "hourly";
   send_time: string;
   weekday: number;
   month_day: number;
+  /** Explicit hourly-broadcast hours; empty/omitted means every hour. */
+  hours?: number[];
   timezone: string;
   project?: string;
   endpoint?: string;

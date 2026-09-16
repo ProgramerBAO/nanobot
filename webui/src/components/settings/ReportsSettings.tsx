@@ -55,6 +55,9 @@ type GuidedFormState = {
   send_time: string;
   weekday: number;
   month_day: number;
+  // Comma/顿号 separated clock hours for the hourly cadence; empty means
+  // every hour. Kept as text so partial input stays editable.
+  hours: string;
   timezone: string;
   project: string;
   endpoint: string;
@@ -83,6 +86,7 @@ const EMPTY_SUBSCRIPTION: GuidedFormState = {
   send_time: "09:00",
   weekday: 1,
   month_day: 1,
+  hours: "",
   timezone: "Asia/Shanghai",
   project: "",
   endpoint: "",
@@ -102,6 +106,17 @@ function joinList(values: string[] | undefined): string {
   return (values ?? []).join("、");
 }
 
+// Parse the hourly-broadcast hour text into the number list the guided form
+// submits; anything unparsable is dropped so the server remains the single
+// validator.
+function parseHourList(value: string): number[] {
+  return [...new Set(
+    splitList(value)
+      .map((item) => Number(item))
+      .filter((item) => Number.isInteger(item) && item >= 0 && item <= 23),
+  )].sort((a, b) => a - b);
+}
+
 function toFormValues(form: GuidedFormState): Record<string, unknown> {
   return {
     template_id: form.template_id,
@@ -117,6 +132,7 @@ function toFormValues(form: GuidedFormState): Record<string, unknown> {
     send_time: form.send_time,
     weekday: form.weekday,
     month_day: form.month_day,
+    hours: form.recurrence === "hourly" ? parseHourList(form.hours) : [],
     timezone: form.timezone.trim(),
     project: form.project.trim(),
     endpoint: form.endpoint.trim(),
@@ -157,6 +173,7 @@ function fromSubscription(item: ReportingSubscription): GuidedFormState {
     send_time: "09:00",
     weekday: 1,
     month_day: 1,
+    hours: [],
     timezone: item.timezone,
   };
   return {
@@ -173,6 +190,7 @@ function fromSubscription(item: ReportingSubscription): GuidedFormState {
     send_time: form.send_time,
     weekday: form.weekday,
     month_day: form.month_day,
+    hours: (form.hours ?? []).join("、"),
     timezone: form.timezone || item.timezone,
     project: form.project ?? "",
     endpoint: form.endpoint ?? "",
@@ -469,12 +487,24 @@ function SubscriptionEditor({
             <option value="workdays">{t("settings.reports.editor.workdays", { defaultValue: "工作日" })}</option>
             <option value="weekly">{t("settings.reports.editor.weeklyOn", { defaultValue: "每周指定日期" })}</option>
             <option value="monthly">{t("settings.reports.editor.monthlyOn", { defaultValue: "每月指定日期" })}</option>
+            {/* Hourly cadence only exists for the hourly TPM template (its
+                period list is recent1h only); other templates cannot deliver
+                an hourly report. */}
+            <option value="hourly" disabled={!periods.includes("recent1h")}>{t("settings.reports.editor.hourly", { defaultValue: "每小时（整点后 5 分钟）" })}</option>
           </select>
         </label>
-        <label className={FIELD_LABEL_CLASS}>
-          {t("settings.reports.editor.sendTime", { defaultValue: "发送时间" })}
-          <Input type="time" value={form.send_time} onChange={(event) => onChange({ send_time: event.target.value })} disabled={busy} />
-        </label>
+        {form.recurrence === "hourly" ? (
+          <label className={FIELD_LABEL_CLASS}>
+            {t("settings.reports.editor.broadcastHours", { defaultValue: "播报小时" })}
+            <Input value={form.hours} onChange={(event) => onChange({ hours: event.target.value })} placeholder={t("settings.reports.editor.broadcastHoursPlaceholder", { defaultValue: "留空 = 全部小时；如 9、10、15" })} disabled={busy} />
+            <span className="text-[11px] text-muted-foreground">{t("settings.reports.editor.broadcastHoursHint", { defaultValue: "指定时点的整点后 5 分钟，投递刚结束的上一完整小时数据。" })}</span>
+          </label>
+        ) : (
+          <label className={FIELD_LABEL_CLASS}>
+            {t("settings.reports.editor.sendTime", { defaultValue: "发送时间" })}
+            <Input type="time" value={form.send_time} onChange={(event) => onChange({ send_time: event.target.value })} disabled={busy} />
+          </label>
+        )}
         <label className={FIELD_LABEL_CLASS}>
           {t("settings.reports.editor.timezone", { defaultValue: "时区" })}
           <select className={SELECT_CLASS} value={form.timezone} onChange={(event) => onChange({ timezone: event.target.value })} disabled={busy}>

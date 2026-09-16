@@ -1259,6 +1259,152 @@ def test_guided_subscription_resolves_display_alias_to_live_cube_id(tmp_path) ->
     assert compiled.tenant_names == ("佛跳墙",)
 
 
+def test_guided_subscription_compiles_explicit_broadcast_hours(tmp_path) -> None:
+    """Hourly TPM forms compile "5 9,10 * * *" and echo the hour list."""
+
+    store = ReportStateStore(tmp_path / "state.db")
+    cube_config = MagikCubeToolConfig(
+        enable=True,
+        base_url="https://cube.example.internal",
+        # Fixture-only config; no real credential is embedded.
+        access_token="",
+    )
+    registry = build_default_registry(
+        discover_external=False,
+        magik_enabled=True,
+        cube_config=cube_config,
+    )
+    config = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(
+            reporting=SimpleNamespace(
+                report_management_v1=False,
+                timezone="Asia/Shanghai",
+            )
+        ),
+        agents=SimpleNamespace(defaults=SimpleNamespace(unified_session=False)),
+    )
+
+    def resolve_tenants(values: list[str]):
+        return (
+            [{"query": value, "tenant_id": value, "display_name": value} for value in values],
+            [],
+        )
+
+    def resolve_models(tenant_ids: list[str], models: list[str]):
+        return {tenant_id: ["Kimi-K3"] for tenant_id in tenant_ids}, []
+
+    service = ReportSubscriptionService(
+        config=config,
+        store=store,
+        registry=registry,
+        tenant_resolver=resolve_tenants,
+        model_resolver=resolve_models,
+    )
+
+    compiled = service.compile_form(
+        {
+            "template_id": "usage_customer_model_hourly_tpm",
+            "channel": "feishu",
+            "chat_id": "chat-a",
+            "user_id": "ou-a",
+            "tenant_scope": "selected",
+            "tenants": ["tenant-a"],
+            "model_scope": "all",
+            "models": [],
+            "period": "recent1h",
+            "recurrence": "hourly",
+            "send_time": "00:00",
+            "hours": [10, 9, 10],
+            "timezone": "Asia/Shanghai",
+        }
+    )
+
+    # Explicit hours compile to a sorted hour list on minute 5; the label
+    # matches the "我的订阅" card and WebUI rows (single source in
+    # describe_subscription_schedule).
+    assert compiled.schedule == "5 9,10 * * *"
+    assert compiled.hours == (9, 10)
+    assert compiled.to_form()["hours"] == [9, 10]
+    assert compiled.schedule_label == "每天 9、10 点（整点后 5 分钟）"
+
+    # The every-hour default and the invalid combinations fail closed.
+    every_hour = service.compile_form(
+        {
+            "template_id": "usage_customer_model_hourly_tpm",
+            "channel": "feishu",
+            "chat_id": "chat-a",
+            "user_id": "ou-a",
+            "tenant_scope": "selected",
+            "tenants": ["tenant-a"],
+            "model_scope": "all",
+            "models": [],
+            "period": "recent1h",
+            "recurrence": "hourly",
+            "send_time": "00:00",
+            "hours": [],
+            "timezone": "Asia/Shanghai",
+        }
+    )
+    assert every_hour.schedule == "5 * * * *"
+    assert every_hour.hours is None
+    with pytest.raises(SubscriptionServiceError, match="每小时播报仅支持小时 TPM 报表"):
+        service.compile_form(
+            {
+                # A non-hourly template pins period=day, so the hourly
+                # recurrence guard fires (the hourly template itself would
+                # auto-correct the period to recent1h).
+                "template_id": "usage_daily_brief",
+                "channel": "feishu",
+                "chat_id": "chat-a",
+                "user_id": "ou-a",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-a"],
+                "model_scope": "summary",
+                "models": [],
+                "period": "day",
+                "recurrence": "hourly",
+                "send_time": "10:00",
+                "timezone": "Asia/Shanghai",
+            }
+        )
+    with pytest.raises(SubscriptionServiceError, match="小时 TPM 报表当前仅支持每小时播报"):
+        service.compile_form(
+            {
+                "template_id": "usage_customer_model_hourly_tpm",
+                "channel": "feishu",
+                "chat_id": "chat-a",
+                "user_id": "ou-a",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-a"],
+                "model_scope": "all",
+                "models": [],
+                "period": "recent1h",
+                "recurrence": "every_day",
+                "send_time": "10:00",
+                "timezone": "Asia/Shanghai",
+            }
+        )
+    with pytest.raises(SubscriptionServiceError, match="播报小时必须为 0-23 的小时列表"):
+        service.compile_form(
+            {
+                "template_id": "usage_customer_model_hourly_tpm",
+                "channel": "feishu",
+                "chat_id": "chat-a",
+                "user_id": "ou-a",
+                "tenant_scope": "selected",
+                "tenants": ["tenant-a"],
+                "model_scope": "all",
+                "models": [],
+                "period": "recent1h",
+                "recurrence": "hourly",
+                "send_time": "00:00",
+                "hours": [24],
+                "timezone": "Asia/Shanghai",
+            }
+        )
+
+
 def test_guided_subscription_rejects_incomplete_model_catalog_response(tmp_path) -> None:
     """A missing tenant key cannot silently broaden or narrow a model scope."""
 

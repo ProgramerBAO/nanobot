@@ -61,3 +61,22 @@ def test_period_template_maps_cover_the_same_periods() -> None:
     # template family maps back to.
     for report_type, (data_period, _variant) in SUBSCRIPTION_REPORT_TYPE_TABLE.items():
         assert data_period in PERIOD_TEMPLATES or data_period == "recent1h"
+
+
+def test_broadcast_hours_surfaces_are_pinned_equal() -> None:
+    """The hours field must stay a first-class surface everywhere (2026-09-16).
+
+    The deterministic parser, the classifier payload whitelist, the tool
+    schema, and the guided form keys each declare the field; this pins the
+    item constraints so one surface cannot drift looser than the others.
+    """
+
+    assert "hours" in intent._PAYLOAD_FIELDS
+    hours_property = report_center_module._REPORT_CENTER_PARAMETERS["properties"]["hours"]
+    assert hours_property["items"] == {"type": "integer", "minimum": 0, "maximum": 23}
+    assert hours_property["minItems"] == 1
+    assert hours_property["maxItems"] == 24
+    assert hours_property["uniqueItems"] is True
+    from nanobot.webui.reporting_api import _GUIDED_FORM_KEYS
+
+    assert "hours" in _GUIDED_FORM_KEYS

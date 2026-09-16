@@ -136,6 +136,123 @@ def test_deterministic_hourly_direct_meige_xiaoshi_broadcast() -> None:
     )
 
 
+def test_deterministic_explicit_hours_route_to_hourly_broadcast() -> None:
+    """“每天 9 点、10 点播报上一小时 TPM” compiles an hour list (2026-09-16)."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每天9点、10点播报阳春面、豆汁、佛跳墙全部模型上一小时TPM"
+    )
+
+    assert intent == CubeSubscriptionIntent(
+        report_type="usage_customer_model_hourly_tpm",
+        tenant_scope="selected",
+        tenant_aliases=(),
+        model_scope="all",
+        models=(),
+        recurrence="hourly",
+        # send_time keeps the first mentioned clock as a placeholder; the
+        # compiled cron derives from the hour list instead.
+        send_time="09:00",
+        hours=(9, 10),
+    )
+
+
+def test_deterministic_single_explicit_hour_routes_to_hourly_broadcast() -> None:
+    intent = parse_deterministic_subscription_intent(
+        "每天9点播报阳春面全部模型上一小时TPM"
+    )
+    assert intent is not None
+    assert intent.recurrence == "hourly"
+    assert intent.hours == (9,)
+
+
+def test_deterministic_meridiem_hours_adjust_to_24h() -> None:
+    intent = parse_deterministic_subscription_intent(
+        "每天上午9点、下午3点播报阳春面全部模型上一小时TPM"
+    )
+    assert intent is not None
+    assert intent.hours == (9, 15)
+
+
+def test_deterministic_hourly_wording_with_clocks_narrows_hours() -> None:
+    """Explicit clock hours win over the every-hour 每小时 wording."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每小时9点、10点播报阳春面全部模型上一小时TPM"
+    )
+    assert intent is not None
+    assert intent.recurrence == "hourly"
+    assert intent.hours == (9, 10)
+
+
+def test_deterministic_daily_brief_keeps_clock_out_of_hours() -> None:
+    """Without the hourly TPM wording a clock stays a daily send time."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每天上午十点发送阳春面、豆汁、佛跳墙全部模型的多客户日报简报"
+    )
+    assert intent is not None
+    assert intent.recurrence == "every_day"
+    assert intent.send_time == "10:00"
+    assert intent.hours is None
+
+
+def test_deterministic_nonzero_minutes_never_become_hours() -> None:
+    """10:30 is a daily send time, not an hourly cadence marker."""
+
+    intent = parse_deterministic_subscription_intent(
+        "每天10点30分发送阳春面全部模型的多客户日报简报"
+    )
+    assert intent is not None
+    assert intent.recurrence == "every_day"
+    assert intent.send_time == "10:30"
+    assert intent.hours is None
+
+
+def test_deterministic_workdays_hours_stay_unsupported() -> None:
+    """Workday cadence with an hour list must not silently fire weekends."""
+
+    assert (
+        parse_deterministic_subscription_intent(
+            "工作日9点、10点播报阳春面全部模型上一小时TPM"
+        )
+        is None
+    )
+
+
+def test_intent_payload_hours_validation() -> None:
+    base = {
+        "report_type": "usage_customer_model_hourly_tpm",
+        "tenant_scope": "selected",
+        "tenant_aliases": [],
+        "model_scope": "all",
+        "models": [],
+        "recurrence": "hourly",
+        "send_time": "00:00",
+        "weekday": 1,
+        "month_day": 1,
+        "inherit_report_scope": False,
+    }
+    valid = CubeSubscriptionIntent.from_payload({**base, "hours": [10, 9, 10]})
+    assert valid is not None
+    assert valid.hours == (9, 10)
+    # An empty list is the every-hour default.
+    empty = CubeSubscriptionIntent.from_payload({**base, "hours": []})
+    assert empty is not None
+    assert empty.hours is None
+    # Hours attached to a non-hourly cadence reject the whole payload.
+    assert (
+        CubeSubscriptionIntent.from_payload(
+            {**base, "recurrence": "every_day", "hours": [9]}
+        )
+        is None
+    )
+    # Out-of-range or non-list shapes reject the payload; strings stay for
+    # the deterministic parser, not the model boundary.
+    assert CubeSubscriptionIntent.from_payload({**base, "hours": [24]}) is None
+    assert CubeSubscriptionIntent.from_payload({**base, "hours": "9,10"}) is None
+
+
 @pytest.mark.asyncio
 async def test_direct_multi_customer_all_model_subscription_is_strictly_parsed() -> None:
     """Protect the user phrase that previously collapsed to one customer."""

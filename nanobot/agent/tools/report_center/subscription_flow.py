@@ -34,6 +34,7 @@ from nanobot.reporting.schedules import (
     RECURRENCE_SCHEDULE_PERIODS,
     SUBSCRIPTION_REPORT_TYPE_TABLE,
     build_subscription_schedule,
+    normalize_subscription_hours,
 )
 from nanobot.reporting.store import ReportSubscription
 from nanobot.reporting.subscriptions import (
@@ -83,6 +84,7 @@ class _SubscriptionFlowMixin:
         send_time: str,
         weekday: int,
         month_day: int,
+        hours: list[int] | None,
         inherit_report_scope: bool,
         reference_message_id: str,
     ) -> ToolResult:
@@ -139,6 +141,7 @@ class _SubscriptionFlowMixin:
             send_time=send_time,
             weekday=weekday,
             month_day=month_day,
+            hours=hours,
             channel=channel,
             user_id=user_id,
         )
@@ -620,6 +623,7 @@ class _SubscriptionFlowMixin:
         send_time: str,
         weekday: int,
         month_day: int,
+        hours: list[int] | None,
         channel: str,
         user_id: str,
     ) -> ToolResult:
@@ -637,6 +641,24 @@ class _SubscriptionFlowMixin:
                 )
             params["report_variant"] = "customer_model_hourly_tpm"
             params["report_template_id"] = "usage_customer_model_hourly_tpm"
+        # Explicit broadcast hours only narrow the hourly cadence
+        # (user-confirmed 2026-09-16); the schedule module owns validation.
+        normalized_hours: tuple[int, ...] | None = None
+        if hours:
+            if recurrence != "hourly":
+                return self._result(
+                    self._subscription_unavailable_document(
+                        "指定播报小时仅支持小时 TPM 播报（如“每天 9 点、10 点播报上一小时 TPM”）。"
+                    )
+                )
+            try:
+                normalized_hours = normalize_subscription_hours(hours)
+            except ValueError:
+                return self._result(
+                    self._subscription_unavailable_document(
+                        "播报小时必须为 0-23 的小时列表。"
+                    )
+                )
         if str(params.get("report_variant") or "") in {
             "customer_model_daily_brief",
             "customer_model_weekly_brief",
@@ -685,6 +707,8 @@ class _SubscriptionFlowMixin:
             "weekday": weekday,
             "month_day": month_day,
         }
+        if normalized_hours:
+            subscribe_params["hours"] = list(normalized_hours)
         unresolved_text = ""
         if unresolved:
             unresolved_text = "\n**未包含**：" + "、".join(
@@ -697,13 +721,22 @@ class _SubscriptionFlowMixin:
             if params.get("model_scope") == "selected"
             else "汇总"
         )
-        recurrence_text = {
-            "every_day": "每天",
-            "workdays": "每个工作日",
-            "weekly": f"每周{'一二三四五六日'[weekday - 1]}",
-            "monthly": f"每月 {month_day} 日",
-            "hourly": "每小时（整点后 5 分钟）",
-        }[recurrence]
+        if recurrence == "hourly":
+            # The hour list mirrors the schedule module's label semantics so
+            # the confirmation card, "我的订阅" card, and WebUI rows all show
+            # the same wording.
+            if normalized_hours:
+                hours_label = "、".join(str(value) for value in normalized_hours)
+                recurrence_text = f"每天 {hours_label} 点（整点后 5 分钟）"
+            else:
+                recurrence_text = "每小时（整点后 5 分钟）"
+        else:
+            recurrence_text = {
+                "every_day": "每天",
+                "workdays": "每个工作日",
+                "weekly": f"每周{'一二三四五六日'[weekday - 1]}",
+                "monthly": f"每月 {month_day} 日",
+            }[recurrence]
         # The hourly cadence is clock-driven, so the placeholder send_time is
         # never shown to the user.
         send_time_text = "" if recurrence == "hourly" else f" {send_time}"
@@ -1049,6 +1082,7 @@ class _SubscriptionFlowMixin:
         daily_mode: str,
         weekday: int,
         month_day: int,
+        hours: list[int] | None,
     ) -> ToolResult:
         """Create usage subscriptions through the shared guided service."""
 
@@ -1117,6 +1151,9 @@ class _SubscriptionFlowMixin:
             "send_time": send_time,
             "weekday": weekday,
             "month_day": month_day,
+            # Explicit broadcast hours narrow the hourly cadence; an empty
+            # list normalizes to the every-hour default inside the service.
+            "hours": list(hours) if hours else [],
             "timezone": self._config.timezone,
             "project": params.get("project", ""),
             "endpoint": params.get("endpoint", ""),
@@ -1152,6 +1189,7 @@ class _SubscriptionFlowMixin:
         daily_mode: str,
         weekday: int,
         month_day: int,
+        hours: list[int] | None,
     ) -> ToolResult:
         if self._cron is None:
             return ToolResult.error("Error: report subscriptions require the Gateway Cron service")
@@ -1228,6 +1266,7 @@ class _SubscriptionFlowMixin:
                     daily_mode=daily_mode,
                     weekday=weekday,
                     month_day=month_day,
+                    hours=hours,
                 )
         # Delivery cadence and report data period are independent. For example,
         # a daily report can be delivered on workdays or once every Monday.

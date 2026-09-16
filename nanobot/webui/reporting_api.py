@@ -25,6 +25,7 @@ from nanobot.reporting.feature_flags import (
     effective_feature_flags,
     feature_flag_details,
 )
+from nanobot.reporting.schedules import parse_subscription_hours
 from nanobot.reporting.store import ReportSubscription
 from nanobot.reporting.subscriptions import (
     DEFAULT_UNSUBSCRIBABLE_TEMPLATES,
@@ -49,7 +50,8 @@ _GUIDED_FORM_KEYS = frozenset(
     {
         "template_id", "channel", "chat_id", "user_id", "tenant_scope", "tenants",
         "tenant_aliases", "model_scope", "models", "period", "recurrence", "send_time",
-        "weekday", "month_day", "timezone", "project", "endpoint", "provider", "cluster",
+        "weekday", "month_day", "hours", "timezone", "project", "endpoint", "provider",
+        "cluster",
     }
 )
 
@@ -382,10 +384,33 @@ def _subscription_form_snapshot(item: ReportSubscription) -> dict[str, Any]:
         stored_labels = list(stored_tenants)
     schedule = item.schedule.split()
     minute = schedule[0] if len(schedule) == 5 and schedule[0].isdigit() else "0"
-    hour = schedule[1] if len(schedule) == 5 and schedule[1].isdigit() else "9"
+    # Keep the raw hour field: a wildcard ("*") must not silently fall back
+    # to the digit-guarded display default below.
+    hour_field = schedule[1] if len(schedule) == 5 else "*"
+    hour = hour_field if hour_field.isdigit() else "9"
     weekday = 1
     recurrence = "workdays"
-    if len(schedule) == 5:
+    hours: list[int] = []
+    if len(schedule) == 5 and minute == "5":
+        # Hourly TPM crons always compile minute 5. A wildcard hour is the
+        # every-hour cadence; a comma list is an explicit broadcast-hour
+        # list. A single listed hour is shape-wise identical to a daily
+        # schedule and only counts as hourly for the hourly TPM template
+        # (whose period is pinned to recent1h).
+        listed_hours = parse_subscription_hours(item.schedule)
+        hourly_template = (
+            item.template_id == "usage_customer_model_hourly_tpm"
+            and str(params.get("subscription_period") or "") == "recent1h"
+        )
+        if hour_field == "*":
+            recurrence = "hourly"
+        elif listed_hours is not None:
+            recurrence = "hourly"
+            hours = list(listed_hours)
+        elif hourly_template and hour_field.isdigit() and 0 <= int(hour_field) <= 23:
+            recurrence = "hourly"
+            hours = [int(hour_field)]
+    if recurrence == "workdays" and len(schedule) == 5:
         if schedule[4] == "*" and schedule[2] == "*":
             recurrence = "every_day"
         elif schedule[2] == "*" and schedule[4].isdigit():
@@ -393,6 +418,9 @@ def _subscription_form_snapshot(item: ReportSubscription) -> dict[str, Any]:
             weekday = int(schedule[4])
         elif schedule[2].isdigit() and schedule[4] == "*":
             recurrence = "monthly"
+    # The hourly cadence is clock-driven; send_time is a structural
+    # placeholder the compiled cron ignores.
+    send_time = "00:00" if recurrence == "hourly" else f"{int(hour):02d}:{int(minute):02d}"
     return {
         "template_id": item.template_id,
         "channel": item.channel,
@@ -405,7 +433,8 @@ def _subscription_form_snapshot(item: ReportSubscription) -> dict[str, Any]:
         "models": stored_models,
         "period": str(params.get("subscription_period") or "day"),
         "recurrence": recurrence,
-        "send_time": f"{int(hour):02d}:{int(minute):02d}",
+        "send_time": send_time,
+        "hours": hours,
         "weekday": weekday,
         "month_day": int(schedule[2]) if len(schedule) == 5 and schedule[2].isdigit() else 1,
         "timezone": item.timezone,

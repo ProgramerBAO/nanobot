@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import re
 
+from nanobot.utils.schedule_hours import (  # noqa: F401 — re-exported single source
+    normalize_subscription_hours,
+    parse_subscription_hours,
+)
+
 # Single source for the subscription recurrence choices. The NLU module's
 # Literal surface, the report_center tool schema enum, and the guided
 # service's validation set all derive from this tuple; it was previously
@@ -100,7 +105,7 @@ REPORT_DATA_PERIODS = {
     "usage_customer_model_daily_brief": "前一自然日，对比前一日和上周同期",
     "usage_customer_model_weekly_brief": "上一完整自然周，对比此前一完整自然周",
     "machine_tpm_peak": "发送时按订阅周期计算单机折算 TPM 峰值",
-    "usage_customer_model_hourly_tpm": "每小时（整点后 5 分钟）发送刚结束的上一完整小时 TPM",
+    "usage_customer_model_hourly_tpm": "整点后 5 分钟发送刚结束的上一完整小时 TPM（频率见发送计划）",
 }
 
 _WEEKDAY_LABELS = {
@@ -113,6 +118,11 @@ _WEEKDAY_LABELS = {
     7: "周日",
 }
 _TIME_RE = re.compile(r"^(\d{2}):(\d{2})$")
+# Explicit hour-list helpers (normalize/parse + the hour-list regex) live in
+# nanobot.utils.schedule_hours and are re-exported above: the agent-side
+# intent parser must not import this package (import cycle through the
+# connector construction chain), while this module stays the public surface
+# for the reporting and webui layers.
 
 
 def build_subscription_schedule(
@@ -122,6 +132,7 @@ def build_subscription_schedule(
     daily_mode: str = "workdays",
     weekday: int = 1,
     month_day: int = 1,
+    hours: object = None,
 ) -> str:
     """Build a five-field cron expression from the supported UI choices."""
 
@@ -134,8 +145,14 @@ def build_subscription_schedule(
     if period == "recent1h":
         # Five minutes after the hour: the upstream hourly TPM aggregate was
         # confirmed to lag slightly behind the hour boundary, so the buffer
-        # keeps the freshest hour from being reported as zeros.
-        return "5 * * * *"
+        # keeps the freshest hour from being reported as zeros. An explicit
+        # hour list (user-confirmed 2026-09-16) fires only at the listed
+        # clock hours; the reported window still comes from the clock at
+        # execution time, never from this expression.
+        normalized_hours = normalize_subscription_hours(hours)
+        if normalized_hours is None:
+            return "5 * * * *"
+        return "5 " + ",".join(str(value) for value in normalized_hours) + " * * *"
     if period == "day":
         if daily_mode not in {"workdays", "every_day"}:
             raise ValueError("daily_mode must be workdays or every_day")
@@ -163,6 +180,19 @@ def describe_subscription_schedule(schedule: str) -> str:
         return "每小时（整点后 5 分钟）"
     if minute == "0" and hour == "*" and month_day == "*" and month == "*" and weekday == "*":
         return "每小时整点"
+    # Explicit hour lists only come from the hourly path (minute 5 by
+    # construction); a single listed hour stays shape-wise identical to a
+    # daily schedule and keeps the generic 每天 HH:MM label.
+    listed_hours = parse_subscription_hours(schedule)
+    if (
+        listed_hours is not None
+        and minute == "5"
+        and month_day == "*"
+        and month == "*"
+        and weekday == "*"
+    ):
+        labels = "、".join(str(value) for value in listed_hours)
+        return f"每天 {labels} 点（整点后 5 分钟）"
     if not minute.isdigit() or not hour.isdigit() or month != "*":
         return "自定义定时"
     if not 0 <= int(hour) <= 23 or not 0 <= int(minute) <= 59:

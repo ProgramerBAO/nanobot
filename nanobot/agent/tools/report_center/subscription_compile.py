@@ -57,7 +57,7 @@ class _SubscriptionCompileMixin:
     ) -> dict[str, Any]:
         """Compile validated NLU output to the ReportCenter's public schema."""
 
-        return {
+        params: dict[str, Any] = {
             "action": "subscription_preview",
             "report_type": intent.report_type,
             "tenant_scope": intent.tenant_scope,
@@ -71,6 +71,12 @@ class _SubscriptionCompileMixin:
             "inherit_report_scope": intent.inherit_report_scope,
             "reference_message_id": reference_message_id,
         }
+        if intent.hours is not None:
+            # Explicit hourly-broadcast hours (user-confirmed 2026-09-16);
+            # the every-hour default omits the key entirely because the tool
+            # schema types hours as a non-nullable array.
+            params["hours"] = list(intent.hours)
+        return params
 
 
     async def _compile_subscription_intent(

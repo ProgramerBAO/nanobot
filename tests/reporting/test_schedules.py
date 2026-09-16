@@ -6,6 +6,8 @@ from nanobot.reporting.capabilities import subscriptions_document
 from nanobot.reporting.schedules import (
     build_subscription_schedule,
     describe_subscription_schedule,
+    normalize_subscription_hours,
+    parse_subscription_hours,
 )
 from nanobot.reporting.store import ReportSubscription
 
@@ -45,6 +47,21 @@ from nanobot.reporting.store import ReportSubscription
             "5 * * * *",
             "每小时（整点后 5 分钟）",
         ),
+        # Explicit broadcast hours (user-confirmed 2026-09-16) narrow the
+        # hourly cadence; lists are deduplicated and sorted on compile.
+        (
+            "recent1h",
+            {"send_time": "00:00", "hours": [10, 9, 10]},
+            "5 9,10 * * *",
+            "每天 9、10 点（整点后 5 分钟）",
+        ),
+        # Human-friendly separated strings from chat/UI forms are accepted.
+        (
+            "recent1h",
+            {"send_time": "00:00", "hours": "15、9"},
+            "5 9,15 * * *",
+            "每天 9、15 点（整点后 5 分钟）",
+        ),
     ],
 )
 def test_build_and_describe_subscription_schedule(
@@ -61,11 +78,42 @@ def test_build_and_describe_subscription_schedule(
         ("day", {"send_time": "24:00"}),
         ("week", {"send_time": "10:00", "weekday": 8}),
         ("month", {"send_time": "10:00", "month_day": 29}),
+        # Broadcast hours must be 0-23 integers; bool is rejected even
+        # though it subclasses int.
+        ("recent1h", {"send_time": "00:00", "hours": [24]}),
+        ("recent1h", {"send_time": "00:00", "hours": [-1]}),
+        ("recent1h", {"send_time": "00:00", "hours": [True]}),
+        ("recent1h", {"send_time": "00:00", "hours": ["9"]}),
+        ("recent1h", {"send_time": "00:00", "hours": "not-hours"}),
     ],
 )
 def test_invalid_subscription_schedule_is_rejected(period: str, kwargs: dict) -> None:
     with pytest.raises(ValueError):
         build_subscription_schedule(period, **kwargs)
+
+
+def test_empty_broadcast_hours_mean_every_hour() -> None:
+    assert build_subscription_schedule("recent1h", send_time="00:00", hours=[]) == "5 * * * *"
+    assert normalize_subscription_hours([]) is None
+    assert normalize_subscription_hours(None) is None
+
+
+def test_parse_subscription_hours_round_trip() -> None:
+    assert parse_subscription_hours("5 9,10,15 * * *") == (9, 10, 15)
+    # The every-hour wildcard and single-hour shapes are not hour lists.
+    assert parse_subscription_hours("5 * * * *") is None
+    assert parse_subscription_hours("5 9 * * *") is None
+    assert parse_subscription_hours("garbage") is None
+    # Round trip with the builder.
+    built = build_subscription_schedule("recent1h", send_time="00:00", hours=[15, 9])
+    assert parse_subscription_hours(built) == (9, 15)
+
+
+def test_describe_hour_list_requires_minute_five() -> None:
+    # Only the hourly path produces hour lists and it always compiles minute
+    # 5; a hand-crafted cron with another minute stays opaque instead of
+    # pretending to be the hourly cadence.
+    assert describe_subscription_schedule("0 9,10 * * *") == "自定义定时"
 
 
 def test_unknown_cron_is_not_exposed_to_users() -> None:

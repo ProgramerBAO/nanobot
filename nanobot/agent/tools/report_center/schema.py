@@ -303,6 +303,16 @@ _REPORT_CENTER_PARAMETERS = {
         "daily_mode": {"type": "string", "enum": list(DAILY_MODES)},
         "weekday": {"type": "integer", "minimum": 1, "maximum": 7},
         "month_day": {"type": "integer", "minimum": 1, "maximum": 28},
+        # Explicit hourly-broadcast hours (user-confirmed 2026-09-16); only
+        # meaningful with recurrence=hourly and compiled as
+        # "5 9,10 * * *" — the reported window still comes from the clock.
+        "hours": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 0, "maximum": 23},
+            "minItems": 1,
+            "maxItems": 24,
+            "uniqueItems": True,
+        },
         "report_params": {"type": "object"},
         "subscription_id": {"type": "string", "maxLength": 64},
         # Modern card actions carry the row revision so a stale enable/disable

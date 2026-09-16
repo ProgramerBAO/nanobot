@@ -16,6 +16,7 @@ import json_repair
 from loguru import logger
 
 from nanobot.providers.base import parse_tool_arguments
+from nanobot.utils.schedule_hours import normalize_subscription_hours
 
 if TYPE_CHECKING:
     from nanobot.utils.llm_runtime import LLMRuntime
@@ -75,6 +76,7 @@ _PAYLOAD_FIELDS = frozenset(
         "send_time",
         "weekday",
         "month_day",
+        "hours",
         "inherit_report_scope",
     }
 )
@@ -133,6 +135,35 @@ def _deterministic_clock(text: str) -> str | None:
     return f"{hour:02d}:{minute:02d}"
 
 
+def _deterministic_clock_hours(text: str) -> tuple[int, ...] | None:
+    """Collect every distinct zero-minute clock hour in schedule text.
+
+    Explicit hourly-broadcast hour lists (user-confirmed 2026-09-16) read
+    like ``每天 9 点、10 点播报上一小时 TPM``. Only whole-hour mentions
+    enter the list: a clock with non-zero minutes (``10:30``) is a daily
+    send time, not an hourly cadence marker, and is skipped rather than
+    failing the whole extraction.
+    """
+
+    hours: list[int] = []
+    for match in _CLOCK_RE.finditer(text):
+        raw_hour = match.group("hour") or match.group("clock_hour") or ""
+        hour = _parse_chinese_number(raw_hour)
+        if hour is None or not 0 <= hour <= 23:
+            continue
+        raw_minute = match.group("minute") or match.group("clock_minute") or "0"
+        if int(raw_minute) != 0:
+            continue
+        meridiem = match.group("meridiem")
+        if meridiem in {"下午", "晚上"} and hour < 12:
+            hour += 12
+        elif meridiem == "中午" and hour < 11:
+            hour += 12
+        if hour not in hours:
+            hours.append(hour)
+    return tuple(sorted(hours)) if hours else None
+
+
 def parse_deterministic_subscription_intent(
     text: str,
     *,
@@ -158,6 +189,15 @@ def parse_deterministic_subscription_intent(
         # Hourly cadence is clock-driven and the compiled cron ignores
         # send_time; the placeholder only keeps the validated payload shape.
         send_time = "00:00"
+    listed_hours = _deterministic_clock_hours(raw)
+    # Explicit clock hours only redirect to the hourly cadence when the
+    # wording clearly names the hourly TPM report (user-confirmed
+    # 2026-09-16). Without this signal "每天 9 点发日报" must stay a daily
+    # schedule; workdays/weekly/monthly cadences with hour lists stay
+    # unsupported rather than silently firing on weekends too.
+    hourly_tpm_signal = bool(re.search(r"(?:TPM|tpm)", raw)) and bool(
+        re.search(r"上一小时|上个小时|小时\s*TPM|小时TPM", raw, re.IGNORECASE)
+    )
 
     if hourly:
         recurrence: SubscriptionRecurrence = "hourly"
@@ -171,6 +211,12 @@ def parse_deterministic_subscription_intent(
         recurrence = "every_day"
     else:
         return None
+    if (
+        listed_hours
+        and hourly_tpm_signal
+        and recurrence in {"every_day", "hourly"}
+    ):
+        recurrence = "hourly"
 
     weekday = 1
     weekday_match = re.search(r"每周\s*([一二三四五六日天1-7])", raw)
@@ -202,6 +248,7 @@ def parse_deterministic_subscription_intent(
             send_time=send_time,
             weekday=weekday,
             month_day=month_day,
+            hours=(listed_hours if recurrence == "hourly" else None),
             inherit_report_scope=True,
         )
 
@@ -227,6 +274,9 @@ def parse_deterministic_subscription_intent(
             send_time=send_time,
             weekday=weekday,
             month_day=month_day,
+            # Explicit clock hours narrow the hourly cadence to the listed
+            # hours; None keeps the every-hour default.
+            hours=listed_hours,
             inherit_report_scope=False,
         )
     has_daily = bool(re.search(r"日报", raw))
@@ -315,6 +365,7 @@ class CubeSubscriptionIntent:
     send_time: str
     weekday: int = 1
     month_day: int = 1
+    hours: tuple[int, ...] | None = None
     inherit_report_scope: bool = False
 
     @classmethod
@@ -371,6 +422,19 @@ class CubeSubscriptionIntent:
             return None
         if not 1 <= weekday <= 7 or not 1 <= month_day <= 28:
             return None
+        # Explicit broadcast hours are only valid on the hourly cadence; an
+        # hour list attached to any other recurrence is a model error and the
+        # whole payload is rejected instead of silently dropping the hours.
+        # An empty list normalizes to the every-hour default.
+        hours_value = payload.get("hours")
+        hours: tuple[int, ...] | None = None
+        if hours_value is not None:
+            if recurrence != "hourly" or not isinstance(hours_value, list):
+                return None
+            try:
+                hours = normalize_subscription_hours(hours_value)
+            except ValueError:
+                return None
         return cls(
             report_type=report_type,  # type: ignore[arg-type]
             tenant_scope=tenant_scope,  # type: ignore[arg-type]
@@ -381,6 +445,7 @@ class CubeSubscriptionIntent:
             send_time=send_time,
             weekday=weekday,
             month_day=month_day,
+            hours=hours,
             inherit_report_scope=inherit,
         )
 
@@ -427,6 +492,13 @@ def _classifier_schema() -> list[dict[str, Any]]:
                         },
                         "weekday": {"type": "integer", "minimum": 1, "maximum": 7},
                         "month_day": {"type": "integer", "minimum": 1, "maximum": 28},
+                        "hours": {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 0, "maximum": 23},
+                            "minItems": 1,
+                            "maxItems": 24,
+                            "uniqueItems": True,
+                        },
                         "inherit_report_scope": {"type": "boolean"},
                     },
                     "required": [
@@ -475,7 +547,10 @@ async def classify_subscription_intent(
                 "credentials. Chinese 上午十点 means 10:00. 工作日 means workdays; 每天 means "
                 "every_day. 每小时 or 每个小时 means recurrence hourly and must use "
                 "send_time 00:00. 小时 TPM 播报 or 上一小时 TPM means "
-                "usage_customer_model_hourly_tpm with recurrence hourly. 多客户多模型日报简报 means "
+                "usage_customer_model_hourly_tpm with recurrence hourly. When the user lists "
+                "explicit clock hours for the hourly TPM report (e.g. 每天 9 点、10 点播报上"
+                "一小时 TPM), use recurrence hourly with hours [9, 10] and send_time 00:00; "
+                "omit hours entirely for the every-hour cadence. 多客户多模型日报简报 means "
                 "usage_customer_model_daily_brief. Any daily brief that names more than one "
                 "customer must also use usage_customer_model_daily_brief. 全部模型 means "
                 "model_scope=all. "
