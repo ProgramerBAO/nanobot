@@ -777,6 +777,19 @@ export function ReportsSettings({ token }: { token: string }) {
       })() : null}
 
       <div className="flex items-center gap-2 text-xs text-muted-foreground"><Database className="h-3.5 w-3.5" />{payload?.storage.backend} · {payload?.storage.retention_days}-day run retention · onboarding v{payload?.onboarding_version}</div>
+      {payload?.construction ? (
+        <div className="text-xs text-muted-foreground">
+          计算口径（只读，重启生效）：健康语义 {payload.construction.cube_health_semantics_v2 ? "v2" : "v1"}
+          {" · "}健康卡片 {payload.construction.cube_health_card_v2 ? "v2" : "v1"}
+          {" · "}TTFT 明细 {payload.construction.cube_ttft_detail ? "开" : "关"}
+          {" · "}用量语义 {payload.construction.cube_usage_semantics_v2 ? "v2" : "v1"}
+          {" · "}供应商明细 {payload.construction.cube_provider_quality_detail ? "开" : "关"}
+          {" · "}企微渲染 {payload.construction.wecom_renderer ? "开" : "关"}
+          {" · "}钉钉渲染 {payload.construction.dingtalk_renderer ? "开" : "关"}
+          {" · "}Grafana {payload.construction.grafana_connector ? "开" : "关"}
+          {" · "}成本连接 {payload.construction.cost_connector ? "开" : "关"}
+        </div>
+      ) : null}
     </div>
   );
 }

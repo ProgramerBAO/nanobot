@@ -59,17 +59,20 @@ class ReportingSettingsError(Exception):
         self.status = status
 
 
-def _load_reporting_config() -> Any:
+def _load_reporting_config(startup_config: Any = None) -> Any:
     """Load the same environment-resolved config used by the Gateway.
 
-    The reporting settings API runs in a WebUI request handler, while the
-    Gateway resolves ``${ENV_VAR}`` references during startup.  Keeping this
-    boundary consistent is required for live Cube catalog access: otherwise a
-    guided subscription can fail even though the running report tool has a
-    valid credential.  The resolved object is used only in memory and is
-    never serialized into the management response.
+    ``startup_config`` is the Gateway's in-process startup snapshot (already
+    environment-resolved); when provided it is used directly so the
+    management page's flag defaults and construction view always match the
+    running Gateway instead of a freshly re-read config.json. The fallback
+    re-loads and resolves for callers without a runtime handle (tests,
+    embedded use). The resolved object is used only in memory and is never
+    serialized into the management response.
     """
 
+    if startup_config is not None:
+        return startup_config
     return resolve_config_env_vars(load_config())
 
 
@@ -417,9 +420,13 @@ def _pagination_value(
     return min(value, maximum)
 
 
-def reporting_settings_payload(query: QueryParams | None = None) -> dict[str, Any]:
+def reporting_settings_payload(
+    query: QueryParams | None = None,
+    *,
+    startup_config: Any = None,
+) -> dict[str, Any]:
     query = query or {}
-    config = _load_reporting_config()
+    config = _load_reporting_config(startup_config)
     store = get_report_state_store(
         config.tools.reporting.state_backend,
         config.tools.reporting.postgres_dsn_env,
@@ -480,6 +487,35 @@ def reporting_settings_payload(query: QueryParams | None = None) -> dict[str, An
             "backend": config.tools.reporting.state_backend,
             "retention_days": config.tools.reporting.run_retention_days,
         },
+        # Construction-level semantics (read-only): these select calculation
+        # and presentation versions at Gateway construction time and require
+        # a restart to change; the management page displays them so an
+        # operator can see which calculation contract is live.
+        "construction": {
+            "cube_health_semantics_v2": bool(
+                getattr(config.tools.reporting, "cube_health_semantics_v2", False)
+            ),
+            "cube_health_card_v2": bool(
+                getattr(config.tools.reporting, "cube_health_card_v2", False)
+            ),
+            "cube_ttft_detail": bool(
+                getattr(config.tools.reporting, "cube_ttft_detail", False)
+            ),
+            "cube_usage_semantics_v2": bool(
+                getattr(config.tools.reporting, "cube_usage_semantics_v2", False)
+            ),
+            "cube_provider_quality_detail": bool(
+                getattr(config.tools.reporting, "cube_provider_quality_detail", False)
+            ),
+            "wecom_renderer": bool(getattr(config.tools.reporting, "wecom_renderer", False)),
+            "dingtalk_renderer": bool(
+                getattr(config.tools.reporting, "dingtalk_renderer", False)
+            ),
+            "grafana_connector": bool(
+                getattr(config.tools.reporting, "grafana_connector", False)
+            ),
+            "cost_connector": bool(getattr(config.tools.reporting, "cube_cost_connector", False)),
+        },
         "onboarding_version": config.tools.reporting.onboarding_version,
         "grants": [],
         "recent_runs": [],
@@ -526,10 +562,15 @@ def _export_catalog() -> Path:
     return path
 
 
-def reporting_settings_action(action: str | None, query: QueryParams) -> dict[str, Any]:
+def reporting_settings_action(
+    action: str | None,
+    query: QueryParams,
+    *,
+    startup_config: Any = None,
+) -> dict[str, Any]:
     if action is None:
-        return reporting_settings_payload(query)
-    config = _load_reporting_config()
+        return reporting_settings_payload(query, startup_config=startup_config)
+    config = _load_reporting_config(startup_config)
     store = get_report_state_store(
         config.tools.reporting.state_backend,
         config.tools.reporting.postgres_dsn_env,
@@ -560,7 +601,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
                 raise ReportingSettingsError(
                     "feature flag has no override to reset", status=404
                 )
-        payload = reporting_settings_payload(query)
+        payload = reporting_settings_payload(query, startup_config=startup_config)
         payload["last_action"] = {"ok": True, "action": action, "flag": flag_key}
         return payload
     if action in {"subscription_options", "options"}:
@@ -573,7 +614,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
             raise ReportingSettingsError(
                 "Cube 客户目录当前不可用，请稍后重试", status=503
             ) from exc
-        payload = reporting_settings_payload(query)
+        payload = reporting_settings_payload(query, startup_config=startup_config)
         persisted_policies = {
             item["template_id"]: item for item in store.template_policies()
         }
@@ -671,7 +712,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
                     )
             except SubscriptionServiceError as exc:
                 raise ReportingSettingsError(exc.message, status=exc.status) from exc
-            payload = reporting_settings_payload(query)
+            payload = reporting_settings_payload(query, startup_config=startup_config)
             payload["last_action"] = {"ok": True, "action": action}
             return payload
         if action == "subscription_update":
@@ -695,7 +736,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
                 )
             except SubscriptionServiceError as exc:
                 raise ReportingSettingsError(exc.message, status=exc.status) from exc
-            payload = reporting_settings_payload(query)
+            payload = reporting_settings_payload(query, startup_config=startup_config)
             payload["last_action"] = {"ok": True, "action": "subscription_update"}
             return payload
         if action == "subscription_preview":
@@ -710,7 +751,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
                 preview = service.preview(form)
             except SubscriptionServiceError as exc:
                 raise ReportingSettingsError(exc.message, status=exc.status) from exc
-            payload = reporting_settings_payload(query)
+            payload = reporting_settings_payload(query, startup_config=startup_config)
             payload["subscription_preview"] = preview
             payload["last_action"] = {"ok": True, "action": "subscription_preview"}
             return payload
@@ -730,7 +771,7 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
                 service.create(form)
             except SubscriptionServiceError as exc:
                 raise ReportingSettingsError(exc.message, status=exc.status) from exc
-            payload = reporting_settings_payload(query)
+            payload = reporting_settings_payload(query, startup_config=startup_config)
             payload["last_action"] = {"ok": True, "action": "subscription_create_guided"}
             return payload
     if action == "rbac":
@@ -824,16 +865,16 @@ def reporting_settings_action(action: str | None, query: QueryParams) -> dict[st
                 )
         except SubscriptionServiceError as exc:
             raise ReportingSettingsError(exc.message, status=exc.status) from exc
-        payload = reporting_settings_payload(query)
+        payload = reporting_settings_payload(query, startup_config=startup_config)
         payload["last_action"] = {"ok": True, "action": action}
         return payload
     elif action == "export":
         path = _export_catalog()
-        payload = reporting_settings_payload(query)
+        payload = reporting_settings_payload(query, startup_config=startup_config)
         payload["last_action"] = {"ok": True, "action": "export", "path": str(path)}
         return payload
     else:
         raise ReportingSettingsError("unsupported reporting settings action", status=404)
-    payload = reporting_settings_payload(query)
+    payload = reporting_settings_payload(query, startup_config=startup_config)
     payload["last_action"] = {"ok": True, "action": action}
     return payload

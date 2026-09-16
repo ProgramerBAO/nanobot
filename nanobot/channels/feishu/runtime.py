@@ -5129,7 +5129,8 @@ class FeishuChannel(BaseChannel):
             configured_report_state_store,
             default_registry_kwargs,
         )
-        from nanobot.reporting.capabilities import home_document
+        from nanobot.reporting.capabilities import home_document, template_enabled
+        from nanobot.reporting.feature_flags import effective_feature_flags
 
         config = load_config()
         reporting_config = config.tools.reporting
@@ -5149,19 +5150,41 @@ class FeishuChannel(BaseChannel):
                 config.tools.magik_cube,
             )
         )
+        # Same capability view as the report tool's home: registry presence
+        # for connectors, the always-enforced template policy for
+        # per-template on/off, and runtime flags for behavior switches — the
+        # onboarding card must not promise capabilities the report center
+        # would hide.
+        flags = effective_feature_flags(
+            store,
+            lambda key: bool(getattr(reporting_config, key, False)),
+        )
         document = home_document(
             registry,
             store,
             channel=self.name,
             user_id=user_id,
-            # Capability presence is registry-derived (the health template only
-            # registers with a real Cube connector); per-template on/off lives
-            # in the always-enforced template policy, checked inside the
-            # capability catalog.
-            health_enabled=registry.template("health_sre") is not None,
+            health_enabled=(
+                registry.template("health_sre") is not None
+                and template_enabled(store, "health_sre")
+            ),
+            cost_enabled=(
+                flags["cube_cost_report"]
+                and registry.template("cost_account") is not None
+            ),
             provider_quality_enabled=(
                 registry.connector("cube_provider_quality") is not None
+                and template_enabled(store, "provider_quality")
             ),
+            brief_default=(
+                template_enabled(store, "usage_daily_brief")
+                and flags["cube_usage_brief_default"]
+            ),
+            admin_skill_enabled=(
+                flags["cube_admin_skill_help"]
+                and registry.connector("magik_cube") is not None
+            ),
+            management_enabled=flags["report_management_v1"],
         )
         await self.send(
             OutboundMessage(

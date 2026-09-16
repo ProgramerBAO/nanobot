@@ -83,7 +83,8 @@
       "mcp": "MCP",
       "apps": "Aplikasi",
       "automations": "Otomasi",
-      "skills": "Skill"
+      "skills": "Skill",
+      "reports": "Laporan"
     },
     "sections": {
       "interface": "Antarmuka",

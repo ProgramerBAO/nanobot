@@ -83,7 +83,8 @@
       "mcp": "MCP",
       "apps": "Ứng dụng",
       "automations": "Tự động hóa",
-      "skills": "Kỹ năng"
+      "skills": "Kỹ năng",
+      "reports": "Báo cáo"
     },
     "sections": {
       "interface": "Giao diện",

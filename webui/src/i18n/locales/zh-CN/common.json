@@ -83,7 +83,8 @@
       "advanced": "安全",
       "apps": "应用",
       "automations": "自动任务",
-      "skills": "技能"
+      "skills": "技能",
+      "reports": "报表"
     },
     "sections": {
       "interface": "界面",

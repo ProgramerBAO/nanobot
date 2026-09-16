@@ -83,7 +83,8 @@
       "mcp": "MCP",
       "apps": "앱",
       "automations": "자동화",
-      "skills": "스킬"
+      "skills": "스킬",
+      "reports": "리포트"
     },
     "sections": {
       "interface": "인터페이스",

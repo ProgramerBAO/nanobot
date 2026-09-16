@@ -83,7 +83,8 @@
       "mcp": "MCP",
       "apps": "Aplicaciones",
       "automations": "Automatizaciones",
-      "skills": "Habilidades"
+      "skills": "Habilidades",
+      "reports": "Informes"
     },
     "sections": {
       "interface": "Interfaz",

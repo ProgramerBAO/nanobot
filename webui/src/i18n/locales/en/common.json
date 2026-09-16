@@ -83,7 +83,8 @@
       "advanced": "Security",
       "apps": "Apps",
       "automations": "Automations",
-      "skills": "Skills"
+      "skills": "Skills",
+      "reports": "Reports"
     },
     "sections": {
       "interface": "Interface",

@@ -39,7 +39,7 @@
 
 引导式管理界面（`report_subscription_guided_ui` 开启时）使用结构化表单配置报表类型、客户、模型、周期、频率、发送时间、时区和接收会话。Cron 表达式和 `report_params_json` 只在服务端编译与保存，用户界面不要求填写原始 JSON 或五段 Cron。客户选项来自 Cube 实时目录；目录展示上限与单次报表最多选择 20 个客户的执行上限分离，因此客户数量较多时仍可在管理台选择任意目录客户。WebUI 与 Gateway 使用同一份环境变量解析后的配置访问目录，避免页面单独使用未解析的 `SecretRef` 导致“客户目录不可用”。服务端仍会重新校验真实 `tenantId`、模型目录、RBAC 和订阅策略。删除操作需要浏览器二次确认，历史运行记录不会删除。
 
-旧 `/api/settings/reporting` 查询参数仍保留兼容；使用旧接口的自动化客户端可以提交受控参数，但 URL、Bearer、password、API key、secret 和任意 API 路径均被拒绝。新功能应优先使用引导式接口和同一 `ReportSubscriptionService`，避免产生无法编辑的遗留配置。
+订阅的创建、编辑、启停和删除统一经 `ReportSubscriptionService`（2026-09-16 收敛后唯一入口，带 revision CAS、Cron 补偿与管理审计）；聊天侧的订阅确认卡走同一服务。自然语言或引用卡片进入的确认流程不要求填写原始 JSON。
 
 用户侧还可以通过结构化自然语言或引用 Feishu 报表卡片进入订阅确认流程。该入口不允许 LLM 生成 Cron、`tenantId` 或 Tool 参数：服务端将发送计划编译为 Cron，并根据实时 Cube catalog 和当前用户权限重新校验范围。最终订阅仍由同一个 Cron 与状态存储链路管理。
 

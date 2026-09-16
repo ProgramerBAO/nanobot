@@ -73,16 +73,17 @@ Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管�
 - 引用日报卡片回复 `工作日上午十点发送给我` 时继承模板、客户和模型范围，但不继承历史查询日期；旧卡片、跨群引用和过期引用必须失败关闭。
 - “全部模型”订阅在每次执行前读取各客户的实时模型目录，新模型自动进入报表，持续无用量模型沿用现有隐藏规则。
 - Report platform 的模板策略使用 revision 防止并发覆盖，订阅操作与 Cron 状态同步。
-- Report platform 只允许 Gateway/WebUI 管理 token 操作策略和订阅；旧兼容接口保留，但新建和编辑优先使用引导式表单。测试账号的订阅接收人固定为当前用户，未经单独授权不会扩大发送范围。
+- Report platform 只允许 Gateway/WebUI 管理 token 操作策略和订阅；订阅的创建、编辑、启停和删除统一走 `ReportSubscriptionService` 单入口（2026-09-16 起 legacy 查询式创建与 REST 订阅路由已删除）。测试账号的订阅接收人固定为当前用户，未经单独授权不会扩大发送范围。
 
 ## 非功能与运维
 
 所有 Cube 调用必须只读、有 timeout、受控重试和输出脱敏。发布时先注册模板，再对白名单开启默认路由；观察报表成功率、`partial/missing` 比例、执行 P95 和投递失败率。
 
-回滚可分别关闭 `cube_multi_scope_brief`、`cube_multi_scope_weekly_brief`、`cube_customer_model_hourly_tpm`、`cube_customer_model_hourly_tpm_subscription`、`cube_machine_tpm_report` 和 `report_management_v1`（均为运行时开关，WebUI 功能开关页切换即时生效）。策略表与审计表保留但不参与执行，旧简报、已有订阅和历史记录不删除；不涉及 Cube 远端写入。
+回滚（两层开关，2026-09-16 收敛后语义）：**模板级**在 Report platform → 报表类型关闭 `enabled`（即时生效，阻止执行/可见/新建订阅，已有订阅配置保留）；**行为级**在功能开关页关闭对应运行时开关（订阅机制 `cube_subscription`、简报默认路由、成本报表两项等，即时生效）。管理页整体只读可关闭 `report_management_v1`（模板策略执行不受影响）。旧简报、已有订阅和历史记录不删除；不涉及 Cube 远端写入。
 
 ## 发布记录与待办
 
+- `2026-09-16`（收敛阶段 4 已落地，管理面一致性）：报表管理页的默认值与构造口径视图改从 Gateway 启动时的进程内配置快照读取（经 settings 路由注入，消除"编辑 config.json 未重启时页面显示与运行值漂移"）；payload 新增只读 `construction` 节并在页面页脚展示当前生效的计算口径（健康/用量语义版本、TTFT 明细、供应商明细、企微/钉钉渲染器、Grafana、成本连接，重启生效）；Feishu onboarding 引导卡与报表中心 home 使用同一能力口径（registry 存在性 + 模板策略 + 运行时开关），不再多展示或少展示能力；Grafana `cost_summary`/`capacity_summary` 两个无执行入口的死模板从注册表移除；`settings.nav.reports` 导航键补齐全部 10 个 locale（中文界面不再显示英文 "Reports"）。ReportsSettings 页面文案的完整 i18n 抽取另行排期（当前硬编码中文，对英文界面低价值）。
 - `2026-09-16`（收敛阶段 3 已落地，订阅链路单入口）：小时 TPM 订阅的聊天确认改走与日/周/月相同的 `ReportSubscriptionService`（模板/变体标记与 `5 * * * *` 调度不变）；`subscription_fingerprint` 成为全部创建入口的单一判重身份（含 chat_id/timezone），跨入口重复创建命中同一 `UNIQUE` 约束；订阅启停/删除按钮携带 revision（CAS），文本命令在服务端解析当前 revision，无 CAS 内联分支全部删除。**外部 API breaking**：WebUI 报表设置 action 全部改为 POST（原为隐式 GET 携带副作用）、订阅启停/删除必须携带 revision（缺失返回 400）、删除 REST 订阅路由（仅保留 options）、删除 legacy `subscription_create` 与 `subscription_schedule`。审计补齐：`rbac`/`grant`/`revoke` 现写入管理审计。新增 CLI：`nanobot reports policy scan-duplicates`（仅报告统一指纹前遗留的语义重复订阅）；magik 执行兜底收敛为 `_run_subscription` 内单一判定点并注明删除条件。
 - `2026-09-16`（收敛阶段 0–2 已落地）：模板策略成为每模板唯一运行时开关并**始终执行**（`report_management_v1` 退化为管理页/引导表单可见性开关）；11 项每模板/订阅类运行时功能 flag 退役进模板策略（`enabled` 管执行+可见+新建订阅，`subscription_mode` 只管新建），无独立行为的 `cube_subscription_nlu_v3` 删除；成本报表两项从部署配置提升为运行时开关（默认仍关闭）；运行时功能开关注册表收缩为 10 项行为/路由开关。迁移：`nanobot reports policy migrate-flags [--dry-run]`（幂等、expand-only，同时转换 store 覆盖与配置级非默认值；执行前备份报表状态库）。被退役的 config 字段保留一个迁移窗口（设置非默认值时记录警告），窗口结束后删除。同日完成无行为变化的收敛：registry 构造参数、订阅枚举/映射、策略判定、hourly 窗口计算等收敛为单一来源（评审底稿见 `docs/REPORT_PLATFORM_REVIEW.md`）。
 - `2026-09-16`：完成报表平台全量逻辑评审并批准收敛整改方案（完整评审与阶段状态见 `docs/REPORT_PLATFORM_REVIEW.md`）。已确认的主要问题：模板策略与每模板家族功能开关在 Cube 报表家族语义重叠（两层互不感知）、`report_management_v1` 同时是策略执行的元开关、cost 家族脱离运行时开关体系、订阅创建三入口三种 fingerprint、枚举与校验多层复制。目标架构：模板策略成为每模板唯一运行时开关、功能开关退化为纯行为/路由开关、订阅单一入口、关键枚举单一来源。本条目为计划记录，各阶段以对应发布记录为准；同日纠正本文档与 `docs/report-management.md` 中"默认关闭"的过期表述，并补记"功能开关"页签与即时回滚语义。

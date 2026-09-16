@@ -83,7 +83,8 @@
       "mcp": "MCP",
       "apps": "應用程式",
       "automations": "自動任務",
-      "skills": "技能"
+      "skills": "技能",
+      "reports": "報表"
     },
     "sections": {
       "interface": "介面",

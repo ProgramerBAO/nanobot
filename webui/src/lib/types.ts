@@ -1062,6 +1062,17 @@ export interface ReportingSettingsPayload {
   };
   feature_flags?: ReportingFeatureFlag[];
   storage: { backend: string; retention_days: number };
+  construction?: {
+    cube_health_semantics_v2: boolean;
+    cube_health_card_v2: boolean;
+    cube_ttft_detail: boolean;
+    cube_usage_semantics_v2: boolean;
+    cube_provider_quality_detail: boolean;
+    wecom_renderer: boolean;
+    dingtalk_renderer: boolean;
+    grafana_connector: boolean;
+    cost_connector: boolean;
+  };
   onboarding_version: number;
   grants: ReportingGrant[];
   recent_runs: Array<Record<string, unknown>>;

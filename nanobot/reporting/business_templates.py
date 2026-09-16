@@ -161,6 +161,14 @@ def _top_dimension_rows(rows: list[dict[str, Any]], dimension: str) -> list[dict
 
 
 def build_business_templates() -> tuple[FixedMetricTemplate, ...]:
+    """Grafana-backed fixed templates.
+
+    Only the SRE health template remains: it serves minimal deployments
+    without a Cube connector. The cost_summary and capacity_summary
+    templates were removed in the 2026-09-16 dead-surface cleanup — they
+    had no execution entry in report_center and only cluttered the catalog;
+    reintroduce them together with a routing entry if Grafana is activated.
+    """
     return (
         FixedMetricTemplate(
             template_id="health_sre",
@@ -178,23 +186,5 @@ def build_business_templates() -> tuple[FixedMetricTemplate, ...]:
                 "ai.tpm": "max",
                 "ai.rpm": "max",
             },
-        ),
-        FixedMetricTemplate(
-            template_id="cost_summary",
-            display_name="成本与余额报告",
-            metrics=("ai.usage.tokens", "ai.requests", "ai.cost", "ai.balance", "ai.unbilled_amount"),
-            dimensions=("tenant", "project", "model", "date"),
-            periods=frozenset({"day", "week", "month", "recent7", "range"}),
-            description="固定 Token、请求、成本、余额和未结算金额摘要。",
-            aggregations={"ai.usage.tokens": "sum", "ai.requests": "sum", "ai.cost": "sum"},
-        ),
-        FixedMetricTemplate(
-            template_id="capacity_summary",
-            display_name="容量与 GPU 报告",
-            metrics=("ai.tpm", "ai.capacity_utilization", "ai.gpu_hours"),
-            dimensions=("cluster", "model", "date", "hour"),
-            periods=frozenset({"day", "week", "month", "recent7", "range"}),
-            description="固定 TPM、容量使用率和 GPU Hours 摘要。",
-            aggregations={"ai.tpm": "max", "ai.capacity_utilization": "max", "ai.gpu_hours": "sum"},
         ),
     )

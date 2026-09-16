@@ -8,6 +8,7 @@ request mapping and response shaping.
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
 import time
@@ -133,6 +134,7 @@ class WebUISettingsRouter:
         runtime_capabilities: dict[str, Any],
         channel_feature_action: Callable[..., Any] | None = None,
         channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+        startup_config: Any = None,
     ) -> None:
         self.bus = bus
         self.logger = logger
@@ -144,6 +146,11 @@ class WebUISettingsRouter:
         self._runtime_capabilities = runtime_capabilities
         self._channel_feature_action = channel_feature_action
         self._channel_runtime_status = channel_runtime_status
+        # The Gateway's environment-resolved startup snapshot: the reporting
+        # settings surface reads its defaults and construction view from this
+        # handle so the page always matches the running process instead of a
+        # re-read config.json.
+        self._startup_config = startup_config
         self._restart_sections: set[str] = set()
         self._channel_connectors: dict[str, Any] = {}
 
@@ -405,7 +412,14 @@ class WebUISettingsRouter:
             query = self._reporting_query(request)
             if subscription_id:
                 query["subscription_id"] = [subscription_id]
-            payload = await asyncio.to_thread(reporting_settings_action, action, query)
+            payload = await asyncio.to_thread(
+                functools.partial(
+                    reporting_settings_action,
+                    action,
+                    query,
+                    startup_config=self._startup_config,
+                )
+            )
         except ReportingSettingsError as exc:
             return self._error_response(exc.status, exc.message)
         except Exception:

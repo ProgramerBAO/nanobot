@@ -205,6 +205,7 @@ class GatewayHTTPHandler:
             runtime_capabilities=self._capabilities,
             channel_feature_action=channel_feature_action,
             channel_runtime_status=channel_runtime_status,
+            startup_config=config,
         )
 
     def workspace_controls_available(self, connection: Any) -> bool:
