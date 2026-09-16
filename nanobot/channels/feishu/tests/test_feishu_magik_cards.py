@@ -489,6 +489,94 @@ def test_report_document_health_cards_use_status_theme_kpi_grid_and_table_split(
     assert "第 2/2 页" in cards[1]["header"]["title"]["content"]
 
 
+def test_report_document_hourly_three_tables_split_into_three_cards() -> None:
+    """The hourly TPM document's third table lands on its own card."""
+    channel = _channel()
+    ui = {
+        "kind": "report_document",
+        "title": "多客户多模型小时 TPM 报告",
+        "subtitle": "09-13 10:00–11:00 · 1 客户 / 1 模型 · 2 机器空闲",
+        "quality": "complete",
+        "blocks": [
+            {
+                "kind": "table",
+                "data": {
+                    "title": "模型明细",
+                    "columns": [
+                        {"tag": "column", "name": "tenant", "display_name": "客户"},
+                        {"tag": "column", "name": "model", "display_name": "模型"},
+                    ],
+                    "rows": [{"tenant": "佛跳墙", "model": "Kimi-K3"}],
+                    "page_size": 20,
+                },
+            },
+            {
+                "kind": "table",
+                "data": {
+                    "title": "Endpoint 明细：多 Endpoint 模型不汇总均值",
+                    "columns": [
+                        {"tag": "column", "name": "endpoint", "display_name": "Endpoint"},
+                    ],
+                    "rows": [{"endpoint": "ep-k3"}, {"endpoint": "ep-k3-b"}],
+                    "page_size": 20,
+                },
+            },
+            {
+                "kind": "table",
+                "data": {
+                    "title": "集群机器库存",
+                    "columns": [
+                        {"tag": "column", "name": "cluster", "display_name": "集群"},
+                        {"tag": "column", "name": "cluster_idle", "display_name": "空闲"},
+                    ],
+                    "rows": [{"cluster": "cluster-a", "cluster_idle": "4"}],
+                    "page_size": 20,
+                },
+            },
+            {
+                "kind": "note",
+                "data": {
+                    "content": "口径：上一完整小时的模型级 TPM。",
+                    "collapsed": True,
+                    "collapsed_label": "报表说明与数据质量",
+                    "include_context": True,
+                    "include_warnings": True,
+                },
+            },
+        ],
+    }
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_alice",
+        content="fallback",
+        metadata={"sender_open_id": "ou_alice"},
+    )
+
+    cards = channel._build_agent_ui_cards(ui, msg)
+
+    assert len(cards) == 3
+    # One table per card (Feishu API 11310 limit) with each table title kept
+    # on the same card as its table.
+    assert all(
+        sum(element.get("tag") == "table" for element in card["elements"]) == 1
+        for card in cards
+    )
+    assert "第 1/3 页" in cards[0]["header"]["title"]["content"]
+    assert "第 2/3 页" in cards[1]["header"]["title"]["content"]
+    assert "第 3/3 页" in cards[2]["header"]["title"]["content"]
+    # The disclosure panel lands on the last card only (hourly documents
+    # fold context/warnings into the collapsed panel instead of per-card
+    # notes).
+    assert any(
+        element.get("tag") == "collapsible_panel"
+        for element in cards[2]["elements"]
+    )
+    assert not any(
+        element.get("tag") == "collapsible_panel"
+        for element in cards[0]["elements"]
+    )
+
+
 def test_report_document_daily_metrics_name_both_comparisons() -> None:
     channel = _channel()
     ui = {
@@ -825,9 +913,13 @@ def test_subscription_card_keeps_each_button_with_its_opaque_subscription_target
         value = button["value"]
         state = channel._card_interactions[value["interaction_id"]]
         target = state.option_values[value["action_token"]]
+        # Enable/disable buttons carry the row revision for CAS updates
+        # (subscription consolidation 2026-09-16); the fixture rows default
+        # to revision 0.
         assert target["params"] == {
             "action": expected_action,
             "subscription_id": expected_id,
+            "revision": 0,
         }
 
 

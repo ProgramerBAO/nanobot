@@ -246,6 +246,34 @@ describe("MessageBubble", () => {
               ],
             },
           },
+          {
+            kind: "table",
+            data: {
+              title: "集群机器库存",
+              columns: [
+                { tag: "column", name: "cluster", display_name: "集群", data_type: "text" },
+                { tag: "column", name: "cluster_total", display_name: "机器总数", data_type: "text" },
+                { tag: "column", name: "cluster_production", display_name: "生产", data_type: "text" },
+                { tag: "column", name: "cluster_test", display_name: "测试", data_type: "text" },
+                { tag: "column", name: "cluster_dev", display_name: "开发", data_type: "text" },
+                { tag: "column", name: "cluster_backup", display_name: "备用", data_type: "text" },
+                { tag: "column", name: "cluster_idle", display_name: "空闲", data_type: "text" },
+              ],
+              headers: ["集群", "机器总数", "生产", "测试", "开发", "备用", "空闲"],
+              page_size: 20,
+              rows: [
+                {
+                  cluster: "cluster-a",
+                  cluster_total: "128",
+                  cluster_production: "86",
+                  cluster_test: "20",
+                  cluster_dev: "12",
+                  cluster_backup: "6",
+                  cluster_idle: "4",
+                },
+              ],
+            },
+          },
         ],
       },
     };
@@ -264,6 +292,14 @@ describe("MessageBubble", () => {
     expect(screen.getByText("5014万")).toBeInTheDocument();
     expect(screen.getByText("39")).toBeInTheDocument();
     expect(screen.getByText("38（闲1）")).toBeInTheDocument();
+    // The cluster inventory section renders as its own seven-column table
+    // (user-confirmed 2026-09-16); production is a derived column.
+    expect(screen.getByText("集群机器库存")).toBeInTheDocument();
+    expect(screen.getByText("机器总数")).toBeInTheDocument();
+    expect(screen.getByText("cluster-a")).toBeInTheDocument();
+    expect(screen.getByText("128")).toBeInTheDocument();
+    expect(screen.getByText("86")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
   });
 
   it("collapses multi-customer report context and quality details", () => {

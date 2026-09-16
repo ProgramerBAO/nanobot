@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1396,6 +1398,210 @@ async def test_cube_connector_hourly_endpoint_tpm_uses_hourly_peak_mean_and_mach
 
 
 @pytest.mark.asyncio
+async def test_cube_connector_hourly_cluster_inventory_is_informational() -> None:
+    """The opt-in cluster inventory snapshot never downgrades report quality."""
+    inventory_requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "model": "Kimi-K3",
+                                "endpoint": "ep-k3",
+                                "points": [
+                                    {"date": "2026-09-13 10", "maxTpm": "900", "avgTpm": "600"},
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/model-machine-usage/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"list": [{"clusterName": "beast01", "machineCount": 7}]},
+                },
+            )
+        if request.url.path.endswith("/analysis/machine-tpm-trend/query"):
+            return httpx.Response(200, json={"code": 0, "data": {"points": []}})
+        assert request.url.path.endswith("/analysis/machine-usage-summary/query")
+        inventory_requests.append(body)
+        # Live contract shape (user-provided 2026-09-16): counts arrive as
+        # strings and occupiedMachineCount carries the TEST machine total.
+        # cluster-b's parts exceed its total (20+8+4+2 > 30) to pin the
+        # sanity warning, and the duplicate cluster-b row must be ignored.
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "list": [
+                        {
+                            "clusterName": "cluster-a",
+                            "totalMachineCount": "128",
+                            "occupiedMachineCount": "20",
+                            "devMachineCount": "12",
+                            "backupMachineCount": "6",
+                            "idleMachineCount": "4",
+                        },
+                        {
+                            "clusterName": "cluster-b",
+                            "totalMachineCount": "30",
+                            "occupiedMachineCount": "20",
+                            "devMachineCount": "8",
+                            "backupMachineCount": "4",
+                            "idleMachineCount": "2",
+                        },
+                        {"clusterName": "cluster-b", "totalMachineCount": "999"},
+                    ]
+                },
+            },
+        )
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    base_filters = {"models": ["Kimi-K3"], "tenant_models": {"tenant-a": ["Kimi-K3"]}}
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=(
+            "ai.tpm.peak",
+            "ai.tpm.avg",
+            "ai.machine.count",
+            "ai.machine.used",
+            "ai.machine.inventory",
+        ),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters=base_filters,
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(query)
+
+    # One snapshot call with the documented minimal body.
+    assert inventory_requests == [{"noloading": True}]
+    inventory_rows = [
+        row for row in result.rows if row["metric"] == "ai.machine.inventory"
+    ]
+    # The duplicate cluster-b entry is deduped away.
+    assert [row["cluster"] for row in inventory_rows] == ["cluster-a", "cluster-b"]
+    first = inventory_rows[0]
+    assert first["metric_scope"] == "platform_cluster"
+    assert first["tenant_id"] == ""
+    assert first["cluster_total"] == 128
+    assert first["cluster_test"] == 20
+    assert first["cluster_dev"] == 12
+    assert first["cluster_backup"] == 6
+    assert first["cluster_idle"] == 4
+    assert first["source"] == "Cube Admin / analysis/machine-usage-summary/query"
+    # cluster-b's part sum exceeds its total: informational warning only.
+    assert "cluster-b: machine_inventory parts exceed total" in result.warnings
+    # The inventory table is supplementary: quality stays complete even with
+    # the sanity warning and the empty usage trend (machine_used no_data).
+    assert result.quality == "complete"
+
+    # The snapshot call stays opt-in: a query without the marker metric must
+    # not pay the extra upstream request.
+    legacy_query = replace(
+        query,
+        metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+    )
+    await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(
+        legacy_query
+    )
+    assert len(inventory_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_hourly_cluster_inventory_failure_stays_informational() -> None:
+    """A failed or empty inventory snapshot warns without downgrading quality."""
+
+    def make_handler(summary_json: dict[str, object]) -> Callable[[httpx.Request], httpx.Response]:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "items": [
+                                {
+                                    "model": "Kimi-K3",
+                                    "endpoint": "ep-k3",
+                                    "points": [
+                                        {"date": "2026-09-13 10", "maxTpm": "900", "avgTpm": "600"},
+                                    ],
+                                }
+                            ]
+                        },
+                    },
+                )
+            if request.url.path.endswith("/analysis/model-machine-usage/query"):
+                return httpx.Response(
+                    200,
+                    json={"code": 0, "data": {"list": [{"clusterName": "b1", "machineCount": 7}]}},
+                )
+            if request.url.path.endswith("/analysis/machine-tpm-trend/query"):
+                return httpx.Response(200, json={"code": 0, "data": {"points": []}})
+            assert request.url.path.endswith("/analysis/machine-usage-summary/query")
+            return httpx.Response(200, json=summary_json)
+
+        return handler
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=(
+            "ai.tpm.peak",
+            "ai.tpm.avg",
+            "ai.machine.count",
+            "ai.machine.used",
+            "ai.machine.inventory",
+        ),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={"models": ["Kimi-K3"], "tenant_models": {"tenant-a": ["Kimi-K3"]}},
+    )
+
+    # An empty list means no cluster data: one informational warning.
+    empty_result = await CubeConnector(
+        _config(), transport=httpx.MockTransport(make_handler({"code": 0, "data": {"list": []}}))
+    ).query(query)
+    assert "machine_inventory no_data" in empty_result.warnings
+    assert empty_result.quality == "complete"
+
+    # An upstream failure is classified but stays informational as well.
+    failed_result = await CubeConnector(
+        _config(),
+        transport=httpx.MockTransport(
+            make_handler({"code": 500, "message": "boom", "data": None})
+        ),
+    ).query(query)
+    assert any(
+        warning.startswith("machine_inventory ")
+        and warning != "machine_inventory no_data"
+        for warning in failed_result.warnings
+    )
+    assert failed_result.quality == "complete"
+
+
+@pytest.mark.asyncio
 async def test_cube_connector_hourly_machine_queried_once_per_unique_model() -> None:
     machine_calls: list[str] = []
     usage_calls: list[str] = []
@@ -1903,6 +2109,127 @@ def test_hourly_tpm_template_idle_threshold_and_negative_difference() -> None:
     assert document.subtitle.endswith("· 1 机器空闲")
 
 
+def test_hourly_tpm_template_renders_cluster_inventory_table() -> None:
+    """The cluster inventory section renders a seven-column snapshot table."""
+    dataset = ReportDataset(
+        rows=(
+            {
+                "metric": "ai.tpm.peak",
+                "value": 900.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.avg",
+                "value": 600.0,
+                "model": "Kimi-K3",
+                "endpoint": "ep-k3",
+                "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.machine.count",
+                "value": 42.0,
+                "model": "Kimi-K3",
+                "endpoint": "",
+                "tenant_id": "",
+                "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used",
+                "value": 40.0,
+                "model": "Kimi-K3",
+                "endpoint": "",
+                "tenant_id": "",
+                "metric_scope": "platform_model",
+            },
+            # Cluster inventory rows are unsorted and cover the three display
+            # paths: healthy, parts exceeding total, and a missing sub-count.
+            {
+                "metric": "ai.machine.inventory",
+                "cluster": "cluster-b",
+                "cluster_total": 30,
+                "cluster_test": 20,
+                "cluster_dev": 8,
+                "cluster_backup": 4,
+                "cluster_idle": 2,
+            },
+            {
+                "metric": "ai.machine.inventory",
+                "cluster": "cluster-a",
+                "cluster_total": 128,
+                "cluster_test": 20,
+                "cluster_dev": 12,
+                "cluster_backup": 6,
+                "cluster_idle": 4,
+            },
+            {
+                "metric": "ai.machine.inventory",
+                "cluster": "cluster-c",
+                "cluster_total": 64,
+                "cluster_test": 10,
+                "cluster_dev": 8,
+                "cluster_backup": 4,
+                "cluster_idle": None,
+            },
+        ),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {"tenant-a": ["Kimi-K3"]},
+            "tenant_names": {"tenant-a": "佛跳墙"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    # Model table first, then the cluster inventory table, note stays last.
+    assert [block.kind for block in document.blocks] == ["table", "table", "note"]
+    inventory_block = document.blocks[1]
+    columns = inventory_block.data["columns"]
+    assert [column["name"] for column in columns] == [
+        "cluster",
+        "cluster_total",
+        "cluster_production",
+        "cluster_test",
+        "cluster_dev",
+        "cluster_backup",
+        "cluster_idle",
+    ]
+    assert [column["display_name"] for column in columns] == [
+        "集群", "机器总数", "生产", "测试", "开发", "备用", "空闲",
+    ]
+    assert all(column.get("tag") == "column" for column in columns)
+    assert inventory_block.data["headers"] == [
+        "集群", "机器总数", "生产", "测试", "开发", "备用", "空闲",
+    ]
+    assert inventory_block.data["page_size"] == 20
+    rows = inventory_block.data["rows"]
+    # Rows render sorted by cluster name regardless of dataset order.
+    assert [row["cluster"] for row in rows] == ["cluster-a", "cluster-b", "cluster-c"]
+    # Production = total − test − dev − backup − idle (user-confirmed 2026-09-16).
+    assert rows[0]["cluster_production"] == "86"
+    assert rows[0]["cluster_total"] == "128"
+    assert rows[0]["cluster_idle"] == "4"
+    # cluster-b's part sum (34) exceeds its total (30): production stays an
+    # explicit gap instead of a negative guess.
+    assert rows[1]["cluster_production"] == "—"
+    # A missing sub-count keeps every dependent cell unavailable.
+    assert rows[2]["cluster_idle"] == "—"
+    assert rows[2]["cluster_production"] == "—"
+    # The plain-text fallback gets a one-line idle summary; clusters without
+    # an idle count stay out of the line.
+    assert "集群空闲机器：cluster-a 4 台、cluster-b 2 台" in document.fallback_text
+    assert "cluster-c" not in document.fallback_text
+    # The disclosure separates cluster-level inventory from model-level idle.
+    assert document.blocks[-1].data["collapsed"] is True
+    assert "集群机器库存" in document.blocks[-1].data["content"]
+    assert "互不换算" in document.blocks[-1].data["content"]
+
+
 def test_hourly_tpm_template_plan_spans_next_day_for_hourly_points() -> None:
     template = CubeCustomerModelHourlyTpmTemplate()
     intent = ReportIntent(
@@ -2002,6 +2329,15 @@ def test_markdown_renderer_shows_hourly_tpm_table_and_no_baseline_context() -> N
                 "tenant_id": "",
                 "metric_scope": "platform_model",
             },
+            {
+                "metric": "ai.machine.inventory",
+                "cluster": "cluster-a",
+                "cluster_total": 128,
+                "cluster_test": 20,
+                "cluster_dev": 12,
+                "cluster_backup": 6,
+                "cluster_idle": 4,
+            },
         ),
         quality="complete",
         warnings=(),
@@ -2025,3 +2361,6 @@ def test_markdown_renderer_shows_hourly_tpm_table_and_no_baseline_context() -> N
     # The data row splits allocation and usage; the idle flag stays in the
     # usage column.
     assert "| 佛跳墙 | Kimi-K3 | 900 | 600 | 42 | 40（闲2） |" in rendered
+    # The cluster inventory section renders as its own GFM table.
+    assert "| 集群 | 机器总数 | 生产 | 测试 | 开发 | 备用 | 空闲 |" in rendered
+    assert "| cluster-a | 128 | 86 | 20 | 12 | 6 | 4 |" in rendered

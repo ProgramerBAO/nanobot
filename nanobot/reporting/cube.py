@@ -66,11 +66,18 @@ _CUBE_MACHINE_METRICS = frozenset(
         "ai.machine.gpu_count",
     }
 )
+# Cluster inventory marker: the machine-usage-summary route returns one
+# platform-level snapshot per cluster (total/test/dev/backup/idle counts)
+# and is requested only by the hourly TPM plan. It deliberately stays out
+# of _CUBE_MACHINE_METRICS because that set doubles as the per-model
+# machine TPM template's required_metrics contract.
+_CUBE_INVENTORY_METRICS = frozenset({"ai.machine.inventory"})
 _CUBE_METRICS = (
     frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm.peak"})
     | _CUBE_HEALTH_METRICS
     | _CUBE_ACCOUNT_METRICS
     | _CUBE_MACHINE_METRICS
+    | _CUBE_INVENTORY_METRICS
 )
 _CUBE_DIMENSIONS = frozenset(
     {
@@ -450,6 +457,10 @@ class CubeConnector(ConnectorPlugin):
             requested_tenant = str(query.filters.get("tenant_id") or "").strip()
             jobs = [(requested_tenant, model_filter) for model_filter in models]
         jobs = list(dict.fromkeys(jobs))
+        # The cluster inventory table is opt-in via its marker metric so the
+        # hourly connector contract stays backward compatible: callers that
+        # do not request ai.machine.inventory never pay the extra call.
+        include_inventory = "ai.machine.inventory" in query.metrics
 
         async with MagikCubeClient(self._config, transport=self._transport) as client:
             async def run_tpm_job(
@@ -656,6 +667,87 @@ class CubeConnector(ConnectorPlugin):
                     }
                 ], []
 
+            async def run_cluster_summary_job() -> tuple[list[dict[str, Any]], list[str]]:
+                # machine-usage-summary is the platform-level cluster inventory
+                # snapshot (user-confirmed 2026-09-16): one call returns every
+                # cluster's total/test/dev/backup/idle counts with no time
+                # dimension. ``occupiedMachineCount`` carries the TEST machine
+                # total in this route's semantics despite its name. Production
+                # machines are not returned upstream; the template derives
+                # them as total minus the other categories, and this connector
+                # only guards the part-sum sanity. The whole table is
+                # informational: a missing summary must not downgrade quality.
+                try:
+                    data = await client.request(
+                        "POST",
+                        "analysis/machine-usage-summary/query",
+                        json_body={"noloading": True},
+                    )
+                except Exception as exc:
+                    return [], [f"machine_inventory {classify_report_failure(exc)}"]
+                inventory_rows: list[dict[str, Any]] = []
+                inventory_warnings: list[str] = []
+                seen_cluster: set[str] = set()
+                for item in data.get("list") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    cluster_name = str(
+                        _pick(item, "clusterName", "cluster_name", default="") or ""
+                    ).strip()
+                    if not cluster_name or cluster_name in seen_cluster:
+                        continue
+                    seen_cluster.add(cluster_name)
+                    total = _as_optional_int(
+                        _pick(item, "totalMachineCount", "total_machine_count")
+                    )
+                    test_count = _as_optional_int(
+                        _pick(item, "occupiedMachineCount", "occupied_machine_count")
+                    )
+                    dev_count = _as_optional_int(
+                        _pick(item, "devMachineCount", "dev_machine_count")
+                    )
+                    backup_count = _as_optional_int(
+                        _pick(item, "backupMachineCount", "backup_machine_count")
+                    )
+                    idle_count = _as_optional_int(
+                        _pick(item, "idleMachineCount", "idle_machine_count")
+                    )
+                    part_values = (test_count, dev_count, backup_count, idle_count)
+                    part_sum: int | None = None
+                    if None not in part_values:
+                        part_sum = sum(value for value in part_values if value is not None)
+                    if total is not None and part_sum is not None and part_sum > total:
+                        inventory_warnings.append(
+                            f"{cluster_name}: machine_inventory parts exceed total"
+                        )
+                    inventory_rows.append(
+                        {
+                            "period": "current",
+                            "timestamp": target_start.isoformat(),
+                            "date": target_start.date().isoformat(),
+                            "hour": target_start.strftime("%H:00"),
+                            "model": "", "endpoint": "", "tenant_id": "",
+                            "metric_scope": "platform_cluster",
+                            "metric": "ai.machine.inventory",
+                            # ``value`` mirrors the cluster total for generic
+                            # row consumers; the template reads the explicit
+                            # cluster_* fields instead so missing stays None.
+                            "value": float(total) if total is not None else 0.0,
+                            "unit": "machines",
+                            "aggregation": "current_cluster_inventory",
+                            "source": "Cube Admin / analysis/machine-usage-summary/query",
+                            "cluster": cluster_name,
+                            "cluster_total": total,
+                            "cluster_test": test_count,
+                            "cluster_dev": dev_count,
+                            "cluster_backup": backup_count,
+                            "cluster_idle": idle_count,
+                        }
+                    )
+                if not inventory_rows:
+                    return [], ["machine_inventory no_data"]
+                return inventory_rows, inventory_warnings
+
             # The client enforces its own max_concurrency semaphore per
             # request, so this fan-out is bounded at the transport layer.
             for job_rows, job_warnings in await asyncio.gather(
@@ -664,24 +756,29 @@ class CubeConnector(ConnectorPlugin):
                 rows.extend(job_rows)
                 warnings.extend(job_warnings)
             unique_models = sorted({model_filter for _tenant_id, model_filter in jobs})
-            for machine_rows, machine_warnings in await asyncio.gather(
-                *(
-                    machine_job(model_filter)
-                    for model_filter in unique_models
-                    for machine_job in (run_allocation_job, run_usage_job)
-                )
-            ):
-                rows.extend(machine_rows)
-                warnings.extend(machine_warnings)
+            machine_jobs = [
+                machine_job(model_filter)
+                for model_filter in unique_models
+                for machine_job in (run_allocation_job, run_usage_job)
+            ]
+            if include_inventory:
+                machine_jobs.append(run_cluster_summary_job())
+            for job_rows, job_warnings in await asyncio.gather(*machine_jobs):
+                rows.extend(job_rows)
+                warnings.extend(job_warnings)
         metric_names = {str(row.get("metric") or "") for row in rows}
         has_peak = "ai.tpm.peak" in metric_names
         has_avg = "ai.tpm.avg" in metric_names
         has_machine = "ai.machine.count" in metric_names
-        # Actual-usage warnings (machine_used ...) are informational: the
-        # trend source shares the upstream ingestion lag and a missing usage
-        # value must not downgrade the report (user-confirmed 2026-09-15).
+        # Actual-usage warnings (machine_used ...) and cluster inventory
+        # warnings (machine_inventory ...) are informational: the trend
+        # source shares the upstream ingestion lag, and the inventory table
+        # is a supplementary snapshot — neither may downgrade the report
+        # (machine_used user-confirmed 2026-09-15, inventory 2026-09-16).
         actionable_warnings = [
-            warning for warning in warnings if ": machine_used" not in warning
+            warning
+            for warning in warnings
+            if ": machine_used" not in warning and "machine_inventory" not in warning
         ]
         if not has_peak or not has_avg:
             # Peak and mean are authoritative core metrics. A machine-only
@@ -2190,15 +2287,21 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
     manifest = TemplateManifest(
         template_id="usage_customer_model_hourly_tpm",
         display_name="多客户多模型小时 TPM 报告",
-        version="2.0",
+        version="2.1",
         category="usage",
         periods=frozenset({"recent1h"}),
         required_metrics=frozenset(
-            {"ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"}
+            {
+                "ai.tpm.peak",
+                "ai.tpm.avg",
+                "ai.machine.count",
+                "ai.machine.used",
+                "ai.machine.inventory",
+            }
         ),
         required_dimensions=frozenset({"tenant", "model", "endpoint", "date", "hour"}),
         connector_ids=frozenset({"magik_cube"}),
-        description="按客户分组展示上一完整小时的模型级 TPM 峰值、均值和平台机器数",
+        description="按客户分组展示上一完整小时的模型级 TPM 峰值、均值和平台机器数，附集群机器库存快照",
     )
 
     def __init__(self, *, timezone_name: str = "Asia/Shanghai") -> None:
@@ -2223,7 +2326,13 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             )
         return (ReportQuery(
             connector_id=intent.connector_id,
-            metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+            metrics=(
+                "ai.tpm.peak",
+                "ai.tpm.avg",
+                "ai.machine.count",
+                "ai.machine.used",
+                "ai.machine.inventory",
+            ),
             dimensions=("tenant", "model", "endpoint", "date", "hour"),
             # The Cube route returns hourly points from startDate 00:00
             # through endDate 00:00 inclusive; a same-day range yields only
@@ -2280,13 +2389,18 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         window_start = str(dataset.metadata.get("window_start") or "")
         window_end = str(dataset.metadata.get("window_end") or "")
         # Tenant/model TPM values keyed by (tenant, model, endpoint); machine
-        # allocation and usage are platform rows keyed by model only.
+        # allocation and usage are platform rows keyed by model only; cluster
+        # inventory rows are platform rows keyed by cluster only.
         endpoint_values: dict[tuple[str, str, str], dict[str, Any]] = defaultdict(dict)
         machine_by_model: dict[str, float] = {}
         machine_used_by_model: dict[str, float] = {}
+        cluster_inventory: list[dict[str, Any]] = []
         for row in dataset.rows:
             metric = str(row.get("metric") or "")
             model = str(row.get("model") or "未命名模型")
+            if metric == "ai.machine.inventory":
+                cluster_inventory.append(row)
+                continue
             if metric in {"ai.machine.count", "ai.machine.used"}:
                 if (
                     str(row.get("metric_scope") or "") == "platform_model"
@@ -2417,6 +2531,18 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     route="analysis/model-machine-usage/query",
                     fields=("machineCount", "clusterName", "gpuProduct", "model"),
                 ),
+                ReportSource(
+                    system="Cube Admin",
+                    route="analysis/machine-usage-summary/query",
+                    fields=(
+                        "clusterName",
+                        "totalMachineCount",
+                        "occupiedMachineCount",
+                        "devMachineCount",
+                        "backupMachineCount",
+                        "idleMachineCount",
+                    ),
+                ),
             ),
             metric_definitions=(
                 MetricDefinition(
@@ -2447,8 +2573,18 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     aggregation="上一完整小时时点实际使用数，按模型跨集群求和，平台级",
                     source="Cube Admin / analysis/machine-tpm-trend/query",
                 ),
+                MetricDefinition(
+                    metric="ai.machine.inventory",
+                    label="集群机器库存",
+                    unit="machines",
+                    aggregation=(
+                        "发送时的平台级集群库存快照；生产 = 机器总数 − 测试 − 开发 − 备用 − 空闲，"
+                        "集群级空闲与模型级（闲N）口径互不换算"
+                    ),
+                    source="Cube Admin / analysis/machine-usage-summary/query",
+                ),
             ),
-            calculation_version="2.0",
+            calculation_version="2.1",
             quality=dataset.quality,
             quality_reasons=dataset.warnings,
             template_version=self.manifest.version,
@@ -2487,6 +2623,55 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 "rows": endpoint_detail_rows,
                 "page_size": 20,
             }))
+        # Cluster inventory section (user-confirmed 2026-09-16): a compact
+        # platform-level snapshot table appended after the model sections.
+        # Production machines are derived here as total minus the other
+        # categories; the connector already emitted the informational warning
+        # when the part sum exceeds the total, so a negative or incomplete
+        # difference renders as an explicit "—" instead of a guessed number.
+        inventory_table_rows: list[dict[str, Any]] = []
+        for inventory_row in sorted(
+            cluster_inventory, key=lambda item: str(item.get("cluster") or "")
+        ):
+            cluster_label = str(inventory_row.get("cluster") or "").strip() or "未命名集群"
+            total = inventory_row.get("cluster_total")
+            test_count = inventory_row.get("cluster_test")
+            dev_count = inventory_row.get("cluster_dev")
+            backup_count = inventory_row.get("cluster_backup")
+            idle_count = inventory_row.get("cluster_idle")
+            part_values = (test_count, dev_count, backup_count, idle_count)
+            production: int | None = None
+            if isinstance(total, int) and all(
+                isinstance(value, int) for value in part_values
+            ):
+                production = total - sum(part_values)
+            inventory_table_rows.append({
+                "cluster": cluster_label,
+                "cluster_total": str(total) if isinstance(total, int) else "—",
+                "cluster_production": (
+                    str(production) if production is not None and production >= 0 else "—"
+                ),
+                "cluster_test": str(test_count) if isinstance(test_count, int) else "—",
+                "cluster_dev": str(dev_count) if isinstance(dev_count, int) else "—",
+                "cluster_backup": str(backup_count) if isinstance(backup_count, int) else "—",
+                "cluster_idle": str(idle_count) if isinstance(idle_count, int) else "—",
+            })
+        if inventory_table_rows:
+            blocks.append(ReportBlock("table", {
+                "title": "集群机器库存",
+                "columns": [
+                    {"tag": "column", "name": "cluster", "display_name": "集群", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_total", "display_name": "机器总数", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_production", "display_name": "生产", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_test", "display_name": "测试", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_dev", "display_name": "开发", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_backup", "display_name": "备用", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_idle", "display_name": "空闲", "data_type": "text"},
+                ],
+                "headers": ["集群", "机器总数", "生产", "测试", "开发", "备用", "空闲"],
+                "rows": inventory_table_rows,
+                "page_size": 20,
+            }))
         blocks.append(
             ReportBlock(
                 "note",
@@ -2499,7 +2684,9 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                         "（machine-tpm-trend），均按模型跨集群求和、平台级、与客户无关；"
                         "占用−使用 ≥ 1 台标注（闲N），同一模型在不同客户行显示同一平台值。"
                         "客户身份来自 Cube 实时目录。最近完整小时的 0 值或使用数缺失也可能"
-                        "来自上游聚合延迟。"
+                        "来自上游聚合延迟。集群机器库存为发送时的平台级快照"
+                        "（machine-usage-summary）：生产 = 机器总数 − 测试 − 开发 − 备用 − 空闲，"
+                        "集群级空闲与模型级（闲N）/副标题机器空闲口径不同、互不换算。"
                     ),
                     "collapsed": True,
                     "collapsed_label": "报表说明与数据质量",
@@ -2518,6 +2705,15 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 f"{row['model']}：峰值 {row['tpm_peak']} · 均值 {row['tpm_avg']} · "
                 f"机器占用 {row['machine_allocated']} · 真实使用 {row['machine_used']}"
             )
+        # Plain-text channels get a one-line cluster idle summary instead of
+        # the full inventory table; missing idle counts stay out of the line.
+        cluster_idle_parts = [
+            f"{row['cluster']} {row['cluster_idle']} 台"
+            for row in inventory_table_rows
+            if str(row["cluster_idle"]).isdigit()
+        ]
+        if cluster_idle_parts:
+            fallback_lines.append("集群空闲机器：" + "、".join(cluster_idle_parts))
         return ReportDocument(
             title=self.manifest.display_name,
             subtitle=subtitle,

@@ -210,6 +210,9 @@ _ADMIN_READ_ONLY_ROUTES = frozenset(
         # Capacity reporting consumes this aggregate trend only. The response
         # has no machine ID and remains read-only at the client allowlist.
         ("POST", "analysis/machine-tpm-trend/query"),
+        # Platform-level cluster inventory snapshot consumed by the hourly TPM
+        # report's supplementary table; read-only with no write dimension.
+        ("POST", "analysis/machine-usage-summary/query"),
         ("POST", "providers/list"),
         ("POST", "providers/detail"),
         ("POST", "quota-changes/list"),
