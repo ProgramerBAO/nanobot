@@ -4991,8 +4991,18 @@ class ReportCenterTool(Tool):
             and isinstance(connector, (CubeConnector, CubeProviderQualityConnector))
             and (
             subscription.template_id in {
+                # These templates always take the Cube path: their compile
+                # either needs no external load (daily/weekly brief) or the
+                # load happens inside _run_cube_subscription (hourly all-model
+                # discovery). The hourly entry is load-bearing: the bare
+                # compileability probe below passes tenant_models=None, and an
+                # all-model hourly subscription would otherwise be misrouted
+                # to the legacy magik fallback — which has no hourly concept
+                # and delivered a daily brief instead (observed live
+                # 2026-09-16).
                 "usage_customer_model_daily_brief",
                 "usage_customer_model_weekly_brief",
+                "usage_customer_model_hourly_tpm",
             }
                 or self._subscription_cube_intent(subscription) is not None
             )
