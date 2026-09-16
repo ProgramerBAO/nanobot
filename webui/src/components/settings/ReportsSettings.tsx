@@ -235,7 +235,7 @@ function TemplatePolicyRow({
         </div>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">{item.description}</p>
         <p className="mt-1 text-xs text-muted-foreground">
-          {t("settings.reports.policy.periods", { defaultValue: `周期：${item.periods.join(" / ")} · 计算代码和接口路径只读 · revision ${item.revision}` })}
+          {t("settings.reports.policy.periods", { defaultValue: `周期：${item.periods.join(" / ")} · 计算代码和接口路径只读 · revision ${item.revision}`, periods: item.periods.join(" / "), revision: item.revision })}
         </p>
       </div>
       <label className="grid gap-1 text-xs font-medium text-muted-foreground">
@@ -244,7 +244,7 @@ function TemplatePolicyRow({
           className={SELECT_CLASS}
           value={mode}
           onChange={(event) => setMode(event.target.value as ReportingTemplatePolicy["subscription_mode"])}
-          aria-label={t("settings.reports.policy.audienceAria", { defaultValue: `${item.name} 订阅受众` })}
+          aria-label={t("settings.reports.policy.audienceAria", { defaultValue: `${item.name} 订阅受众`, name: item.name })}
           disabled={busy}
         >
           <option value="all_authorized">{t("settings.reports.policy.audienceAll", { defaultValue: "已授权用户" })}</option>
@@ -255,14 +255,14 @@ function TemplatePolicyRow({
       <div className="grid gap-2 text-xs text-muted-foreground">
         <div className="flex items-center justify-between gap-3">
           <span>{t("settings.reports.policy.reportEnabled", { defaultValue: "报表启用" })}</span>
-          <ToggleButton checked={enabled} disabled={busy} label={t("settings.reports.policy.enabledAria", { defaultValue: `${item.name} 启用状态` })} onChange={setEnabled} />
+          <ToggleButton checked={enabled} disabled={busy} label={t("settings.reports.policy.enabledAria", { defaultValue: `${item.name} 启用状态`, name: item.name })} onChange={setEnabled} />
         </div>
         <div className="flex items-center justify-between gap-3">
           <span>{t("settings.reports.policy.showButton", { defaultValue: "显示订阅按钮" })}</span>
           <ToggleButton
             checked={showButton}
             disabled={busy || !buttonPolicyEnabled}
-            label={t("settings.reports.policy.buttonAria", { defaultValue: `${item.name} 结果卡片订阅按钮` })}
+            label={t("settings.reports.policy.buttonAria", { defaultValue: `${item.name} 结果卡片订阅按钮`, name: item.name })}
             onChange={setShowButton}
           />
         </div>
@@ -272,7 +272,7 @@ function TemplatePolicyRow({
         size="icon"
         variant="outline"
         title={t("settings.reports.policy.save", { defaultValue: "保存报表策略" })}
-        aria-label={t("settings.reports.policy.saveAria", { defaultValue: `保存 ${item.name} 报表策略` })}
+        aria-label={t("settings.reports.policy.saveAria", { defaultValue: `保存 ${item.name} 报表策略`, name: item.name })}
         disabled={busy || !changed}
         onClick={() => onSave({
           template_id: item.id,
@@ -320,16 +320,16 @@ function SubscriptionRow({
         </div>
         <p className="mt-2 break-words text-sm text-foreground/85">{item.scope_summary || t("settings.reports.sub.noScope", { defaultValue: "未指定范围" })}</p>
         <p className="mt-1 break-all text-xs text-muted-foreground">
-          {t("settings.reports.sub.receive", { defaultValue: `接收：${item.channel} · ${item.user_id || "未指定用户"} · 会话 ${item.chat_id || "未指定"}` })}
+          {t("settings.reports.sub.receive", { defaultValue: `接收：${item.channel} · ${item.user_id || t("settings.reports.sub.unspecifiedUser", { defaultValue: "未指定用户" })} · 会话 ${item.chat_id || t("settings.reports.sub.unspecified", { defaultValue: "未指定" })}`, channel: item.channel, user: item.user_id || t("settings.reports.sub.unspecifiedUser", { defaultValue: "未指定用户" }), chat: item.chat_id || t("settings.reports.sub.unspecified", { defaultValue: "未指定" }) })}
         </p>
         <p className="mt-1 text-[11px] text-muted-foreground">ID {item.subscription_id} · revision {item.revision}</p>
       </div>
       <div className="min-w-0 text-sm">
         <div className="font-medium text-foreground">{item.schedule_label || t("settings.reports.sub.scheduleConfigured", { defaultValue: "已配置发送计划" })}</div>
-        <div className="mt-1 text-xs text-muted-foreground">{t("settings.reports.sub.timezone", { defaultValue: `时区：${item.timezone}` })}</div>
-        <div className="mt-1 text-xs text-muted-foreground">{t("settings.reports.sub.updated", { defaultValue: `更新：${item.updated_at || "暂无"}` })}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{t("settings.reports.sub.timezone", { defaultValue: `时区：${item.timezone}`, timezone: item.timezone })}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{t("settings.reports.sub.updated", { defaultValue: `更新：${item.updated_at || t("settings.reports.sub.noUpdate", { defaultValue: "暂无" })}`, updated: item.updated_at || t("settings.reports.sub.noUpdate", { defaultValue: "暂无" }) })}</div>
       </div>
-      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end" aria-label={t("settings.reports.sub.actionsAria", { defaultValue: `${item.subscription_id} 操作` })}>
+      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end" aria-label={t("settings.reports.sub.actionsAria", { defaultValue: `${item.subscription_id} 操作`, id: item.subscription_id })}>
         <Button
           size="sm"
           variant="outline"
@@ -353,10 +353,10 @@ function SubscriptionRow({
           size="icon"
           variant="ghost"
           title={t("settings.reports.sub.delete", { defaultValue: "删除订阅" })}
-          aria-label={t("settings.reports.sub.deleteAria", { defaultValue: `删除 ${item.scope_summary || item.subscription_id}` })}
+          aria-label={t("settings.reports.sub.deleteAria", { defaultValue: `删除 ${item.scope_summary || item.subscription_id}`, target: item.scope_summary || item.subscription_id })}
           disabled={busy}
           onClick={() => {
-            if (window.confirm(t("settings.reports.sub.deleteConfirm", { defaultValue: `确认删除订阅“${item.scope_summary || item.subscription_id}”？历史运行记录会保留。` }))) {
+            if (window.confirm(t("settings.reports.sub.deleteConfirm", { defaultValue: `确认删除订阅“${item.scope_summary || item.subscription_id}”？历史运行记录会保留。`, target: item.scope_summary || item.subscription_id }))) {
               onAction("subscription_delete", {
                 subscription_id: item.subscription_id,
                 revision: item.revision,
@@ -776,7 +776,7 @@ export function ReportsSettings({ token }: { token: string }) {
                     </div>
                     <div className="flex items-center gap-2">
                       {item.source === "override" ? (
-                        <Button variant="ghost" size="sm" disabled={action !== null} title={t("settings.reports.flags.reset", { defaultValue: "恢复默认值" })} aria-label={t("settings.reports.flags.resetAria", { defaultValue: `恢复 ${item.label} 默认值` })} onClick={() => void run("feature_flag_reset", { flag: item.key })}><RotateCcw className="h-4 w-4" /></Button>
+                        <Button variant="ghost" size="sm" disabled={action !== null} title={t("settings.reports.flags.reset", { defaultValue: "恢复默认值" })} aria-label={t("settings.reports.flags.resetAria", { defaultValue: `恢复 ${item.label} 默认值`, label: item.label })} onClick={() => void run("feature_flag_reset", { flag: item.key })}><RotateCcw className="h-4 w-4" /></Button>
                       ) : null}
                       <ToggleButton checked={item.enabled} disabled={action !== null} label={item.label} onChange={(enabled) => void run("feature_flag", { flag: item.key, enabled: String(enabled) })} />
                     </div>

@@ -874,7 +874,10 @@
         "disableAction": "Desativar",
         "delete": "Excluir assinatura",
         "deleteAria": "Excluir {{target}}",
-        "deleteConfirm": "Excluir a assinatura \"{{target}}\"? O histórico de execuções é preservado."
+        "deleteConfirm": "Excluir a assinatura \"{{target}}\"? O histórico de execuções é preservado.",
+        "unspecifiedUser": "sem usuário",
+        "unspecified": "não definido",
+        "noUpdate": "nenhum"
       },
       "editor": {
         "editTitle": "Editar assinatura",

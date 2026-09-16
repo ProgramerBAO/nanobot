@@ -874,7 +874,10 @@
         "disableAction": "Désactiver",
         "delete": "Supprimer l'abonnement",
         "deleteAria": "Supprimer {{target}}",
-        "deleteConfirm": "Supprimer l'abonnement « {{target}} » ? L'historique d'exécution est conservé."
+        "deleteConfirm": "Supprimer l'abonnement « {{target}} » ? L'historique d'exécution est conservé.",
+        "unspecifiedUser": "aucun utilisateur",
+        "unspecified": "non défini",
+        "noUpdate": "aucun"
       },
       "editor": {
         "editTitle": "Modifier l'abonnement",

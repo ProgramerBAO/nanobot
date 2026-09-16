@@ -874,7 +874,10 @@
         "disableAction": "Deshabilitar",
         "delete": "Eliminar suscripción",
         "deleteAria": "Eliminar {{target}}",
-        "deleteConfirm": "¿Eliminar la suscripción \"{{target}}\"? Se conserva el historial de ejecución."
+        "deleteConfirm": "¿Eliminar la suscripción \"{{target}}\"? Se conserva el historial de ejecución.",
+        "unspecifiedUser": "sin usuario",
+        "unspecified": "sin especificar",
+        "noUpdate": "ninguno"
       },
       "editor": {
         "editTitle": "Editar suscripción",

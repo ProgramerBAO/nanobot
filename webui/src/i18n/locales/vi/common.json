@@ -874,7 +874,10 @@
         "disableAction": "Tắt",
         "delete": "Xóa đăng ký",
         "deleteAria": "Xóa {{target}}",
-        "deleteConfirm": "Xóa đăng ký \"{{target}}\"? Lịch sử chạy sẽ được giữ lại."
+        "deleteConfirm": "Xóa đăng ký \"{{target}}\"? Lịch sử chạy sẽ được giữ lại.",
+        "unspecifiedUser": "chưa chỉ định người dùng",
+        "unspecified": "chưa chỉ định",
+        "noUpdate": "chưa có"
       },
       "editor": {
         "editTitle": "Sửa đăng ký",

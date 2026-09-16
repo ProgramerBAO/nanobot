@@ -874,7 +874,10 @@
         "disableAction": "Disable",
         "delete": "Delete subscription",
         "deleteAria": "Delete {{target}}",
-        "deleteConfirm": "Delete subscription \"{{target}}\"? Run history is preserved."
+        "deleteConfirm": "Delete subscription \"{{target}}\"? Run history is preserved.",
+        "unspecifiedUser": "no user",
+        "unspecified": "unset",
+        "noUpdate": "none"
       },
       "editor": {
         "editTitle": "Edit subscription",

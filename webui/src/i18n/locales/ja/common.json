@@ -874,7 +874,10 @@
         "disableAction": "無効化",
         "delete": "サブスクリプションを削除",
         "deleteAria": "{{target}} を削除",
-        "deleteConfirm": "サブスクリプション「{{target}}」を削除しますか？実行履歴は保持されます。"
+        "deleteConfirm": "サブスクリプション「{{target}}」を削除しますか？実行履歴は保持されます。",
+        "unspecifiedUser": "ユーザー未指定",
+        "unspecified": "未指定",
+        "noUpdate": "なし"
       },
       "editor": {
         "editTitle": "サブスクリプションを編集",

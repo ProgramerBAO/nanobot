@@ -874,7 +874,10 @@
         "disableAction": "Nonaktifkan",
         "delete": "Hapus langganan",
         "deleteAria": "Hapus {{target}}",
-        "deleteConfirm": "Hapus langganan \"{{target}}\"? Riwayat eksekusi tetap dipertahankan."
+        "deleteConfirm": "Hapus langganan \"{{target}}\"? Riwayat eksekusi tetap dipertahankan.",
+        "unspecifiedUser": "tanpa pengguna",
+        "unspecified": "belum ditentukan",
+        "noUpdate": "belum ada"
       },
       "editor": {
         "editTitle": "Edit langganan",

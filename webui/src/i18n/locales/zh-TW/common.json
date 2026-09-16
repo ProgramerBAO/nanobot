@@ -874,7 +874,10 @@
         "disableAction": "停用",
         "delete": "刪除訂閱",
         "deleteAria": "刪除 {{target}}",
-        "deleteConfirm": "確認刪除訂閱「{{target}}」？歷史運行記錄會保留。"
+        "deleteConfirm": "確認刪除訂閱「{{target}}」？歷史運行記錄會保留。",
+        "unspecifiedUser": "未指定用戶",
+        "unspecified": "未指定",
+        "noUpdate": "暫無"
       },
       "editor": {
         "editTitle": "編輯訂閱",

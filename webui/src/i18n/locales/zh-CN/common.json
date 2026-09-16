@@ -874,7 +874,10 @@
         "disableAction": "停用",
         "delete": "删除订阅",
         "deleteAria": "删除 {{target}}",
-        "deleteConfirm": "确认删除订阅“{{target}}”？历史运行记录会保留。"
+        "deleteConfirm": "确认删除订阅“{{target}}”？历史运行记录会保留。",
+        "unspecifiedUser": "未指定用户",
+        "unspecified": "未指定",
+        "noUpdate": "暂无"
       },
       "editor": {
         "editTitle": "编辑订阅",

@@ -874,7 +874,10 @@
         "disableAction": "비활성화",
         "delete": "구독 삭제",
         "deleteAria": "{{target}} 삭제",
-        "deleteConfirm": "구독 \"{{target}}\"을(를) 삭제할까요? 실행 기록은 보존됩니다."
+        "deleteConfirm": "구독 \"{{target}}\"을(를) 삭제할까요? 실행 기록은 보존됩니다.",
+        "unspecifiedUser": "사용자 미지정",
+        "unspecified": "미지정",
+        "noUpdate": "없음"
       },
       "editor": {
         "editTitle": "구독 편집",
