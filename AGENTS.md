@@ -121,9 +121,34 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   机器占用 | 机器真实使用，user-confirmed 2026-09-16). Idle =
   allocation minus usage, flagged as （闲N） inside the 机器真实使用 column from one
   machine difference and summed into the subtitle as `N 机器空闲`; both values are
-  platform-level and must never be attributed to a customer. Hourly subscriptions
-  run at five minutes past the hour; a missing target-hour point stays 暂不可用
-  with `partial` quality and must never be rendered as zero.
+  platform-level and must never be attributed to a customer. A missing target-hour
+  point stays 暂不可用 with `partial` quality and must never be rendered as zero.
+  The card appends a seven-column cluster inventory table (集群 | 机器总数 | 生产 |
+  测试 | 开发 | 备用 | 空闲) from `analysis/machine-usage-summary/query` (POST
+  `{"noloading":true}`, send-time platform snapshot; `occupiedMachineCount` carries
+  the TEST machine total; production = total − the other categories and renders `—`
+  when parts are missing or exceed the total). The inventory table is
+  informational: a failed or empty summary omits the table without downgrading
+  quality, and cluster-level idle never converts to or from the model-level （闲N）
+  semantics. Feishu splits the tables across cards (one table per card,
+  page-marked subtitles).
+- Hourly subscriptions run at five minutes past the hour; an explicit hour list
+  (e.g. "每天 9 点、10 点播报上一小时 TPM") compiles to `5 9,10 * * *` while the
+  reported window always comes from the clock at execution time, never from the
+  cron expression. Hours are 0-23 lists valid only on the hourly TPM report
+  (recent1h ↔ hourly pinned both ways in compile_form; workdays/weekly/monthly ×
+  hour lists stay unsupported). Hour-list helpers live in the dependency-free
+  `nanobot/utils/schedule_hours.py` — the agent-layer intent parser must not
+  import the reporting package (connector-construction import cycle).
+- Delivery groups (2026-09-16): a broadcast fanning out to multiple chats is N
+  subscription rows sharing the fingerprint identity minus the chat target
+  (`subscription_group_key`, derived at read time — no group column). Each row
+  keeps its own Cron job, fingerprint, and delivery idempotency key; group
+  create skips per-target duplicates (≤20 targets), and a group update diffs
+  the target list (stays synced first, then adds, then deletes — per-row CAS,
+  non-atomic). Cross-chat duplicate creation is allowed by design (the
+  fingerprint includes chat_id; reports of it being blocked predate the
+  phase-3 unified fingerprint).
 - Report feature flags default ON for the usage/health/provider/management
   families. Enable/disable flags no longer gate template registration (all Cube
   templates register whenever the connector exists); execution and visibility read
