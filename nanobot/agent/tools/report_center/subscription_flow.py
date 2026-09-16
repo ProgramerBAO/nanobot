@@ -86,277 +86,389 @@ class _SubscriptionFlowMixin:
         inherit_report_scope: bool,
         reference_message_id: str,
     ) -> ToolResult:
-        """Resolve NLU output and produce an explicit, opaque confirmation action."""
+        """Resolve NLU output and produce an explicit, opaque confirmation action.
+
+        Phase-5 decomposition: the former 545-line body is split into stage
+        methods (access gate, scope resolution for the inherit/direct
+        branches, model-catalog validation, confirmation rendering) that
+        communicate through explicit returns; every stage body is a verbatim
+        move from the original method, so the confirmation semantics are
+        unchanged.
+        """
 
         channel, chat_id, user_id, _session_key, metadata = self._request_identity()
+        reference, error = self._preview_check_access(
+            reference_message_id=reference_message_id,
+            metadata=metadata,
+            channel=channel,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+        if error is not None:
+            return error
+        if inherit_report_scope:
+            scope = await self._preview_inherit_scope(
+                reference=reference,
+                report_type=report_type,
+                tenant_scope=tenant_scope,
+                tenant_aliases=tenant_aliases,
+                model_scope=model_scope,
+                models=models,
+            )
+        else:
+            scope = await self._preview_direct_scope(
+                report_type=report_type,
+                tenant_scope=tenant_scope,
+                tenant_aliases=tenant_aliases,
+                model_scope=model_scope,
+                models=models,
+            )
+        params, data_period, display_names, unresolved, error = scope
+        if error is not None:
+            return error
+        error = await self._preview_validate_models(params)
+        if error is not None:
+            return error
+        return self._preview_build_confirmation(
+            params=params,
+            data_period=data_period,
+            display_names=display_names,
+            unresolved=unresolved,
+            reference=reference,
+            recurrence=recurrence,
+            send_time=send_time,
+            weekday=weekday,
+            month_day=month_day,
+            channel=channel,
+            user_id=user_id,
+        )
+
+    def _preview_check_access(
+        self,
+        *,
+        reference_message_id: str,
+        metadata: dict[str, Any],
+        channel: str,
+        chat_id: str,
+        user_id: str,
+    ) -> tuple[Any | None, ToolResult | None]:
+        """Permission gate plus optional quoted-reference load.
+
+        Returns ``(reference, None)`` to proceed or ``(None, error)`` to
+        abort the preview with a user-facing recovery document.
+        """
+
         if not user_id or not self._store.allowed(
             channel, user_id, "capability", "subscriptions"
         ):
-            return ToolResult.error("Error: no permission to manage report subscriptions")
-        reference = None
-        if reference_message_id:
-            if (
-                not self._flag("cube_report_reference_subscription")
-                or str(metadata.get("parent_id") or "") != reference_message_id
-            ):
-                return self._result(
-                    self._subscription_unavailable_document(
-                        "无法从该卡片恢复可验证的报表范围。请重新生成报表，或在订阅中心选择客户和模型。"
-                    )
-                )
-            reference = self._store.message_reference(
-                channel=channel,
-                chat_id=chat_id,
-                message_id=reference_message_id,
+            return None, ToolResult.error(
+                "Error: no permission to manage report subscriptions"
             )
-            if reference is None:
-                return self._result(
+        if not reference_message_id:
+            return None, None
+        if (
+            not self._flag("cube_report_reference_subscription")
+            or str(metadata.get("parent_id") or "") != reference_message_id
+        ):
+            return None, self._result(
+                self._subscription_unavailable_document(
+                    "无法从该卡片恢复可验证的报表范围。请重新生成报表，或在订阅中心选择客户和模型。"
+                )
+            )
+        reference = self._store.message_reference(
+            channel=channel,
+            chat_id=chat_id,
+            message_id=reference_message_id,
+        )
+        if reference is None:
+            return None, self._result(
+                self._subscription_unavailable_document(
+                    "引用报表已过期或不是可订阅的结构化报表。请重新生成报表后再引用。"
+                )
+            )
+        return reference, None
+
+    async def _preview_resolve_tenants(
+        self, queries: list[str]
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]] | None:
+        resolver = getattr(self._magik_tool, "resolve_tenant_queries", None)
+        if not callable(resolver):
+            return None
+        try:
+            return await resolver(queries)
+        except Exception as exc:
+            logger.warning(
+                "Cube subscription tenant resolution failed: error_type={}",
+                type(exc).__name__,
+            )
+            return None
+
+    @staticmethod
+    def _preview_unique_resolved(
+        items: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        """Collapse aliases that resolve to one tenant before fan-out."""
+
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in items:
+            tenant_id = str(item.get("tenant_id") or "").strip()
+            if not tenant_id or tenant_id in seen:
+                continue
+            seen.add(tenant_id)
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _preview_apply_tenant_scope(
+        target: dict[str, Any],
+        resolved: list[dict[str, str]],
+        *,
+        selected_model_scope: str,
+        selected_models: list[str],
+    ) -> None:
+        tenant_ids = [item["tenant_id"] for item in resolved]
+        target["tenants"] = tenant_ids
+        # Persist display labels next to the verified IDs.  Labels are only
+        # presentation metadata; every later query and authorization check
+        # continues to use the exact Cube tenant ID.
+        target["tenant_labels"] = [
+            str(item.get("display_name") or item.get("tenant_id") or "").strip()
+            for item in resolved
+        ]
+        target["tenant_scope"] = "selected"
+        target["all_tenants"] = False
+        target["report_selections"] = [
+            {
+                "tenant_query": tenant_id,
+                "model_scope": selected_model_scope,
+                "models": selected_models if selected_model_scope == "selected" else [],
+            }
+            for tenant_id in tenant_ids
+        ]
+
+    async def _preview_inherit_scope(
+        self,
+        *,
+        reference: Any,
+        report_type: str,
+        tenant_scope: str,
+        tenant_aliases: list[str],
+        model_scope: str,
+        models: list[str],
+    ) -> tuple[dict[str, Any], str, list[str], list[dict[str, str]], ToolResult | None]:
+        """Resolve scope from a quoted report reference.
+
+        Returns ``(params, data_period, display_names, unresolved, None)`` on
+        success or ``(..., error)`` to abort. The reference is the only
+        trusted scope source; the classifier's tenant/model output is treated
+        as explicit overrides only.
+        """
+
+        unresolved: list[dict[str, str]] = []
+        if reference is None or report_type != "inherit":
+            return {}, "", [], [], self._result(
+                self._subscription_unavailable_document(
+                    "没有找到可继承的引用报表范围，请重新引用报表卡片。"
+                )
+            )
+        if reference.template_id not in SUBSCRIPTION_REPORT_TYPE_TABLE:
+            return {}, "", [], [], self._result(
+                self._subscription_unavailable_document(
+                    "该报表类型当前不允许创建订阅。请在 Report platform → 报表类型中，"
+                    "将订阅策略设为“全部授权用户”或“指定用户”；“显示订阅按钮”只控制按钮显示。"
+                )
+            )
+        data_period = reference.period
+        params = {
+            key: value
+            for key, value in reference.scope.items()
+            if key in _ALLOWED_REPORT_PARAM_KEYS
+        }
+        display_names: list[str] = []
+        if tenant_scope == "all" or (
+            tenant_scope == "inherit" and params.get("all_tenants") is True
+        ):
+            params.update(
+                {
+                    "tenant_scope": "all",
+                    "all_tenants": True,
+                    "tenants": [],
+                    "report_selections": [],
+                }
+            )
+            display_names = ["全部客户"]
+        else:
+            tenant_queries = (
+                list(tenant_aliases)
+                if tenant_scope == "selected"
+                else [str(item) for item in params.get("tenants") or []]
+            )
+            resolution = await self._preview_resolve_tenants(tenant_queries)
+            if resolution is None:
+                return {}, "", [], [], self._result(
                     self._subscription_unavailable_document(
-                        "引用报表已过期或不是可订阅的结构化报表。请重新生成报表后再引用。"
+                        "Cube 客户目录当前不可用，请稍后重试或打开订阅中心。"
                     )
                 )
+            resolved, unresolved = resolution
+            resolved = self._preview_unique_resolved(resolved)
+            if not resolved:
+                details = "、".join(
+                    f"{item['query']}（{item['reason']}）" for item in unresolved
+                )
+                return {}, "", [], [], self._result(
+                    self._subscription_unavailable_document(
+                        f"没有匹配到可订阅客户：{details or '请重新选择客户'}"
+                    )
+                )
+            effective_model_scope = (
+                model_scope
+                if model_scope != "inherit"
+                else str(params.get("model_scope") or "summary")
+            )
+            effective_models = (
+                list(models)
+                if model_scope == "selected"
+                else [str(item) for item in params.get("models") or []]
+            )
+            # Preserve the reference's per-tenant model relationships:
+            # apply_tenant_scope rebuilds selections from a flat list,
+            # which would fabricate cross-tenant pairs the live catalog
+            # never confirmed (observed live 2026-09-15 with a quoted
+            # multi-customer hourly card).
+            reference_selection_models = {
+                str(item.get("tenant_query") or "").strip(): [
+                    str(model).strip()
+                    for model in item.get("models") or []
+                    if str(model).strip()
+                ]
+                for item in params.get("report_selections") or []
+                if isinstance(item, dict)
+                and str(item.get("tenant_query") or "").strip()
+                and item.get("models")
+            }
+            self._preview_apply_tenant_scope(
+                params,
+                resolved,
+                selected_model_scope=effective_model_scope,
+                selected_models=effective_models,
+            )
+            if reference_selection_models and effective_model_scope == "selected":
+                for selection in params.get("report_selections") or []:
+                    if not isinstance(selection, dict):
+                        continue
+                    tenant_id = str(selection.get("tenant_query") or "").strip()
+                    if tenant_id in reference_selection_models:
+                        selection["models"] = list(
+                            reference_selection_models[tenant_id]
+                        )
+            display_names = [item["display_name"] for item in resolved]
+        if model_scope != "inherit":
+            params["model_scope"] = model_scope
+            params["models"] = list(models) if model_scope == "selected" else []
+            for selection in params.get("report_selections") or []:
+                if isinstance(selection, dict):
+                    selection["model_scope"] = model_scope
+                    selection["models"] = (
+                        list(models) if model_scope == "selected" else []
+                    )
+        return params, data_period, display_names, unresolved, None
 
-        # Shared single-source table: report type -> (data period, variant).
-        # Every concrete subscription report type must appear here or the
-        # preview rejects it as unsupported.
-        safe_report_types = SUBSCRIPTION_REPORT_TYPE_TABLE
+    async def _preview_direct_scope(
+        self,
+        *,
+        report_type: str,
+        tenant_scope: str,
+        tenant_aliases: list[str],
+        model_scope: str,
+        models: list[str],
+    ) -> tuple[dict[str, Any], str, list[str], list[dict[str, str]], ToolResult | None]:
+        """Resolve scope from natural-language output against the live catalog."""
+
+        if report_type not in SUBSCRIPTION_REPORT_TYPE_TABLE:
+            return {}, "", [], [], self._result(
+                self._subscription_unavailable_document("未识别出可订阅的 Cube 报表类型。")
+            )
+        data_period, report_variant = SUBSCRIPTION_REPORT_TYPE_TABLE[report_type]
+        # A long natural-language customer list is a product-level scope
+        # signal.  The classifier may truncate that list, but once the
+        # server has resolved more than one live tenant the subscription
+        # must use the grouped template; otherwise the legacy one-tenant
+        # brief silently drops all but the last selection.
+        multi_scope_requested = (
+            report_type in {
+                "usage_customer_model_daily_brief",
+                "usage_customer_model_weekly_brief",
+            }
+            or (tenant_scope == "selected" and len(tenant_aliases) > 1)
+            or (tenant_scope == "all" and model_scope == "all")
+        )
+        if multi_scope_requested and report_type != "usage_customer_model_hourly_tpm":
+            # The hourly TPM template is inherently a multi-customer
+            # grouped report and must never be rewritten into a daily or
+            # weekly brief by the scope-shape heuristic below.
+            report_type = (
+                "usage_customer_model_weekly_brief"
+                if data_period == "week"
+                else "usage_customer_model_daily_brief"
+            )
+            data_period, report_variant = SUBSCRIPTION_REPORT_TYPE_TABLE[report_type]
+        params = {
+            "report_variant": report_variant,
+            "tenant_scope": tenant_scope,
+            "model_scope": model_scope,
+            "models": list(models),
+            "report_template": "brief",
+            "breakdown": "model" if model_scope in {"all", "selected"} else "summary",
+        }
         unresolved: list[dict[str, str]] = []
         display_names: list[str] = []
-
-        async def resolve_tenants(
-            queries: list[str],
-        ) -> tuple[list[dict[str, str]], list[dict[str, str]]] | None:
-            resolver = getattr(self._magik_tool, "resolve_tenant_queries", None)
-            if not callable(resolver):
-                return None
-            try:
-                return await resolver(queries)
-            except Exception as exc:
-                logger.warning(
-                    "Cube subscription tenant resolution failed: error_type={}",
-                    type(exc).__name__,
-                )
-                return None
-
-        def unique_resolved(
-            items: list[dict[str, str]],
-        ) -> list[dict[str, str]]:
-            """Collapse aliases that resolve to one tenant before fan-out."""
-
-            result: list[dict[str, str]] = []
-            seen: set[str] = set()
-            for item in items:
-                tenant_id = str(item.get("tenant_id") or "").strip()
-                if not tenant_id or tenant_id in seen:
-                    continue
-                seen.add(tenant_id)
-                result.append(item)
-            return result
-
-        def apply_tenant_scope(
-            target: dict[str, Any],
-            resolved: list[dict[str, str]],
-            *,
-            selected_model_scope: str,
-            selected_models: list[str],
-        ) -> None:
-            tenant_ids = [item["tenant_id"] for item in resolved]
-            target["tenants"] = tenant_ids
-            # Persist display labels next to the verified IDs.  Labels are only
-            # presentation metadata; every later query and authorization check
-            # continues to use the exact Cube tenant ID.
-            target["tenant_labels"] = [
-                str(item.get("display_name") or item.get("tenant_id") or "").strip()
-                for item in resolved
-            ]
-            target["tenant_scope"] = "selected"
-            target["all_tenants"] = False
-            target["report_selections"] = [
-                {
-                    "tenant_query": tenant_id,
-                    "model_scope": selected_model_scope,
-                    "models": selected_models if selected_model_scope == "selected" else [],
-                }
-                for tenant_id in tenant_ids
-            ]
-
-        if inherit_report_scope:
-            if reference is None or report_type != "inherit":
-                return self._result(
-                    self._subscription_unavailable_document(
-                        "没有找到可继承的引用报表范围，请重新引用报表卡片。"
-                    )
-                )
-            if reference.template_id not in SUBSCRIPTION_REPORT_TYPE_TABLE:
-                return self._result(
-                    self._subscription_unavailable_document(
-                        "该报表类型当前不允许创建订阅。请在 Report platform → 报表类型中，"
-                        "将订阅策略设为“全部授权用户”或“指定用户”；“显示订阅按钮”只控制按钮显示。"
-                    )
-                )
-            data_period = reference.period
-            params = {
-                key: value
-                for key, value in reference.scope.items()
-                if key in _ALLOWED_REPORT_PARAM_KEYS
-            }
-            if tenant_scope == "all" or (
-                tenant_scope == "inherit" and params.get("all_tenants") is True
-            ):
-                params.update(
-                    {
-                        "tenant_scope": "all",
-                        "all_tenants": True,
-                        "tenants": [],
-                        "report_selections": [],
-                    }
-                )
-                display_names = ["全部客户"]
-            else:
-                tenant_queries = (
-                    list(tenant_aliases)
-                    if tenant_scope == "selected"
-                    else [str(item) for item in params.get("tenants") or []]
-                )
-                resolution = await resolve_tenants(tenant_queries)
-                if resolution is None:
-                    return self._result(
-                        self._subscription_unavailable_document(
-                            "Cube 客户目录当前不可用，请稍后重试或打开订阅中心。"
-                        )
-                    )
-                resolved, unresolved = resolution
-                resolved = unique_resolved(resolved)
-                if not resolved:
-                    details = "、".join(
-                        f"{item['query']}（{item['reason']}）" for item in unresolved
-                    )
-                    return self._result(
-                        self._subscription_unavailable_document(
-                            f"没有匹配到可订阅客户：{details or '请重新选择客户'}"
-                        )
-                    )
-                effective_model_scope = (
-                    model_scope
-                    if model_scope != "inherit"
-                    else str(params.get("model_scope") or "summary")
-                )
-                effective_models = (
-                    list(models)
-                    if model_scope == "selected"
-                    else [str(item) for item in params.get("models") or []]
-                )
-                # Preserve the reference's per-tenant model relationships:
-                # apply_tenant_scope rebuilds selections from a flat list,
-                # which would fabricate cross-tenant pairs the live catalog
-                # never confirmed (observed live 2026-09-15 with a quoted
-                # multi-customer hourly card).
-                reference_selection_models = {
-                    str(item.get("tenant_query") or "").strip(): [
-                        str(model).strip()
-                        for model in item.get("models") or []
-                        if str(model).strip()
-                    ]
-                    for item in params.get("report_selections") or []
-                    if isinstance(item, dict)
-                    and str(item.get("tenant_query") or "").strip()
-                    and item.get("models")
-                }
-                apply_tenant_scope(
-                    params,
-                    resolved,
-                    selected_model_scope=effective_model_scope,
-                    selected_models=effective_models,
-                )
-                if reference_selection_models and effective_model_scope == "selected":
-                    for selection in params.get("report_selections") or []:
-                        if not isinstance(selection, dict):
-                            continue
-                        tenant_id = str(selection.get("tenant_query") or "").strip()
-                        if tenant_id in reference_selection_models:
-                            selection["models"] = list(
-                                reference_selection_models[tenant_id]
-                            )
-                display_names = [item["display_name"] for item in resolved]
-            if model_scope != "inherit":
-                params["model_scope"] = model_scope
-                params["models"] = list(models) if model_scope == "selected" else []
-                for selection in params.get("report_selections") or []:
-                    if isinstance(selection, dict):
-                        selection["model_scope"] = model_scope
-                        selection["models"] = (
-                            list(models) if model_scope == "selected" else []
-                        )
+        if tenant_scope == "all":
+            params["all_tenants"] = True
+            params["tenants"] = []
+            display_names = ["全部客户"]
         else:
-            if report_type not in safe_report_types:
-                return self._result(
-                    self._subscription_unavailable_document("未识别出可订阅的 Cube 报表类型。")
+            resolution = await self._preview_resolve_tenants(tenant_aliases)
+            if resolution is None:
+                return {}, "", [], [], self._result(
+                    self._subscription_unavailable_document(
+                        "Cube 客户目录当前不可用，请稍后重试或打开订阅中心。"
+                    )
                 )
-            data_period, report_variant = safe_report_types[report_type]
-            # A long natural-language customer list is a product-level scope
-            # signal.  The classifier may truncate that list, but once the
-            # server has resolved more than one live tenant the subscription
-            # must use the grouped template; otherwise the legacy one-tenant
-            # brief silently drops all but the last selection.
-            multi_scope_requested = (
-                report_type in {
-                    "usage_customer_model_daily_brief",
-                    "usage_customer_model_weekly_brief",
-                }
-                or (tenant_scope == "selected" and len(tenant_aliases) > 1)
-                or (tenant_scope == "all" and model_scope == "all")
+            resolved, unresolved = resolution
+            resolved = self._preview_unique_resolved(resolved)
+            tenant_ids = [item["tenant_id"] for item in resolved]
+            display_names = [item["display_name"] for item in resolved]
+            if not tenant_ids:
+                details = "、".join(
+                    f"{item['query']}（{item['reason']}）" for item in unresolved
+                )
+                return {}, "", [], [], self._result(
+                    self._subscription_unavailable_document(
+                        f"没有匹配到可订阅客户：{details or '请重新选择客户'}"
+                        )
+                    )
+            self._preview_apply_tenant_scope(
+                params,
+                resolved,
+                selected_model_scope=model_scope,
+                selected_models=list(models),
             )
-            if multi_scope_requested and report_type != "usage_customer_model_hourly_tpm":
-                # The hourly TPM template is inherently a multi-customer
-                # grouped report and must never be rewritten into a daily or
-                # weekly brief by the scope-shape heuristic below.
-                report_type = (
-                    "usage_customer_model_weekly_brief"
-                    if data_period == "week"
-                    else "usage_customer_model_daily_brief"
-                )
-                data_period, report_variant = safe_report_types[report_type]
-            params = {
-                "report_variant": report_variant,
-                "tenant_scope": tenant_scope,
-                "model_scope": model_scope,
-                "models": list(models),
-                "report_template": "brief",
-                "breakdown": "model" if model_scope in {"all", "selected"} else "summary",
-            }
-            if tenant_scope == "all":
-                params["all_tenants"] = True
-                params["tenants"] = []
-                display_names = ["全部客户"]
-            else:
-                resolution = await resolve_tenants(tenant_aliases)
-                if resolution is None:
-                    return self._result(
-                        self._subscription_unavailable_document(
-                            "Cube 客户目录当前不可用，请稍后重试或打开订阅中心。"
-                        )
-                    )
-                resolved, unresolved = resolution
-                resolved = unique_resolved(resolved)
-                tenant_ids = [item["tenant_id"] for item in resolved]
-                display_names = [item["display_name"] for item in resolved]
-                if not tenant_ids:
-                    details = "、".join(
-                        f"{item['query']}（{item['reason']}）" for item in unresolved
-                    )
-                    return self._result(
-                        self._subscription_unavailable_document(
-                            f"没有匹配到可订阅客户：{details or '请重新选择客户'}"
-                        )
-                    )
-                apply_tenant_scope(
-                    params,
-                    resolved,
-                    selected_model_scope=model_scope,
-                    selected_models=list(models),
-                )
-                if len(tenant_ids) == 1 and report_variant == "usage_brief":
-                    params["tenant_query"] = tenant_ids[0]
+            if len(tenant_ids) == 1 and report_variant == "usage_brief":
+                params["tenant_query"] = tenant_ids[0]
+        return params, data_period, display_names, unresolved, None
+
+    async def _preview_validate_models(
+        self, params: dict[str, Any]
+    ) -> ToolResult | None:
+        """Validate the selected model scope against the live catalog, in place.
+
+        Per-tenant selection pairs are preferred over the flat model list so
+        cross-tenant pairs the catalog never confirmed are rejected rather
+        than fabricated (observed live 2026-09-15). Returns ``None`` on
+        success or a recovery document that aborts the preview.
+        """
 
         if params.get("model_scope") == "selected":
             selected_tenants = [
@@ -494,6 +606,24 @@ class _SubscriptionFlowMixin:
                         continue
                     tenant_id = str(selection.get("tenant_query") or "")
                     selection["models"] = list(tenant_models.get(tenant_id, []))
+        return None
+
+    def _preview_build_confirmation(
+        self,
+        *,
+        params: dict[str, Any],
+        data_period: str,
+        display_names: list[str],
+        unresolved: list[dict[str, str]],
+        reference: Any,
+        recurrence: str,
+        send_time: str,
+        weekday: int,
+        month_day: int,
+        channel: str,
+        user_id: str,
+    ) -> ToolResult:
+        """Finalize parameters, enforce policy and RBAC, render the confirmation card."""
 
         params["subscription_period"] = data_period
         if data_period == "recent1h":
