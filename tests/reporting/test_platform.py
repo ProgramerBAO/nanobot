@@ -117,7 +117,7 @@ def test_daily_brief_keeps_named_baselines_but_omits_detail_sections() -> None:
             "key": "previous_period",
             "label": "环比",
             "baseline_value": 100.0,
-            "change": "↑62.0%",
+            "change": "↑62.0% 📈",
         },
     ]
     assert document.title == "全部客户 Kimi-K3模型日报简报"
@@ -280,7 +280,7 @@ def test_multi_customer_weekly_brief_sums_tokens_and_only_shows_weekly_change() 
     )
     item = document.blocks[0].data["groups"][0]["items"][0]
     assert item["current_value"] == "100"
-    assert item["comparisons"] == [{"key": "previous_period", "label": "环比", "change": "↑100.0%"}]
+    assert item["comparisons"] == [{"key": "previous_period", "label": "环比", "change": "↑100.0% 📈"}]
     assert "同比" not in document_to_markdown(document)
 
 
@@ -863,7 +863,7 @@ def test_usage_semantics_v2_exposes_baseline_source_and_correct_tpm_meaning() ->
     assert items["ai.tpm"]["value"] == "80 tokens/min"
     assert items["ai.tpm"]["detail"] == ""
     assert items["ai.tpm"]["aggregation"] == "单 Endpoint 日峰值的窗口最大值"
-    assert items["ai.usage.tokens"]["change"] == "↑100.0%"
+    assert items["ai.usage.tokens"]["change"] == "↑100.0% 📈"
     assert document.context is not None
     assert document.context.baseline_window == ReportWindow(
         "2026-08-25 00:00", "2026-08-27 00:00", "comparison"
@@ -923,14 +923,14 @@ def test_daily_usage_names_previous_day_and_weekly_comparisons() -> None:
             "label": "较前一日（2026-08-28）",
             "baseline_value": 200.0,
             "baseline": "200",
-            "change": "↑50.0%",
+            "change": "↑50.0% 📈",
         },
         {
             "key": "previous_week_same_day",
             "label": "较上周同期（2026-08-22）",
             "baseline_value": 100.0,
             "baseline": "100",
-            "change": "↑200.0%",
+            "change": "↑200.0% 📈",
         },
     ]
     assert document.context is not None

@@ -960,6 +960,15 @@
         "new": "新建订阅",
         "empty": "暂无订阅"
       },
+      "changeAlert": {
+        "title": "涨跌提醒阈值",
+        "description": "同比/环比变化幅度达到或超过该百分比时，在变化旁追加 📈/📉 标记；保存立即生效。",
+        "label": "阈值（%）",
+        "save": "保存阈值",
+        "reset": "恢复默认",
+        "sourceOverride": "页面覆盖",
+        "sourceDefault": "默认"
+      },
       "tenantAliases": {
         "title": "客户名称映射",
         "description": "别名用于在聊天中按名称匹配客户与报表显示中文名。整表覆盖 config.json 的 tenantMappings，保存立即生效；目标客户必须存在于 Cube 实时目录。",

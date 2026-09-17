@@ -960,6 +960,15 @@
         "new": "Nueva suscripción",
         "empty": "Aún no hay suscripciones"
       },
+      "changeAlert": {
+        "title": "Umbral de alerta de movimientos bruscos",
+        "description": "Cuando un cambio 同比/环比 alcanza este porcentaje o más, se añade el emoji de subida/bajada (📈/📉); se aplica al guardar.",
+        "label": "Umbral (%)",
+        "save": "Guardar umbral",
+        "reset": "Restablecer valores",
+        "sourceOverride": "Anulación de página",
+        "sourceDefault": "Predeterminado"
+      },
       "tenantAliases": {
         "title": "Alias de nombres de clientes",
         "description": "Los alias permiten coincidir clientes por nombre en el chat y etiquetar los informes. La tabla completa sustituye a tenantMappings de config.json y se aplica al guardar; los clientes deben existir en el catálogo activo de Cube.",

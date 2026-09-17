@@ -960,6 +960,15 @@
         "new": "Nova assinatura",
         "empty": "Ainda não há assinaturas"
       },
+      "changeAlert": {
+        "title": "Limite de alerta de grandes variações",
+        "description": "Quando uma variação 同比/环比 atinge essa porcentagem ou mais, o emoji de alta/baixa (📈/📉) é adicionado; aplica-se ao salvar.",
+        "label": "Limite (%)",
+        "save": "Salvar limite",
+        "reset": "Restaurar padrão",
+        "sourceOverride": "Substituição da página",
+        "sourceDefault": "Padrão"
+      },
       "tenantAliases": {
         "title": "Apelidos de nomes de clientes",
         "description": "Os apelidos permitem designar clientes pelo nome no chat e rotular os relatórios. A tabela inteira substitui o tenantMappings do config.json e se aplica ao salvar; os clientes devem existir no catálogo ativo do Cube.",

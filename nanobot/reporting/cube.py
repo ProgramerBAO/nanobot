@@ -43,6 +43,7 @@ from nanobot.reporting.registry import (
     TemplateManifest,
     TemplatePlugin,
 )
+from nanobot.utils.number_format import format_quantity_compact
 from nanobot.utils.report_failures import classify_report_failure
 
 _CUBE_HEALTH_METRICS = frozenset(
@@ -2269,21 +2270,15 @@ class CubeConnector(ConnectorPlugin):
 
 
 def _format_hourly_tpm(value: int | float | None) -> str:
-    """Compact hourly TPM display; tighter than the shared Token formatter.
+    """Compact hourly TPM display on the shared K/M/B ladder.
 
-    Hourly rows show three metrics inline, so values stay short: 亿 keeps two
-    decimals, 万 rounds to an integer, and smaller values use plain thousands
-    separators. ``None`` keeps its explicit 暂不可用 label.
+    Hourly rows show three metrics inline, so values stay short (up to two
+    decimals, trimmed); ``None`` keeps its explicit 暂不可用 label.
     """
 
     if value is None:
         return "暂不可用"
-    absolute = abs(float(value))
-    if absolute >= 100_000_000:
-        return f"{float(value) / 100_000_000:.2f}亿"
-    if absolute >= 10_000:
-        return f"{float(value) / 10_000:.0f}万"
-    return f"{float(value):,.0f}"
+    return format_quantity_compact(value)
 
 
 class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
@@ -2635,11 +2630,19 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         # when the part sum exceeds the total, so a negative or incomplete
         # difference renders as an explicit "—" instead of a guessed number.
         inventory_table_rows: list[dict[str, Any]] = []
+        # Clusters reporting a zero machine total carry no information in any
+        # column and are hidden (user-confirmed 2026-09-17); the count stays
+        # disclosed in the note so the hiding is never silent. A MISSING
+        # total (None) is a different state and keeps rendering as —.
+        hidden_zero_clusters = 0
         for inventory_row in sorted(
             cluster_inventory, key=lambda item: str(item.get("cluster") or "")
         ):
             cluster_label = str(inventory_row.get("cluster") or "").strip() or "未命名集群"
             total = inventory_row.get("cluster_total")
+            if isinstance(total, int) and total == 0:
+                hidden_zero_clusters += 1
+                continue
             test_count = inventory_row.get("cluster_test")
             dev_count = inventory_row.get("cluster_dev")
             backup_count = inventory_row.get("cluster_backup")
@@ -2696,6 +2699,11 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                         "来自上游聚合延迟。集群机器库存为发送时的平台级快照"
                         "（machine-usage-summary）：生产 = 机器总数 − 测试 − 开发 − 备用 − 空闲，"
                         "集群级空闲与模型级（闲N）/副标题机器空闲口径不同、互不换算。"
+                        + (
+                            f"机器总数为 0 的集群已隐藏（{hidden_zero_clusters} 个）。"
+                            if hidden_zero_clusters
+                            else ""
+                        )
                     ),
                     "collapsed": True,
                     "collapsed_label": "报表说明与数据质量",

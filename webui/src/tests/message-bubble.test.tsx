@@ -150,7 +150,7 @@ describe("MessageBubble", () => {
           sources: [{ system: "Cube Admin", route: "analysis/active-tenant-daily-usage/query" }],
         },
         blocks: [
-          { kind: "metrics", data: { items: [{ label: "Token 消耗", value: "713.01亿", comparisons: [{ label: "同比", change: "↑18.1%" }, { label: "环比", change: "↑62.3%" }] }] } },
+          { kind: "metrics", data: { items: [{ label: "Token 消耗", value: "71.3B", comparisons: [{ label: "同比", change: "↑18.1%" }, { label: "环比", change: "↑62.3%" }] }] } },
           { kind: "actions", data: { actions: [{ action_id: "usage_further_analysis", label: "进一步分析", command: "进一步分析（日报）：客户 tencent_token_hub，模型 Kimi-K3，日期 2026-08-31 至 2026-08-31" }] } },
         ],
       },
@@ -238,8 +238,8 @@ describe("MessageBubble", () => {
                 {
                   tenant: "佛跳墙",
                   model: "Kimi-K3",
-                  tpm_peak: "6683万",
-                  tpm_avg: "5014万",
+                  tpm_peak: "66.83M",
+                  tpm_avg: "50.14M",
                   machine_allocated: "39",
                   machine_used: "38（闲1）",
                 },
@@ -288,8 +288,8 @@ describe("MessageBubble", () => {
     expect(screen.getByText("机器真实使用")).toBeInTheDocument();
     expect(screen.getByText("佛跳墙")).toBeInTheDocument();
     expect(screen.getByText("Kimi-K3")).toBeInTheDocument();
-    expect(screen.getByText("6683万")).toBeInTheDocument();
-    expect(screen.getByText("5014万")).toBeInTheDocument();
+    expect(screen.getByText("66.83M")).toBeInTheDocument();
+    expect(screen.getByText("50.14M")).toBeInTheDocument();
     expect(screen.getByText("39")).toBeInTheDocument();
     expect(screen.getByText("38（闲1）")).toBeInTheDocument();
     // The cluster inventory section renders as its own seven-column table

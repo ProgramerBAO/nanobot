@@ -654,6 +654,8 @@ export type ReportingSettingsAction =
   | "template_policy"
   | "tenant_mappings_update"
   | "tenant_mappings_reset"
+  | "change_alert_threshold_update"
+  | "change_alert_threshold_reset"
   | "subscription_enable"
   | "subscription_disable"
   | "subscription_delete"

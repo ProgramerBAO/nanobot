@@ -2143,8 +2143,9 @@ def test_hourly_tpm_template_renders_cluster_inventory_table() -> None:
                 "tenant_id": "",
                 "metric_scope": "platform_model",
             },
-            # Cluster inventory rows are unsorted and cover the three display
-            # paths: healthy, parts exceeding total, and a missing sub-count.
+            # Cluster inventory rows are unsorted and cover the four display
+            # paths: healthy, parts exceeding total, a missing sub-count, and
+            # a zero-total cluster that must be hidden (2026-09-17).
             {
                 "metric": "ai.machine.inventory",
                 "cluster": "cluster-b",
@@ -2171,6 +2172,15 @@ def test_hourly_tpm_template_renders_cluster_inventory_table() -> None:
                 "cluster_dev": 8,
                 "cluster_backup": 4,
                 "cluster_idle": None,
+            },
+            {
+                "metric": "ai.machine.inventory",
+                "cluster": "cluster-zero",
+                "cluster_total": 0,
+                "cluster_test": 0,
+                "cluster_dev": 0,
+                "cluster_backup": 0,
+                "cluster_idle": 0,
             },
         ),
         quality="complete",
@@ -2208,8 +2218,10 @@ def test_hourly_tpm_template_renders_cluster_inventory_table() -> None:
     ]
     assert inventory_block.data["page_size"] == 20
     rows = inventory_block.data["rows"]
-    # Rows render sorted by cluster name regardless of dataset order.
+    # Rows render sorted by cluster name regardless of dataset order; the
+    # zero-total cluster is hidden (user-confirmed 2026-09-17).
     assert [row["cluster"] for row in rows] == ["cluster-a", "cluster-b", "cluster-c"]
+    assert "cluster-zero" not in str(rows)
     # Production = total − test − dev − backup − idle (user-confirmed 2026-09-16).
     assert rows[0]["cluster_production"] == "86"
     assert rows[0]["cluster_total"] == "128"
@@ -2224,10 +2236,12 @@ def test_hourly_tpm_template_renders_cluster_inventory_table() -> None:
     # an idle count stay out of the line.
     assert "集群空闲机器：cluster-a 4 台、cluster-b 2 台" in document.fallback_text
     assert "cluster-c" not in document.fallback_text
-    # The disclosure separates cluster-level inventory from model-level idle.
+    # The disclosure separates cluster-level inventory from model-level idle
+    # and keeps the zero-cluster hiding explicit (never silent).
     assert document.blocks[-1].data["collapsed"] is True
     assert "集群机器库存" in document.blocks[-1].data["content"]
     assert "互不换算" in document.blocks[-1].data["content"]
+    assert "机器总数为 0 的集群已隐藏（1 个）" in document.blocks[-1].data["content"]
 
 
 def test_hourly_tpm_template_plan_spans_next_day_for_hourly_points() -> None:
@@ -2274,8 +2288,8 @@ def test_markdown_renderer_shows_grouped_metrics_rows() -> None:
                                     "label": "Kimi-K3",
                                     "status": "active",
                                     "metrics": [
-                                        {"label": "峰值", "value": "6683万"},
-                                        {"label": "均值", "value": "5014万"},
+                                        {"label": "峰值", "value": "66.83M"},
+                                        {"label": "均值", "value": "50.14M"},
                                         {"label": "机器", "value": "39/38（闲1）"},
                                     ],
                                 }
@@ -2292,7 +2306,7 @@ def test_markdown_renderer_shows_grouped_metrics_rows() -> None:
 
     assert isinstance(rendered, str)
     assert "## 佛跳墙" in rendered
-    assert "- Kimi-K3｜峰值 6683万｜均值 5014万｜机器 39/38（闲1）" in rendered
+    assert "- Kimi-K3｜峰值 66.83M｜均值 50.14M｜机器 39/38（闲1）" in rendered
 
 
 def test_markdown_renderer_shows_hourly_tpm_table_and_no_baseline_context() -> None:

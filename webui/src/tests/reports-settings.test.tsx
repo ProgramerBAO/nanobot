@@ -175,4 +175,30 @@ describe("ReportsSettings delivery groups", () => {
       ),
     );
   });
+
+  it("edits the big-move alert threshold and saves", async () => {
+    const user = userEvent.setup();
+    const payload = payloadWithFlags();
+    payload.change_alert_threshold = { value: 30, source: "default", default_value: 30 };
+    vi.mocked(fetchReportingSettings).mockResolvedValue(payload);
+    vi.mocked(runReportingSettingsAction).mockResolvedValue(payload);
+
+    render(<ReportsSettings token="token" />);
+    await user.click(await screen.findByRole("tab", { name: /Subscriptions/ }));
+
+    const input = await screen.findByLabelText("Threshold (%)");
+    expect((input as HTMLInputElement).value).toBe("30");
+    expect(screen.getByText("Default")).toBeInTheDocument();
+
+    await user.clear(input);
+    await user.type(input, "50");
+    await user.click(screen.getByRole("button", { name: /Save threshold/ }));
+    await waitFor(() =>
+      expect(runReportingSettingsAction).toHaveBeenCalledWith(
+        "token",
+        "change_alert_threshold_update",
+        { threshold: "50" },
+      ),
+    );
+  });
 });

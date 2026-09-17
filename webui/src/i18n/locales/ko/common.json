@@ -960,6 +960,15 @@
         "new": "구독 만들기",
         "empty": "아직 구독이 없습니다"
       },
+      "changeAlert": {
+        "title": "급등·급락 알림 임계값",
+        "description": "同比/环比 변화율이 이 백분율 이상이면 📈/📉 표시를 추가합니다. 저장 즉시 적용됩니다.",
+        "label": "임계값 (%)",
+        "save": "임계값 저장",
+        "reset": "기본값으로 되돌리기",
+        "sourceOverride": "페이지 재정의",
+        "sourceDefault": "기본값"
+      },
       "tenantAliases": {
         "title": "고객 이름 별칭",
         "description": "별칭은 채팅에서 이름으로 고객을 매칭하고 보고서 표시명으로 사용됩니다. config.json의 tenantMappings를 전체로 덮어쓰며 저장 즉시 적용됩니다. 대상 고객은 Cube 실시간 카탈로그에 존재해야 합니다.",

@@ -44,6 +44,7 @@ from nanobot.bus.events import OUTBOUND_META_AGENT_UI
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.config_base import Base
 from nanobot.utils.helpers import _write_text_atomic
+from nanobot.utils.number_format import format_quantity_compact
 from nanobot.utils.report_failures import (
     ReportFailureCode,
     ReportFailureError,
@@ -498,6 +499,37 @@ def _resolve_tenant_mappings_store() -> Any:
     return _tenant_mappings_store or None
 
 
+# Reserved report_settings key for the WebUI-managed change-alert threshold
+# (2026-09-17): |change%| at or above this marks a big rise/fall with an
+# emoji on every brief/matrix change line. Integer percent, valid 5-95.
+CHANGE_ALERT_THRESHOLD_SETTING_KEY = "change_alert_threshold"
+DEFAULT_CHANGE_ALERT_THRESHOLD_PERCENT = 30
+# (rise, fall) — swap the pair in this one place if the emoji ever changes.
+CHANGE_ALERT_ICONS = ("📈", "📉")
+
+
+def effective_change_alert_threshold(*, store: Any = None) -> int:
+    """Resolve the change-alert threshold: store override > built-in default.
+
+    Store-backed so the WebUI control applies on the next rendered report
+    without a restart, mirroring the tenant-mapping override. An invalid or
+    out-of-range stored value falls back to the default instead of
+    disabling or absurdly gating the marker. ``store`` lets callers with an
+    already-resolved store (the settings payload) share one view.
+    """
+
+    resolved = store if store is not None else _resolve_tenant_mappings_store()
+    if resolved is not None:
+        try:
+            raw = str(resolved.setting(CHANGE_ALERT_THRESHOLD_SETTING_KEY, "")).strip()
+            value = int(raw) if raw else None
+        except Exception:
+            value = None
+        if value is not None and 5 <= value <= 95:
+            return value
+    return DEFAULT_CHANGE_ALERT_THRESHOLD_PERCENT
+
+
 def effective_tenant_mappings(config: Any, *, store: Any = None) -> dict[str, str]:
     """Resolve the effective alias -> tenant ID mapping.
 
@@ -666,19 +698,15 @@ def _as_optional_int(value: Any) -> int | None:
 
 
 def _format_number(value: int | float) -> str:
-    """把大数转换为日报易读格式：超过 1 万用“万”，超过 1 亿用“亿”。"""
+    """把量值转换为共享 K/M/B 阶梯（1 亿 = 100M、110.92 亿 = 11.09B，2026-09-17）。"""
 
-    absolute = abs(value)
-    if absolute >= 100_000_000:
-        return f"{value / 100_000_000:.2f}亿"
-    if absolute >= 10_000:
-        return f"{value / 10_000:.2f}万"
-    return f"{value:,.0f}"
+    return format_quantity_compact(value)
 
 
 def _format_million_tokens(value: int) -> str:
-    rendered = f"{value / 1_000_000:,.6f}".rstrip("0").rstrip(".")
-    return f"{rendered or '0'}M"
+    # Unified with the shared K/M/B ladder (2026-09-17): small totals read as
+    # K/plain integers instead of fractional M.
+    return format_quantity_compact(value)
 
 
 def _decoded_tool_arguments(tool_call: Any) -> tuple[str, dict[str, Any]]:
@@ -773,7 +801,11 @@ def _latest_tenant_from_history(
 
 
 def _format_change(current: int | float, baseline: int | float) -> str:
-    """只展示相对变化百分比；零基准使用业务状态，绝不伪造百分比。"""
+    """只展示相对变化百分比；零基准使用业务状态，绝不伪造百分比。
+
+    大幅涨跌（|变化%| ≥ 生效阈值，页面可配）追加涨/跌表情
+    （user-confirmed 2026-09-17，两个方向都标）。
+    """
 
     if baseline == 0:
         if current == 0:
@@ -781,7 +813,13 @@ def _format_change(current: int | float, baseline: int | float) -> str:
         return "新增"
     change = (current - baseline) / baseline * 100
     arrow = "↑" if change > 0 else "↓" if change < 0 else ""
-    return f"{arrow}{abs(change):.1f}%" if arrow else "0.0%"
+    if not arrow:
+        return "0.0%"
+    text = f"{arrow}{abs(change):.1f}%"
+    if abs(change) >= effective_change_alert_threshold():
+        icon = CHANGE_ALERT_ICONS[0] if change > 0 else CHANGE_ALERT_ICONS[1]
+        return f"{text} {icon}"
+    return text
 
 
 def _format_delta(current: int | float, baseline: int | float) -> str:

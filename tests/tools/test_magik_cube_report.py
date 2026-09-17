@@ -364,8 +364,8 @@ async def test_report_renders_comparisons_changes_machines_and_pd(tmp_path: Path
 
     assert "大客户运营日报 · 2026-08-13" in report
     assert "甲客户" in report
-    assert "Token 200｜较前日 ↑100.0%｜较7日前 ↑300.0%" in report
-    assert "峰值TPM 40（ep-a）｜较前日 ↑100.0%｜较7日前 ↑300.0%" in report
+    assert "Token 200｜较前日 ↑100.0% 📈｜较7日前 ↑300.0% 📈" in report
+    assert "峰值TPM 40（ep-a）｜较前日 ↑100.0% 📈｜较7日前 ↑300.0% 📈" in report
     assert "TPM 100 → 200" in report
     assert "GLM-5 / prod：2 台（8卡等效），16 × H100 GPU" in report
     assert "P=1、D=2，观测比例 1:2" in report
@@ -634,7 +634,7 @@ def test_comparison_planner_merges_adjacent_periods_and_chunks_long_ranges() -> 
 @pytest.mark.parametrize(
     ("current", "baseline", "expected"),
     [
-        (162.3, 100, "↑62.3%"),
+        (162.3, 100, "↑62.3% 📈"),
         (87.5, 100, "↓12.5%"),
         (100, 100, "0.0%"),
         (1, 0, "新增"),
@@ -645,6 +645,43 @@ def test_usage_change_is_percentage_only(
     current: int | float, baseline: int | float, expected: str
 ) -> None:
     assert _format_change(current, baseline) == expected
+
+
+def test_change_alert_threshold_marks_big_moves_and_reads_store_override(
+    monkeypatch, tmp_path
+) -> None:
+    """|change%| at/above the threshold gains the rise/fall emoji (2026-09-17).
+
+    Both directions are marked; the threshold resolves through the
+    report-settings store override so a WebUI change applies without a
+    restart. The conftest autouse fixture keeps the default deterministic;
+    this test pins the store-driven boundary explicitly.
+    """
+
+    import nanobot.agent.tools.magik_cube as magik_cube_module
+    from nanobot.reporting.store import ReportStateStore
+
+    # Default threshold (30): both directions marked, small moves are not,
+    # and the zero/新增 states never carry the marker.
+    assert _format_change(150, 100) == "↑50.0% 📈"
+    assert _format_change(50, 100) == "↓50.0% 📉"
+    assert _format_change(130, 100) == "↑30.0% 📈"
+    assert _format_change(125, 100) == "↑25.0%"
+    assert _format_change(100, 100) == "0.0%"
+
+    # A store override moves the boundary on the very next call.
+    store = ReportStateStore(tmp_path / "reporting.db")
+    store.set_setting(magik_cube_module.CHANGE_ALERT_THRESHOLD_SETTING_KEY, "10")
+    monkeypatch.setattr(magik_cube_module, "_tenant_mappings_store", store)
+    assert _format_change(115, 100) == "↑15.0% 📈"
+    assert _format_change(105, 100) == "↑5.0%"
+
+    # Out-of-range or invalid overrides fall back to the default instead of
+    # disabling or absurdly gating the marker.
+    store.set_setting(magik_cube_module.CHANGE_ALERT_THRESHOLD_SETTING_KEY, "3")
+    assert magik_cube_module.effective_change_alert_threshold() == 30
+    store.set_setting(magik_cube_module.CHANGE_ALERT_THRESHOLD_SETTING_KEY, "not-a-number")
+    assert magik_cube_module.effective_change_alert_threshold() == 30
 
 
 def test_comparison_planner_keeps_far_windows_exact_and_enforces_total_limit() -> None:
@@ -888,8 +925,9 @@ async def test_selected_model_alias_resolves_to_configured_model(tmp_path: Path)
     card = result.metadata[OUTBOUND_META_AGENT_UI]["cards"][0]
     assert card["title"] == "生产客户 周报"
     assert [row["model"] for row in card["table"]["rows"]] == ["MODEL-A"]
-    assert "Token **1,300" in card["overview"][0]
-    assert "Token **10,700" not in card["overview"][0]
+    # Quantity values ride the shared K/M/B ladder (2026-09-17): 1300 -> 1.3K.
+    assert "Token **1.3K" in card["overview"][0]
+    assert "Token **10.7K" not in card["overview"][0]
     assert card["segments"][0].startswith("周六 100")
     assert card["segments"][-1].startswith("周五 700")
     assert client.requested_models == ["MODEL-A", "MODEL-A"]

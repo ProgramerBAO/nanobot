@@ -960,6 +960,15 @@
         "new": "Nouvel abonnement",
         "empty": "Aucun abonnement pour le moment"
       },
+      "changeAlert": {
+        "title": "Seuil d'alerte de fortes variations",
+        "description": "Lorsqu'une variation 同比/环比 atteint ce pourcentage ou plus, l'émoji hausse/baisse (📈/📉) est ajouté ; appliqué dès l'enregistrement.",
+        "label": "Seuil (%)",
+        "save": "Enregistrer le seuil",
+        "reset": "Rétablir par défaut",
+        "sourceOverride": "Remplacement page",
+        "sourceDefault": "Par défaut"
+      },
       "tenantAliases": {
         "title": "Alias de noms de clients",
         "description": "Les alias permettent de désigner des clients par leur nom dans le chat et d'étiqueter les rapports. La table entière remplace tenantMappings de config.json et s'applique dès l'enregistrement ; les clients doivent exister dans le catalogue Cube en direct.",

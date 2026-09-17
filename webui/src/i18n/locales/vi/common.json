@@ -960,6 +960,15 @@
         "new": "Đăng ký mới",
         "empty": "Chưa có đăng ký"
       },
+      "changeAlert": {
+        "title": "Ngưỡng cảnh báo biến động lớn",
+        "description": "Khi mức thay đổi 同比/环比 đạt đến ngưỡng phần trăm này trở lên, biểu tượng tăng/giảm (📈/📉) được thêm vào; lưu là có hiệu lực ngay.",
+        "label": "Ngưỡng (%)",
+        "save": "Lưu ngưỡng",
+        "reset": "Khôi phục mặc định",
+        "sourceOverride": "Ghi đè trang",
+        "sourceDefault": "Mặc định"
+      },
       "tenantAliases": {
         "title": "Biệt danh tên khách hàng",
         "description": "Biệt danh dùng để chỉ định khách hàng theo tên trong chat và hiển thị tên thân thiện trên báo cáo. Toàn bộ bảng ghi đè tenantMappings của config.json và có hiệu lực ngay khi lưu; khách hàng mục tiêu phải tồn tại trong catalog Cube trực tiếp.",

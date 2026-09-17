@@ -960,6 +960,15 @@
         "new": "New subscription",
         "empty": "No subscriptions yet"
       },
+      "changeAlert": {
+        "title": "Big-move alert threshold",
+        "description": "When a 同比/环比 change reaches this percentage or beyond, the rise/fall emoji (📈/📉) is appended; saves apply immediately.",
+        "label": "Threshold (%)",
+        "save": "Save threshold",
+        "reset": "Reset to default",
+        "sourceOverride": "Page override",
+        "sourceDefault": "Default"
+      },
       "tenantAliases": {
         "title": "Customer name aliases",
         "description": "Aliases match customers by name in chat and label reports with friendly names. The whole table overrides config.json tenantMappings and applies immediately; target customers must exist in the live Cube catalog.",

@@ -960,6 +960,15 @@
         "new": "Langganan baru",
         "empty": "Belum ada langganan"
       },
+      "changeAlert": {
+        "title": "Ambang peringatan pergerakan besar",
+        "description": "Saat perubahan 同比/环比 mencapai persentase ini atau lebih, emoji naik/turun (📈/📉) ditambahkan; langsung berlaku saat disimpan.",
+        "label": "Ambang (%)",
+        "save": "Simpan ambang",
+        "reset": "Kembalikan bawaan",
+        "sourceOverride": "Ambil alih halaman",
+        "sourceDefault": "Bawaan"
+      },
       "tenantAliases": {
         "title": "Alias nama pelanggan",
         "description": "Alias digunakan untuk menyebut pelanggan berdasarkan nama di chat dan menandai laporan. Seluruh tabel menimpa tenantMappings dari config.json dan langsung berlaku saat disimpan; pelanggan target harus ada di katalog Cube langsung.",

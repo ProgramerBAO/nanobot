@@ -13,7 +13,10 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.tools.magik_cube import (
+    CHANGE_ALERT_THRESHOLD_SETTING_KEY,
+    DEFAULT_CHANGE_ALERT_THRESHOLD_PERCENT,
     TENANT_MAPPINGS_SETTING_KEY,
+    effective_change_alert_threshold,
     effective_tenant_mappings,
 )
 from nanobot.config.loader import load_config, resolve_config_env_vars
@@ -654,6 +657,17 @@ def reporting_settings_payload(
         payload["subscriptions"] = payloads
         # Alias mapping view for the settings page (management only).
         payload["tenant_mappings"] = _tenant_mappings_view(config, store)
+        # Change-alert threshold view (management only): |同比/环比%| at or
+        # above this value appends the rise/fall emoji on brief change lines.
+        payload["change_alert_threshold"] = {
+            "value": effective_change_alert_threshold(store=store),
+            "source": (
+                "override"
+                if store.setting(CHANGE_ALERT_THRESHOLD_SETTING_KEY, "")
+                else "default"
+            ),
+            "default_value": DEFAULT_CHANGE_ALERT_THRESHOLD_PERCENT,
+        }
     if channel and user_id:
         payload["grants"] = store.grants(channel, user_id)
         payload["recent_runs"] = store.recent_runs(channel, user_id, limit=10)
@@ -796,6 +810,45 @@ def reporting_settings_action(
             # not run (catalog unavailable at save time).
             "catalog_checked": action != "tenant_mappings_reset" and catalog_checked,
         }
+        return payload
+    if action in {"change_alert_threshold_update", "change_alert_threshold_reset"}:
+        if not management_enabled:
+            raise ReportingSettingsError("report management is disabled", status=404)
+        if action == "change_alert_threshold_reset":
+            # Removing the override restores the built-in 30% default.
+            if not store.clear_setting(CHANGE_ALERT_THRESHOLD_SETTING_KEY):
+                raise ReportingSettingsError(
+                    "涨跌提醒阈值没有页面覆盖可恢复", status=404
+                )
+            store.record_admin_audit(
+                action="change_alert_threshold_reset",
+                target_type="report_setting",
+                target_id=CHANGE_ALERT_THRESHOLD_SETTING_KEY,
+                before_summary={},
+                after_summary={"reset": True},
+                updated_by="webui_admin",
+            )
+        else:
+            raw = str(query_first(query, "threshold") or "").strip()
+            try:
+                value = int(raw) if raw else -1
+            except ValueError as exc:
+                raise ReportingSettingsError(
+                    "涨跌提醒阈值必须为 5-95 的整数"
+                ) from exc
+            if not 5 <= value <= 95:
+                raise ReportingSettingsError("涨跌提醒阈值必须为 5-95 的整数")
+            store.set_setting(CHANGE_ALERT_THRESHOLD_SETTING_KEY, str(value))
+            store.record_admin_audit(
+                action="change_alert_threshold_update",
+                target_type="report_setting",
+                target_id=CHANGE_ALERT_THRESHOLD_SETTING_KEY,
+                before_summary={},
+                after_summary={"value": value},
+                updated_by="webui_admin",
+            )
+        payload = reporting_settings_payload(query, startup_config=startup_config)
+        payload["last_action"] = {"ok": True, "action": action}
         return payload
     if action in {"subscription_options", "options"}:
         if not management_enabled:

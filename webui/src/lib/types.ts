@@ -1097,6 +1097,13 @@ export interface ReportingSettingsPayload {
     source: "default" | "override";
     default_values: Record<string, string>;
   };
+  /** Change-alert threshold (management view, 2026-09-17): |同比/环比%| at
+   *  or above the value appends 📈/📉 on brief change lines. */
+  change_alert_threshold?: {
+    value: number;
+    source: "default" | "override";
+    default_value: number;
+  };
   template_policies: ReportingTemplatePolicy[];
   subscription_options?: ReportingSubscriptionOptions;
   last_action?: { ok: boolean; action: string; path?: string };

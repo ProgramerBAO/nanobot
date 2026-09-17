@@ -139,8 +139,28 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   when parts are missing or exceed the total). The inventory table is
   informational: a failed or empty summary omits the table without downgrading
   quality, and cluster-level idle never converts to or from the model-level （闲N）
-  semantics. Feishu splits the tables across cards (one table per card,
-  page-marked subtitles).
+  semantics. Clusters whose machine total is zero are hidden from the table with
+  an explicit hidden-count sentence in the disclosure note (2026-09-17, never
+  silent); a MISSING total keeps rendering —. Feishu splits the tables across
+  cards (one table per card, page-marked subtitles).
+- Quantity values (tokens, requests, TPM) across every template render
+  through the shared `format_quantity_compact` ladder
+  (`nanobot/utils/number_format.py`, 2026-09-17): K=10³, M=10⁶, B=10⁹
+  (1 亿 = 100M, 110.92 亿 = 11.09B), at most two decimals with trailing
+  zeros trimmed; count-style values (machines, samples), percentages,
+  latencies, and money keep their own formatters. Do not reintroduce 万/亿
+  wording in templates — the helper is the single source and both the
+  agent layer and the reporting package import it (utils is a cycle-free
+  leaf).
+- Change lines (同比/环比) append the big-move emoji 📈/📉 when
+  |change%| reaches the effective threshold
+  (`effective_change_alert_threshold` in magik_cube.py: built-in 30%
+  default, `report_settings` store override `change_alert_threshold`
+  managed from the Report platform subscriptions tab, valid 5-95, invalid
+  values fall back to the default). Both directions are marked;
+  新增/无变化/无基准 never carry the marker. `tests/conftest.py`
+  autouse-isolates the report-settings store singleton so unit pins stay
+  deterministic against machine-local page settings.
 - Hourly subscriptions run at five minutes past the hour; an explicit hour list
   (e.g. "每天 9 点、10 点播报上一小时 TPM") compiles to `5 9,10 * * *` while the
   reported window always comes from the clock at execution time, never from the

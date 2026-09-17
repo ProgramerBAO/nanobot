@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
+from nanobot.utils.number_format import format_quantity_compact
+
 DataQuality = Literal["complete", "partial", "missing"]
 ReportPeriod = Literal["day", "week", "month", "recent7", "recent15m", "recent1h", "range"]
 ModelScope = Literal["summary", "all", "selected"]
@@ -248,19 +250,15 @@ def format_metric_compact(value: int | float | None) -> str:
     """Format a metric total compactly without manufacturing zero for missing rows.
 
     Shared by template implementations so grouped cards, tables, and text
-    fallbacks render the same compact value for the same number. ``None``
-    stays an explicit ``暂无数据`` so a missing value can never be mistaken
-    for a real zero.
+    fallbacks render the same compact value for the same number. Quantities
+    use the shared K/M/B ladder (user-confirmed 2026-09-17; 1 亿 = 100M);
+    ``None`` stays an explicit ``暂无数据`` so a missing value can never be
+    mistaken for a real zero.
     """
 
     if value is None:
         return "暂无数据"
-    absolute = abs(float(value))
-    if absolute >= 100_000_000:
-        return f"{float(value) / 100_000_000:.2f}亿"
-    if absolute >= 10_000:
-        return f"{float(value) / 10_000:.2f}万"
-    return f"{float(value):,.0f}"
+    return format_quantity_compact(value)
 
 
 @dataclass(frozen=True, slots=True)

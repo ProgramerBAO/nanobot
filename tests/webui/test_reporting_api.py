@@ -451,6 +451,51 @@ def test_tenant_mappings_actions_roundtrip(monkeypatch, tmp_path) -> None:
     assert missing.value.status == 404
 
 
+def test_change_alert_threshold_actions_roundtrip(monkeypatch, tmp_path) -> None:
+    """The WebUI change-alert threshold control persists and resets (2026-09-17)."""
+    store = ReportStateStore(tmp_path / "reporting.db")
+    config = _config(tmp_path)
+    monkeypatch.setattr(reporting_api, "load_config", lambda: config)
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *_a, **_k: store)
+
+    payload = reporting_api.reporting_settings_payload()
+    assert payload["change_alert_threshold"] == {
+        "value": 30,
+        "source": "default",
+        "default_value": 30,
+    }
+
+    # Invalid values fail closed; the valid override round-trips.
+    with pytest.raises(reporting_api.ReportingSettingsError, match="5-95"):
+        reporting_api.reporting_settings_action(
+            "change_alert_threshold_update", _query(threshold="3")
+        )
+    with pytest.raises(reporting_api.ReportingSettingsError, match="5-95"):
+        reporting_api.reporting_settings_action(
+            "change_alert_threshold_update", _query(threshold="not-a-number")
+        )
+    payload = reporting_api.reporting_settings_action(
+        "change_alert_threshold_update", _query(threshold="50")
+    )
+    assert payload["change_alert_threshold"] == {
+        "value": 50,
+        "source": "override",
+        "default_value": 30,
+    }
+
+    # Reset restores the default; resetting again fails 404.
+    payload = reporting_api.reporting_settings_action(
+        "change_alert_threshold_reset", _query()
+    )
+    assert payload["change_alert_threshold"]["source"] == "default"
+    assert payload["change_alert_threshold"]["value"] == 30
+    with pytest.raises(reporting_api.ReportingSettingsError, match="没有页面覆盖") as missing:
+        reporting_api.reporting_settings_action(
+            "change_alert_threshold_reset", _query()
+        )
+    assert missing.value.status == 404
+
+
 def test_subscription_disable_updates_cron_and_database(monkeypatch, tmp_path) -> None:
     store = ReportStateStore(tmp_path / "reporting.db")
     config = _config(tmp_path)

@@ -8,6 +8,10 @@ from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
 
+from nanobot.agent.tools.magik_cube import (
+    CHANGE_ALERT_ICONS,
+    effective_change_alert_threshold,
+)
 from nanobot.reporting.business_templates import build_business_templates
 from nanobot.reporting.contracts import (
     USAGE_METRIC_SEMANTICS,
@@ -49,6 +53,7 @@ from nanobot.reporting.renderer import (
     WeComReportRenderer,
 )
 from nanobot.reporting.templates import DeclarativeTemplateSpec, load_builtin_template_specs
+from nanobot.utils.number_format import format_quantity_compact
 from nanobot.utils.report_failures import (
     report_failure_code_from_warning,
     report_failure_message,
@@ -1303,6 +1308,12 @@ def _format_metric_change(
     current: int | float | None,
     baseline: int | float | None,
 ) -> str:
+    """Percentage-only change line with the configurable big-move marker.
+
+    |change%| at or above the effective threshold appends the rise/fall
+    emoji (user-confirmed 2026-09-17, both directions marked); 新增/无变化/
+    无基准 states never carry the marker.
+    """
     if current is None:
         return "当前无数据"
     if baseline is None:
@@ -1310,11 +1321,14 @@ def _format_metric_change(
     if baseline == 0:
         return "新增" if current else "无变化"
     change = (current - baseline) / baseline * 100
-    if change > 0:
-        return f"↑{change:.1f}%"
-    if change < 0:
-        return f"↓{abs(change):.1f}%"
-    return "0.0%"
+    if change == 0:
+        return "0.0%"
+    arrow = "↑" if change > 0 else "↓"
+    text = f"{arrow}{abs(change):.1f}%"
+    if abs(change) >= effective_change_alert_threshold():
+        icon = CHANGE_ALERT_ICONS[0] if change > 0 else CHANGE_ALERT_ICONS[1]
+        return f"{text} {icon}"
+    return text
 
 
 def _usage_table(rows: list[dict[str, Any]]) -> list[list[Any]]:
@@ -1418,9 +1432,11 @@ def _usage_metric_stat(rows: list[dict[str, Any]], metric: str) -> dict[str, Any
 def _format_usage_value(metric: str, value: float | None) -> str:
     if value is None:
         return "暂无数据"
+    # Quantity metrics (tokens/requests/TPM) share the K/M/B ladder
+    # (2026-09-17); the tokens/min suffix is a unit, not a quantity tier.
     if metric in {"ai.usage.tokens", "ai.requests"}:
-        return f"{int(value):,}"
-    return f"{value:,.0f} tokens/min"
+        return format_quantity_compact(value)
+    return f"{format_quantity_compact(value)} tokens/min"
 
 
 def _usage_stat_value(metric: str, stat: Mapping[str, Any]) -> str:

@@ -632,6 +632,9 @@ export function ReportsSettings({ token }: { token: string }) {
   // from the payload after every action so a save/reset round-trips the
   // server's effective table.
   const [tenantAliasDraft, setTenantAliasDraft] = useState<Array<{ alias: string; tenantId: string }>>([]);
+  // Draft for the change-alert threshold (percent); re-synced from the
+  // payload after every action.
+  const [changeThresholdDraft, setChangeThresholdDraft] = useState("30");
   const [tab, setTab] = useState<"templates" | "subscriptions" | "permissions" | "flags">("templates");
   const [grant, setGrant] = useState(EMPTY_GRANT);
   const [subscription, setSubscription] = useState<GuidedFormState>(EMPTY_SUBSCRIPTION);
@@ -674,6 +677,11 @@ export function ReportsSettings({ token }: { token: string }) {
       })),
     );
   }, [tenantMappingsView]);
+
+  const changeThresholdView = payload?.change_alert_threshold;
+  useEffect(() => {
+    setChangeThresholdDraft(String(changeThresholdView?.value ?? 30));
+  }, [changeThresholdView]);
 
   const loadOptions = useCallback(async () => {
     setOptionsLoading(true);
@@ -818,6 +826,42 @@ export function ReportsSettings({ token }: { token: string }) {
         <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">{t("settings.reports.subscriptions.title", { defaultValue: "订阅管理" })}</h3><p className="mt-1 text-xs text-muted-foreground">{t("settings.reports.subscriptions.description", { defaultValue: "每一行只操作本行订阅；编辑会同步更新 Cron 和数据库，停用、删除不会修改历史运行记录。" })}</p></div><Button size="sm" disabled={!managementEnabled || !guidedUiEnabled || action !== null} onClick={openCreate}><Plus className="h-4 w-4" />{t("settings.reports.subscriptions.new", { defaultValue: "新建订阅" })}</Button></div>
         {showEditor ? <SubscriptionEditor form={subscription} editing={editingId !== null} busy={action !== null} policies={policies} options={options} optionsLoading={optionsLoading} onChange={(patch) => setSubscription((current) => ({ ...current, ...patch }))} onCancel={closeEditor} onPreview={previewSubscription} onSubmit={submitSubscription} /> : null}
         <div className="divide-y border-y">{(payload?.subscriptions ?? []).map((item) => <SubscriptionRow key={item.subscription_id} item={item} policies={policies} busy={!managementEnabled || !guidedUiEnabled || action !== null} onEdit={openEdit} onAction={(next, values) => void run(next, values)} />)}{!payload?.subscriptions.length ? <div className="py-8 text-center text-sm text-muted-foreground">{t("settings.reports.subscriptions.empty", { defaultValue: "暂无订阅" })}</div> : null}</div>
+
+        {changeThresholdView ? (
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <div className="min-w-0">
+              <span className="text-sm font-medium">{t("settings.reports.changeAlert.title", { defaultValue: "涨跌提醒阈值" })}</span>
+              <span className="ml-2 text-xs text-muted-foreground">{t("settings.reports.changeAlert.description", { defaultValue: "同比/环比变化幅度达到或超过该百分比时，在变化旁追加 📈/📉 标记；保存立即生效。" })}</span>
+              <span className={cn("ml-2 rounded-full border px-2 py-0.5 text-xs", changeThresholdView.source === "override" ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300" : "border-border text-muted-foreground")}>{changeThresholdView.source === "override" ? t("settings.reports.changeAlert.sourceOverride", { defaultValue: "页面覆盖" }) : t("settings.reports.changeAlert.sourceDefault", { defaultValue: "默认" })}</span>
+            </div>
+            <Input
+              type="number"
+              min={5}
+              max={95}
+              value={changeThresholdDraft}
+              onChange={(event) => setChangeThresholdDraft(event.target.value)}
+              placeholder="30"
+              disabled={action !== null}
+              aria-label={t("settings.reports.changeAlert.label", { defaultValue: "阈值（%）" })}
+              className="w-24"
+            />
+            <Button
+              size="sm"
+              disabled={action !== null || !/^\d+$/.test(changeThresholdDraft.trim()) || Number(changeThresholdDraft) < 5 || Number(changeThresholdDraft) > 95}
+              onClick={() => void run("change_alert_threshold_update", { threshold: changeThresholdDraft.trim() })}
+            >
+              {t("settings.reports.changeAlert.save", { defaultValue: "保存阈值" })}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={action !== null || changeThresholdView.source !== "override"}
+              onClick={() => void run("change_alert_threshold_reset", {})}
+            >
+              <RotateCcw className="h-4 w-4" />{t("settings.reports.changeAlert.reset", { defaultValue: "恢复默认" })}
+            </Button>
+          </div>
+        ) : null}
 
         {tenantMappingsView ? (
           <div className="space-y-3 border-t pt-4">
