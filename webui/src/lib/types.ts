@@ -1088,6 +1088,15 @@ export interface ReportingSettingsPayload {
   grants: ReportingGrant[];
   recent_runs: Array<Record<string, unknown>>;
   subscriptions: ReportingSubscription[];
+  /** Alias -> tenant ID mapping editor (management view, 2026-09-17):
+   *  ``values`` is the effective table, ``source`` marks whether the page
+   *  override or the config.json default is active, and
+   *  ``default_values`` shows what a reset would restore. */
+  tenant_mappings?: {
+    values: Record<string, string>;
+    source: "default" | "override";
+    default_values: Record<string, string>;
+  };
   template_policies: ReportingTemplatePolicy[];
   subscription_options?: ReportingSubscriptionOptions;
   last_action?: { ok: boolean; action: string; path?: string };

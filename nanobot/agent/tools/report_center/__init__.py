@@ -28,6 +28,7 @@ from nanobot.agent.reporting.cube_subscription_intent import (
 )
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import current_request_context
+from nanobot.agent.tools.magik_cube import effective_tenant_mappings
 from nanobot.agent.tools.report_center.catalog import _CatalogReconciliationMixin
 from nanobot.agent.tools.report_center.execution import _ReportExecutionMixin
 from nanobot.agent.tools.report_center.gating import _ReportGatingMixin
@@ -695,7 +696,9 @@ class ReportCenterTool(  # noqa: UP046
 
         model_scope = str(intent.filters.get("model_scope") or intent.model_scope or "summary")
         tenants = list(dict.fromkeys(intent.tenants or ((intent.tenant,) if intent.tenant else ())))
-        configured_aliases = getattr(self._cube_config, "tenant_mappings", {}) or {}
+        configured_aliases = effective_tenant_mappings(
+            self._cube_config, store=self._store
+        )
         tenant_labels = {
             tenant: next(
                 (alias for alias, tenant_id in configured_aliases.items() if tenant_id == tenant),

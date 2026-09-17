@@ -960,6 +960,23 @@
         "new": "Nova assinatura",
         "empty": "Ainda não há assinaturas"
       },
+      "tenantAliases": {
+        "title": "Apelidos de nomes de clientes",
+        "description": "Os apelidos permitem designar clientes pelo nome no chat e rotular os relatórios. A tabela inteira substitui o tenantMappings do config.json e se aplica ao salvar; os clientes devem existir no catálogo ativo do Cube.",
+        "aliasPlaceholder": "Nome do cliente, ex.: Macarrão Yangchun",
+        "aliasLabel": "Nome do cliente",
+        "tenantLabel": "Cliente alvo",
+        "tenantPlaceholder": "Selecione um cliente alvo",
+        "tenantIdPlaceholder": "ID de tenant do cliente",
+        "add": "Adicionar apelido",
+        "remove": "Remover este apelido",
+        "empty": "Ainda não há apelidos. Adicione um para designar clientes pelo nome no chat.",
+        "save": "Salvar apelidos",
+        "reset": "Restaurar padrão",
+        "resetTitle": "Restaurar o padrão do config.json ({{count}} entradas)",
+        "sourceOverride": "Substituição da página",
+        "sourceDefault": "Padrão (config.json)"
+      },
       "permissions": {
         "rbacDescription": "Quando ativado, valida concessões de Connector, Template, clientes, modelos e modelos de assinatura."
       },

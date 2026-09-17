@@ -652,6 +652,8 @@ export type ReportingSettingsAction =
   | "feature_flag"
   | "feature_flag_reset"
   | "template_policy"
+  | "tenant_mappings_update"
+  | "tenant_mappings_reset"
   | "subscription_enable"
   | "subscription_disable"
   | "subscription_delete"

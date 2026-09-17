@@ -960,6 +960,23 @@
         "new": "新建訂閱",
         "empty": "暫無訂閱"
       },
+      "tenantAliases": {
+        "title": "客戶名稱映射",
+        "description": "別名用於在聊天中按名稱匹配客戶與報表顯示中文名。整表覆蓋 config.json 的 tenantMappings，儲存立即生效；目標客戶必須存在於 Cube 即時目錄。",
+        "aliasPlaceholder": "客戶名稱，如：陽春麵",
+        "aliasLabel": "客戶名稱",
+        "tenantLabel": "目標客戶",
+        "tenantPlaceholder": "請選擇目標客戶",
+        "tenantIdPlaceholder": "客戶 tenant ID",
+        "add": "新增映射",
+        "remove": "刪除該映射",
+        "empty": "暫無別名。新增後，聊天中可直接用名稱匹配客戶。",
+        "save": "儲存映射",
+        "reset": "恢復預設",
+        "resetTitle": "恢復為 config.json 預設（{{count}} 條）",
+        "sourceOverride": "頁面覆蓋",
+        "sourceDefault": "預設（config.json）"
+      },
       "permissions": {
         "rbacDescription": "啟用後校驗 Connector、Template、客戶、模型和訂閱範本授權。"
       },

@@ -960,6 +960,23 @@
         "new": "Langganan baru",
         "empty": "Belum ada langganan"
       },
+      "tenantAliases": {
+        "title": "Alias nama pelanggan",
+        "description": "Alias digunakan untuk menyebut pelanggan berdasarkan nama di chat dan menandai laporan. Seluruh tabel menimpa tenantMappings dari config.json dan langsung berlaku saat disimpan; pelanggan target harus ada di katalog Cube langsung.",
+        "aliasPlaceholder": "Nama pelanggan, mis. Mi Yangchun",
+        "aliasLabel": "Nama pelanggan",
+        "tenantLabel": "Pelanggan target",
+        "tenantPlaceholder": "Pilih pelanggan target",
+        "tenantIdPlaceholder": "tenant ID pelanggan",
+        "add": "Tambah alias",
+        "remove": "Hapus alias ini",
+        "empty": "Belum ada alias. Tambahkan satu untuk menyebut pelanggan berdasarkan nama di chat.",
+        "save": "Simpan alias",
+        "reset": "Kembalikan bawaan",
+        "resetTitle": "Kembalikan bawaan config.json ({{count}} entri)",
+        "sourceOverride": "Ambil alih halaman",
+        "sourceDefault": "Bawaan (config.json)"
+      },
       "permissions": {
         "rbacDescription": "Saat diaktifkan, memvalidasi hibah Connector, Template, pelanggan, model, dan templat langganan."
       },

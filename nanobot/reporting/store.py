@@ -270,6 +270,17 @@ class ReportStateStore:
                 (key, value, now),
             )
 
+    def clear_setting(self, key: str) -> bool:
+        """Remove one settings key; returns whether a row was deleted.
+
+        Deleting (rather than writing an empty value) lets the caller fall
+        back to the configured default — the same override/reset shape as
+        the feature flags.
+        """
+        with self._lock, self._connect() as db:
+            cursor = db.execute("DELETE FROM report_settings WHERE key = ?", (key,))
+        return cursor.rowcount > 0
+
     def onboarding_seen(self, channel: str, user_id: str, version: int) -> bool:
         with self._lock, self._connect() as db:
             row = db.execute(

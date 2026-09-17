@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from nanobot.agent.tools.magik_cube import MagikCubeToolConfig
+from nanobot.agent.tools import magik_cube as magik_cube_module
+from nanobot.agent.tools.magik_cube import (
+    TENANT_MAPPINGS_SETTING_KEY,
+    MagikCubeToolConfig,
+    effective_tenant_mappings,
+)
 from nanobot.agent.tools.report_center import ReportCenterToolConfig
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
@@ -33,6 +39,10 @@ def _config(tmp_path):
 
 def _query(**values: object) -> dict[str, list[str]]:
     return {key: [str(value)] for key, value in values.items()}
+
+
+def _structured_query(**values: object) -> dict[str, list[str]]:
+    return _query(**{reporting_api._STRUCTURED_VALUES_KEY: json.dumps(values)})
 
 
 def test_reporting_settings_fall_back_on_wrong_shape_startup_handle(
@@ -344,6 +354,101 @@ def test_reporting_settings_payload_aggregates_delivery_groups(
     # A solo subscription keeps the same shape with itself as the only
     # target so the editor code path stays uniform.
     assert [item["chat_id"] for item in by_id["sub-solo"]["delivery_targets"]] == ["chat-a"]
+
+
+def test_effective_tenant_mappings_override_and_fallback(monkeypatch, tmp_path) -> None:
+    """The store override wins whole-table; anything unreadable degrades."""
+    store = ReportStateStore(tmp_path / "reporting.db")
+    config = MagikCubeToolConfig(enable=True, tenant_mappings={"阳春面": "tenant-a"})
+
+    # No override: the configured default applies.
+    assert effective_tenant_mappings(config, store=store) == {"阳春面": "tenant-a"}
+    # A whole-table override wins, including an explicitly empty table
+    # ("no aliases") distinct from an absent key (config default).
+    store.set_setting(TENANT_MAPPINGS_SETTING_KEY, json.dumps({"豆汁": "tenant-b"}))
+    assert effective_tenant_mappings(config, store=store) == {"豆汁": "tenant-b"}
+    store.set_setting(TENANT_MAPPINGS_SETTING_KEY, json.dumps({}))
+    assert effective_tenant_mappings(config, store=store) == {}
+    # Corrupted or wrong-shaped overrides degrade to the configured default.
+    store.set_setting(TENANT_MAPPINGS_SETTING_KEY, "{not json")
+    assert effective_tenant_mappings(config, store=store) == {"阳春面": "tenant-a"}
+    store.set_setting(TENANT_MAPPINGS_SETTING_KEY, json.dumps(["not", "an", "object"]))
+    assert effective_tenant_mappings(config, store=store) == {"阳春面": "tenant-a"}
+    # Without any resolvable store handle the configuration is authoritative
+    # (the sentinel False marks "resolution failed" in the process cache).
+    monkeypatch.setattr(magik_cube_module, "_tenant_mappings_store", False)
+    assert effective_tenant_mappings(config) == {"阳春面": "tenant-a"}
+
+
+def test_tenant_mappings_actions_roundtrip(monkeypatch, tmp_path) -> None:
+    """Save enforces the live catalog when reachable; reset restores config."""
+    store = ReportStateStore(tmp_path / "reporting.db")
+    config = _config(tmp_path)
+    config.tools.magik_cube.tenant_mappings = {"阳春面": "tenant-a"}
+    monkeypatch.setattr(reporting_api, "load_config", lambda: config)
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *_a, **_k: store)
+
+    # Payload before any override: configured default is the effective table.
+    payload = reporting_api.reporting_settings_payload()
+    assert payload["tenant_mappings"]["source"] == "default"
+    assert payload["tenant_mappings"]["values"] == {"阳春面": "tenant-a"}
+
+    # A reachable live catalog rejects unknown tenant IDs (fail closed).
+    monkeypatch.setattr(
+        reporting_api,
+        "_magik_resolvers",
+        lambda _config: (None, None, [{"tenant_id": "tenant-a", "display_name": "阳春面"}]),
+    )
+    with pytest.raises(reporting_api.ReportingSettingsError, match="未知客户 ID") as unknown:
+        reporting_api.reporting_settings_action(
+            "tenant_mappings_update",
+            _structured_query(tenant_mappings={"豆汁": "tenant-b"}),
+        )
+    assert unknown.value.status == 400
+
+    # Empty aliases or tenant IDs never reach the catalog check.
+    with pytest.raises(reporting_api.ReportingSettingsError, match="不能为空"):
+        reporting_api.reporting_settings_action(
+            "tenant_mappings_update",
+            _structured_query(tenant_mappings={"": "tenant-a"}),
+        )
+
+    # Known IDs save: the override wins whole-table and echoes through the
+    # payload with the config default retained for the reset hint.
+    payload = reporting_api.reporting_settings_action(
+        "tenant_mappings_update",
+        _structured_query(tenant_mappings={"豆汁": "tenant-a"}),
+    )
+    assert payload["tenant_mappings"] == {
+        "values": {"豆汁": "tenant-a"},
+        "source": "override",
+        "default_values": {"阳春面": "tenant-a"},
+    }
+    assert payload["last_action"] == {
+        "ok": True,
+        "action": "tenant_mappings_update",
+        "catalog_checked": True,
+    }
+
+    # An unreachable catalog lets the save through with the flag surfaced
+    # (the runtime catalog-presence guard still protects matching).
+    def _unavailable(_config):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(reporting_api, "_magik_resolvers", _unavailable)
+    payload = reporting_api.reporting_settings_action(
+        "tenant_mappings_update",
+        _structured_query(tenant_mappings={"豆汁": "tenant-a"}),
+    )
+    assert payload["last_action"]["catalog_checked"] is False
+
+    # Reset restores the configured default; resetting again fails 404.
+    payload = reporting_api.reporting_settings_action("tenant_mappings_reset", _query())
+    assert payload["tenant_mappings"]["source"] == "default"
+    assert payload["tenant_mappings"]["values"] == {"阳春面": "tenant-a"}
+    with pytest.raises(reporting_api.ReportingSettingsError, match="没有页面覆盖") as missing:
+        reporting_api.reporting_settings_action("tenant_mappings_reset", _query())
+    assert missing.value.status == 404
 
 
 def test_subscription_disable_updates_cron_and_database(monkeypatch, tmp_path) -> None:

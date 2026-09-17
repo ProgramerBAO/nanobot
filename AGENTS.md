@@ -95,6 +95,14 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
 - Cube customer selectors must submit the exact `tenantId` returned by the live
   catalog. Configured aliases are display and matching aids only after their target
   ID is present in that catalog; aliases must never create synthetic customers.
+  Aliases resolve through `effective_tenant_mappings` (nanobot/agent/tools/
+  magik_cube.py): a `report_settings` store override (key `tenant_mappings`,
+  WebUI-managed since 2026-09-17) wins as a whole table over the config.json
+  `tenantMappings` default and applies without a restart; every consumer
+  (magik tools, Cube connector, report_center catalog) must read through that
+  single source, never `config.tenant_mappings` directly. The store import in
+  that helper stays function-level — a module-level import re-enters the
+  partially initialized reporting package.
 - A successful empty Cube response and a failed Cube query are different states.
   Only the former may be labeled as no business data; connection, auth, rate-limit,
   upstream, and tenant-resolution failures must remain explicit `missing`/`partial`.

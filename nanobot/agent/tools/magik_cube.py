@@ -469,6 +469,66 @@ def _match_catalog_tenants(
     return exact or partial
 
 
+# Reserved report_settings key holding the WebUI-managed alias mapping
+# (user-confirmed 2026-09-17): a whole-table JSON override of the configured
+# tenant_mappings default — the same override-wins pattern as the runtime
+# feature flags.
+TENANT_MAPPINGS_SETTING_KEY = "tenant_mappings"
+
+# Process-local cache of the resolved store so alias lookups do not re-run
+# load_config on every message or report run. The store import must stay
+# inside functions: this module is imported by the reporting package's
+# connector construction chain, and a module-level import would re-enter the
+# partially initialized reporting package (same cycle class as
+# utils/schedule_hours).
+_tenant_mappings_store: Any = None
+
+
+def _resolve_tenant_mappings_store() -> Any:
+    global _tenant_mappings_store
+    if _tenant_mappings_store is None:
+        try:
+            from nanobot.reporting.store import configured_report_state_store
+
+            _tenant_mappings_store = configured_report_state_store()
+        except Exception:
+            # Any resolution failure must degrade to the configured default
+            # instead of breaking chat parsing or report generation.
+            _tenant_mappings_store = False
+    return _tenant_mappings_store or None
+
+
+def effective_tenant_mappings(config: Any, *, store: Any = None) -> dict[str, str]:
+    """Resolve the effective alias -> tenant ID mapping.
+
+    A store override (report_settings key ``tenant_mappings``, JSON object)
+    wins as a whole table: saving an empty object means "no aliases", while
+    an absent key falls back to the configured ``tenant_mappings`` default.
+    Aliases stay display/matching aids only — a target still has to appear
+    in the live Cube catalog before it can match or render, so an override
+    can never create customers.
+    """
+
+    resolved = store if store is not None else _resolve_tenant_mappings_store()
+    if resolved is not None:
+        try:
+            raw = resolved.setting(TENANT_MAPPINGS_SETTING_KEY, "")
+        except Exception:
+            raw = ""
+        if raw:
+            try:
+                loaded = json.loads(raw)
+            except ValueError:
+                loaded = None
+            if isinstance(loaded, dict) and all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in loaded.items()
+            ):
+                return dict(loaded)
+    configured = getattr(config, "tenant_mappings", None)
+    return dict(configured) if isinstance(configured, dict) else {}
+
+
 @dataclass
 class _TenantMetrics:
     """一个租户的用量汇总，以及不可跨 Endpoint 聚合的 TPM 原始日点。"""
@@ -1163,7 +1223,7 @@ class MagikCubeReporter:
         alias = next(
             (
                 value
-                for value, tenant_id in self._config.tenant_mappings.items()
+                for value, tenant_id in effective_tenant_mappings(self._config).items()
                 if tenant_id == tenant.tenant_id
             ),
             "",
@@ -1962,7 +2022,9 @@ class MagikCubeReporter:
         """只在 Cube catalog 内按 ID、名称或 tags 匹配客户。"""
 
         catalog = await self._list_all_tenants()
-        return _match_catalog_tenants(catalog, query, self._config.tenant_mappings)
+        return _match_catalog_tenants(
+            catalog, query, effective_tenant_mappings(self._config)
+        )
 
     async def _require_single_tenant(self, query: str) -> _Tenant:
         matches = await self._list_matching_tenants(query)
@@ -3083,7 +3145,9 @@ class MagikCubeDailyReportTool(Tool):
                 display_name = next(
                     (
                         alias
-                        for alias, tenant_id in self._config.tenant_mappings.items()
+                        for alias, tenant_id in effective_tenant_mappings(
+                            self._config
+                        ).items()
                         if tenant_id == tenant.tenant_id
                     ),
                     tenant.name,
@@ -3128,7 +3192,7 @@ class MagikCubeDailyReportTool(Tool):
             raise ValueError(f"Cube 客户数量超过 {limit} 个，请改为指定客户范围")
         aliases_by_id = {
             tenant_id: alias
-            for alias, tenant_id in self._config.tenant_mappings.items()
+            for alias, tenant_id in effective_tenant_mappings(self._config).items()
         }
         return [
             {
@@ -3166,7 +3230,7 @@ class MagikCubeDailyReportTool(Tool):
             tenants = await reporter._list_all_tenants()
         aliases_by_id = {
             str(tenant_id): str(alias).strip()
-            for alias, tenant_id in self._config.tenant_mappings.items()
+            for alias, tenant_id in effective_tenant_mappings(self._config).items()
             if str(alias).strip() and str(tenant_id).strip()
         }
         folded = text.casefold()
@@ -3451,7 +3515,9 @@ class MagikCubeDailyReportTool(Tool):
         tenant_query = next(
             (
                 alias
-                for alias in sorted(self._config.tenant_mappings, key=len, reverse=True)
+                for alias in sorted(
+                    effective_tenant_mappings(self._config), key=len, reverse=True
+                )
                 if alias.casefold() in raw.casefold()
             ),
             "",
@@ -3661,7 +3727,9 @@ class MagikCubeDailyReportTool(Tool):
             return None
         tenant = _latest_tenant_from_history(
             history,
-            sorted(self._config.tenant_mappings, key=len, reverse=True),
+            sorted(
+                effective_tenant_mappings(self._config), key=len, reverse=True
+            ),
         )
         if not tenant:
             return None

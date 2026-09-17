@@ -8,6 +8,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.agent.tools.magik_cube import effective_tenant_mappings
 from nanobot.agent.tools.report_center.phrases import (
     _TenantMentionResolution,
 )
@@ -86,7 +87,9 @@ class _CatalogReconciliationMixin:
                 if part.strip()
             )
 
-        configured = getattr(self._cube_config, "tenant_mappings", {}) or {}
+        configured = effective_tenant_mappings(
+            self._cube_config, store=self._store
+        )
         candidates: list[tuple[str, str]] = []
         for item in catalog:
             tenant_id = str(item.get("tenant_id") or item.get("tenantId") or "").strip()
@@ -179,7 +182,9 @@ class _CatalogReconciliationMixin:
             )
         classifier_values = list(dict.fromkeys(classifier_values))
 
-        configured = getattr(self._cube_config, "tenant_mappings", {}) or {}
+        configured = effective_tenant_mappings(
+            self._cube_config, store=self._store
+        )
         configured_aliases = {
             str(alias).strip().casefold(): str(target).strip()
             for alias, target in configured.items()

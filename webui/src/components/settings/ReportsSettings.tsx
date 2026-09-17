@@ -628,6 +628,10 @@ export function ReportsSettings({ token }: { token: string }) {
   const { t } = useTranslation();
   const [payload, setPayload] = useState<ReportingSettingsPayload | null>(null);
   const [options, setOptions] = useState<ReportingSubscriptionOptions | null>(null);
+  // Alias -> tenant ID draft rows for the tenant-mapping editor; re-synced
+  // from the payload after every action so a save/reset round-trips the
+  // server's effective table.
+  const [tenantAliasDraft, setTenantAliasDraft] = useState<Array<{ alias: string; tenantId: string }>>([]);
   const [tab, setTab] = useState<"templates" | "subscriptions" | "permissions" | "flags">("templates");
   const [grant, setGrant] = useState(EMPTY_GRANT);
   const [subscription, setSubscription] = useState<GuidedFormState>(EMPTY_SUBSCRIPTION);
@@ -658,6 +662,18 @@ export function ReportsSettings({ token }: { token: string }) {
   }, [token]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Draft rows follow the payload's effective mapping; every action result
+  // refreshes the payload, so a completed save/reset re-syncs the editor.
+  const tenantMappingsView = payload?.tenant_mappings;
+  useEffect(() => {
+    setTenantAliasDraft(
+      Object.entries(tenantMappingsView?.values ?? {}).map(([alias, tenantId]) => ({
+        alias,
+        tenantId,
+      })),
+    );
+  }, [tenantMappingsView]);
 
   const loadOptions = useCallback(async () => {
     setOptionsLoading(true);
@@ -787,7 +803,7 @@ export function ReportsSettings({ token }: { token: string }) {
       {managementEnabled && !guidedUiEnabled ? <div className="border-l-2 border-amber-500 px-3 py-2 text-sm text-muted-foreground">{t("settings.reports.bannerGuidedOff", { defaultValue: "引导式订阅界面尚未启用；订阅管理暂不可编辑，旧兼容接口仍可用。" })}</div> : null}
 
       <div className="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label={t("settings.reports.tablistAria", { defaultValue: "报表管理视图" })}>
-        {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)} className={cn("inline-flex h-10 shrink-0 items-center gap-2 border-b-2 px-3 text-sm", tab === item.id ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}><item.icon className="h-4 w-4" />{item.label}</button>)}
+        {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => { setTab(item.id); if (item.id === "subscriptions") void loadOptions(); }} className={cn("inline-flex h-10 shrink-0 items-center gap-2 border-b-2 px-3 text-sm", tab === item.id ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}><item.icon className="h-4 w-4" />{item.label}</button>)}
       </div>
 
       {tab === "templates" ? <section className="space-y-3">
@@ -802,6 +818,80 @@ export function ReportsSettings({ token }: { token: string }) {
         <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">{t("settings.reports.subscriptions.title", { defaultValue: "订阅管理" })}</h3><p className="mt-1 text-xs text-muted-foreground">{t("settings.reports.subscriptions.description", { defaultValue: "每一行只操作本行订阅；编辑会同步更新 Cron 和数据库，停用、删除不会修改历史运行记录。" })}</p></div><Button size="sm" disabled={!managementEnabled || !guidedUiEnabled || action !== null} onClick={openCreate}><Plus className="h-4 w-4" />{t("settings.reports.subscriptions.new", { defaultValue: "新建订阅" })}</Button></div>
         {showEditor ? <SubscriptionEditor form={subscription} editing={editingId !== null} busy={action !== null} policies={policies} options={options} optionsLoading={optionsLoading} onChange={(patch) => setSubscription((current) => ({ ...current, ...patch }))} onCancel={closeEditor} onPreview={previewSubscription} onSubmit={submitSubscription} /> : null}
         <div className="divide-y border-y">{(payload?.subscriptions ?? []).map((item) => <SubscriptionRow key={item.subscription_id} item={item} policies={policies} busy={!managementEnabled || !guidedUiEnabled || action !== null} onEdit={openEdit} onAction={(next, values) => void run(next, values)} />)}{!payload?.subscriptions.length ? <div className="py-8 text-center text-sm text-muted-foreground">{t("settings.reports.subscriptions.empty", { defaultValue: "暂无订阅" })}</div> : null}</div>
+
+        {tenantMappingsView ? (
+          <div className="space-y-3 border-t pt-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold">{t("settings.reports.tenantAliases.title", { defaultValue: "客户名称映射" })}</h3>
+                <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{t("settings.reports.tenantAliases.description", { defaultValue: "别名用于在聊天中按名称匹配客户与报表显示中文名。整表覆盖 config.json 的 tenantMappings，保存立即生效；目标客户必须存在于 Cube 实时目录。" })}</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={cn("rounded-full border px-2 py-0.5 text-xs", tenantMappingsView.source === "override" ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300" : "border-border text-muted-foreground")}>{tenantMappingsView.source === "override" ? t("settings.reports.tenantAliases.sourceOverride", { defaultValue: "页面覆盖" }) : t("settings.reports.tenantAliases.sourceDefault", { defaultValue: "默认（config.json）" })}</span>
+                <Button size="sm" variant="outline" disabled={action !== null} onClick={() => setTenantAliasDraft((current) => [...current, { alias: "", tenantId: "" }])}><Plus className="h-4 w-4" />{t("settings.reports.tenantAliases.add", { defaultValue: "添加映射" })}</Button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {tenantAliasDraft.map((row, index) => (
+                <div key={index} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] sm:items-center">
+                  <Input
+                    value={row.alias}
+                    onChange={(event) => setTenantAliasDraft((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, alias: event.target.value } : item))}
+                    placeholder={t("settings.reports.tenantAliases.aliasPlaceholder", { defaultValue: "客户名称，如：阳春面" })}
+                    disabled={action !== null}
+                    aria-label={t("settings.reports.tenantAliases.aliasLabel", { defaultValue: "客户名称" })}
+                  />
+                  {options?.tenants.length ? (
+                    <select
+                      className={SELECT_CLASS}
+                      value={row.tenantId}
+                      onChange={(event) => setTenantAliasDraft((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, tenantId: event.target.value } : item))}
+                      disabled={action !== null}
+                      aria-label={t("settings.reports.tenantAliases.tenantLabel", { defaultValue: "目标客户" })}
+                    >
+                      <option value="">{t("settings.reports.tenantAliases.tenantPlaceholder", { defaultValue: "请选择目标客户" })}</option>
+                      {options.tenants.map((tenant) => <option key={tenant.tenant_id} value={tenant.tenant_id}>{tenant.display_name}（{tenant.tenant_id}）</option>)}
+                    </select>
+                  ) : (
+                    <Input
+                      value={row.tenantId}
+                      onChange={(event) => setTenantAliasDraft((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, tenantId: event.target.value } : item))}
+                      placeholder={t("settings.reports.tenantAliases.tenantIdPlaceholder", { defaultValue: "客户 tenant ID" })}
+                      disabled={action !== null}
+                      aria-label={t("settings.reports.tenantAliases.tenantLabel", { defaultValue: "目标客户" })}
+                    />
+                  )}
+                  <Button size="icon" variant="ghost" disabled={action !== null} title={t("settings.reports.tenantAliases.remove", { defaultValue: "删除该映射" })} aria-label={t("settings.reports.tenantAliases.remove", { defaultValue: "删除该映射" })} onClick={() => setTenantAliasDraft((current) => current.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                </div>
+              ))}
+              {!tenantAliasDraft.length ? <p className="text-xs text-muted-foreground">{t("settings.reports.tenantAliases.empty", { defaultValue: "暂无别名。添加后，聊天中可直接用名称匹配客户。" })}</p> : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                disabled={action !== null || tenantAliasDraft.some((row) => !row.alias.trim() || !row.tenantId.trim())}
+                onClick={() => {
+                  const mapping: Record<string, string> = {};
+                  for (const row of tenantAliasDraft) {
+                    mapping[row.alias.trim()] = row.tenantId.trim();
+                  }
+                  void run("tenant_mappings_update", { tenant_mappings: mapping });
+                }}
+              >
+                {t("settings.reports.tenantAliases.save", { defaultValue: "保存映射" })}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={action !== null || tenantMappingsView.source !== "override"}
+                title={t("settings.reports.tenantAliases.resetTitle", { defaultValue: `恢复为 config.json 默认（${Object.keys(tenantMappingsView.default_values).length} 条）`, count: Object.keys(tenantMappingsView.default_values).length })}
+                onClick={() => void run("tenant_mappings_reset", {})}
+              >
+                <RotateCcw className="h-4 w-4" />{t("settings.reports.tenantAliases.reset", { defaultValue: "恢复默认" })}
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </section> : null}
 
       {tab === "permissions" ? <section className="space-y-5">

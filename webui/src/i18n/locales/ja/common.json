@@ -960,6 +960,23 @@
         "new": "サブスクリプションを新規作成",
         "empty": "サブスクリプションはまだありません"
       },
+      "tenantAliases": {
+        "title": "顧客名前エイリアス",
+        "description": "エイリアスはチャットでの名称による顧客マッチングとレポート表示名に使われます。config.json の tenantMappings を全体として上書きし、保存後すぐに有効になります。対象顧客は Cube のリアルタイムカタログに存在する必要があります。",
+        "aliasPlaceholder": "顧客名（例：陽春麺）",
+        "aliasLabel": "顧客名",
+        "tenantLabel": "対象顧客",
+        "tenantPlaceholder": "対象顧客を選択してください",
+        "tenantIdPlaceholder": "顧客 tenant ID",
+        "add": "マッピングを追加",
+        "remove": "このマッピングを削除",
+        "empty": "エイリアスはまだありません。追加するとチャットで名称により顧客を指定できます。",
+        "save": "マッピングを保存",
+        "reset": "デフォルトに戻す",
+        "resetTitle": "config.json のデフォルトに戻す（{{count}} 件）",
+        "sourceOverride": "ページ上書き",
+        "sourceDefault": "デフォルト（config.json）"
+      },
       "permissions": {
         "rbacDescription": "有効にすると、Connector、Template、顧客、モデル、サブスクリプションテンプレートの権限を検証します。"
       },

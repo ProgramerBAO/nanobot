@@ -960,6 +960,23 @@
         "new": "Nouvel abonnement",
         "empty": "Aucun abonnement pour le moment"
       },
+      "tenantAliases": {
+        "title": "Alias de noms de clients",
+        "description": "Les alias permettent de désigner des clients par leur nom dans le chat et d'étiqueter les rapports. La table entière remplace tenantMappings de config.json et s'applique dès l'enregistrement ; les clients doivent exister dans le catalogue Cube en direct.",
+        "aliasPlaceholder": "Nom du client, ex. Nouilles Yangchun",
+        "aliasLabel": "Nom du client",
+        "tenantLabel": "Client cible",
+        "tenantPlaceholder": "Sélectionnez un client cible",
+        "tenantIdPlaceholder": "ID de tenant du client",
+        "add": "Ajouter un alias",
+        "remove": "Supprimer cet alias",
+        "empty": "Aucun alias pour le moment. Ajoutez-en un pour désigner des clients par nom dans le chat.",
+        "save": "Enregistrer les alias",
+        "reset": "Rétablir par défaut",
+        "resetTitle": "Rétablir la valeur de config.json ({{count}} entrées)",
+        "sourceOverride": "Remplacement page",
+        "sourceDefault": "Par défaut (config.json)"
+      },
       "permissions": {
         "rbacDescription": "Une fois activé, valide les autorisations Connector, Template, clients, modèles et modèles d'abonnement."
       },

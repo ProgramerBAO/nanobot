@@ -960,6 +960,23 @@
         "new": "New subscription",
         "empty": "No subscriptions yet"
       },
+      "tenantAliases": {
+        "title": "Customer name aliases",
+        "description": "Aliases match customers by name in chat and label reports with friendly names. The whole table overrides config.json tenantMappings and applies immediately; target customers must exist in the live Cube catalog.",
+        "aliasPlaceholder": "Customer name, e.g. Acme Noodles",
+        "aliasLabel": "Customer name",
+        "tenantLabel": "Target customer",
+        "tenantPlaceholder": "Select a target customer",
+        "tenantIdPlaceholder": "Customer tenant ID",
+        "add": "Add alias",
+        "remove": "Remove this alias",
+        "empty": "No aliases yet. Add one to match customers by name in chat.",
+        "save": "Save aliases",
+        "reset": "Reset to default",
+        "resetTitle": "Restore the config.json default ({{count}} entries)",
+        "sourceOverride": "Page override",
+        "sourceDefault": "Default (config.json)"
+      },
       "permissions": {
         "rbacDescription": "When enabled, validates Connector, Template, customer, model, and subscription-template grants."
       },

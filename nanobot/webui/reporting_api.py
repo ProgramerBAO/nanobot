@@ -12,6 +12,10 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.agent.tools.magik_cube import (
+    TENANT_MAPPINGS_SETTING_KEY,
+    effective_tenant_mappings,
+)
 from nanobot.config.loader import load_config, resolve_config_env_vars
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.service import CronService
@@ -140,7 +144,12 @@ def _structured_values(query: QueryParams) -> dict[str, Any]:
     if not isinstance(values, dict):
         raise ReportingSettingsError("structured reporting values must be an object")
     unknown = set(values) - _GUIDED_FORM_KEYS - {
-        "subscription_id", "revision", "expected_revision"
+        "subscription_id",
+        "revision",
+        "expected_revision",
+        # Whole-object tenant alias mapping for the tenant_mappings_update
+        # action (2026-09-17); inert for guided subscription forms.
+        "tenant_mappings",
     }
     if unknown:
         raise ReportingSettingsError("structured reporting values contain unsupported fields")
@@ -491,6 +500,47 @@ def _pagination_value(
     return min(value, maximum)
 
 
+def _tenant_mappings_view(config: Any, store: Any) -> dict[str, Any]:
+    """Bounded view of the effective alias mapping for the settings page.
+
+    The store override wins as a whole table (user-confirmed 2026-09-17);
+    ``default_values`` shows what a reset would return to.
+    """
+
+    cube_config = getattr(getattr(config, "tools", None), "magik_cube", None)
+    configured = getattr(cube_config, "tenant_mappings", None)
+    return {
+        "values": effective_tenant_mappings(cube_config, store=store),
+        "source": (
+            "override"
+            if store.setting(TENANT_MAPPINGS_SETTING_KEY, "")
+            else "default"
+        ),
+        "default_values": dict(configured) if isinstance(configured, dict) else {},
+    }
+
+
+def _validated_tenant_mappings(value: Any) -> dict[str, str]:
+    """Validate the whole alias -> tenant ID mapping from the settings form."""
+
+    if not isinstance(value, dict):
+        raise ReportingSettingsError("tenant_mappings must be an object")
+    if len(value) > 200:
+        raise ReportingSettingsError("客户名称映射最多 200 条")
+    mapping: dict[str, str] = {}
+    for alias, tenant_id in value.items():
+        alias_text = str(alias or "").strip()
+        tenant_text = str(tenant_id or "").strip()
+        if not alias_text or not tenant_text:
+            raise ReportingSettingsError("客户名称与客户 ID 不能为空")
+        if len(alias_text) > 128 or len(tenant_text) > 128:
+            raise ReportingSettingsError("客户名称与客户 ID 最长 128 字符")
+        if any(ord(char) < 32 for char in f"{alias_text}{tenant_text}"):
+            raise ReportingSettingsError("客户名称与客户 ID 不能包含控制字符")
+        mapping[alias_text] = tenant_text
+    return mapping
+
+
 def reporting_settings_payload(
     query: QueryParams | None = None,
     *,
@@ -602,6 +652,8 @@ def reporting_settings_payload(
         payloads = [_subscription_payload(item) for item in items]
         _attach_delivery_groups(items, payloads)
         payload["subscriptions"] = payloads
+        # Alias mapping view for the settings page (management only).
+        payload["tenant_mappings"] = _tenant_mappings_view(config, store)
     if channel and user_id:
         payload["grants"] = store.grants(channel, user_id)
         payload["recent_runs"] = store.recent_runs(channel, user_id, limit=10)
@@ -675,6 +727,75 @@ def reporting_settings_action(
                 )
         payload = reporting_settings_payload(query, startup_config=startup_config)
         payload["last_action"] = {"ok": True, "action": action, "flag": flag_key}
+        return payload
+    if action in {"tenant_mappings_update", "tenant_mappings_reset"}:
+        if not management_enabled:
+            raise ReportingSettingsError("report management is disabled", status=404)
+        catalog_checked = False
+        if action == "tenant_mappings_reset":
+            # Removing the override restores the configured tenantMappings
+            # default without touching config.json.
+            if not store.clear_setting(TENANT_MAPPINGS_SETTING_KEY):
+                raise ReportingSettingsError(
+                    "客户名称映射没有页面覆盖可恢复", status=404
+                )
+            store.record_admin_audit(
+                action="tenant_mappings_reset",
+                target_type="report_setting",
+                target_id=TENANT_MAPPINGS_SETTING_KEY,
+                before_summary={},
+                after_summary={"reset": True},
+                updated_by="webui_admin",
+            )
+        else:
+            mapping = _validated_tenant_mappings(
+                _structured_values(query).get("tenant_mappings")
+            )
+            # Catalog-available enforcement (user-confirmed 2026-09-17): a
+            # reachable live catalog rejects unknown tenant IDs; an
+            # unavailable one lets the save through (the runtime
+            # catalog-presence guard still protects matching) and the
+            # response flags that no check ran.
+            catalog_checked = False
+            try:
+                _tenant_resolver, _model_resolver, catalog = _magik_resolvers(config)
+                catalog_ids = {
+                    str(item.get("tenant_id") or item.get("tenantId") or "").strip()
+                    for item in catalog
+                    if isinstance(item, dict)
+                }
+            except Exception:
+                catalog_ids = set()
+            if catalog_ids:
+                catalog_checked = True
+                unknown = sorted(
+                    tenant_id
+                    for tenant_id in set(mapping.values())
+                    if tenant_id not in catalog_ids
+                )
+                if unknown:
+                    shown = "、".join(unknown[:5]) + ("…" if len(unknown) > 5 else "")
+                    raise ReportingSettingsError(f"未知客户 ID：{shown}")
+            store.set_setting(
+                TENANT_MAPPINGS_SETTING_KEY,
+                json.dumps(mapping, ensure_ascii=False, sort_keys=True),
+            )
+            store.record_admin_audit(
+                action="tenant_mappings_update",
+                target_type="report_setting",
+                target_id=TENANT_MAPPINGS_SETTING_KEY,
+                before_summary={},
+                after_summary={"count": len(mapping), "catalog_checked": catalog_checked},
+                updated_by="webui_admin",
+            )
+        payload = reporting_settings_payload(query, startup_config=startup_config)
+        payload["last_action"] = {
+            "ok": True,
+            "action": action,
+            # Surfaced so the UI can warn when the tenant-ID check could
+            # not run (catalog unavailable at save time).
+            "catalog_checked": action != "tenant_mappings_reset" and catalog_checked,
+        }
         return payload
     if action in {"subscription_options", "options"}:
         if not management_enabled:

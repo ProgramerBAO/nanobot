@@ -22,6 +22,7 @@ from nanobot.agent.tools.magik_cube import (
     _as_optional_int,
     _match_catalog_tenants,
     _pick,
+    effective_tenant_mappings,
 )
 from nanobot.reporting.contracts import (
     MetricDefinition,
@@ -403,7 +404,9 @@ class CubeConnector(ConnectorPlugin):
         aliases = sorted(
             (
                 str(alias).strip()
-                for alias, tenant_id in self._config.tenant_mappings.items()
+                for alias, tenant_id in effective_tenant_mappings(
+                    self._config
+                ).items()
                 if str(tenant_id).strip() == tenant.tenant_id and str(alias).strip()
             ),
             key=str.casefold,
@@ -1887,7 +1890,9 @@ class CubeConnector(ConnectorPlugin):
         if requested_many:
             resolved: list[_CubeTenant] = []
             for value in requested_many:
-                matches = _match_catalog_tenants(tenants, value, self._config.tenant_mappings)
+                matches = _match_catalog_tenants(
+                    tenants, value, effective_tenant_mappings(self._config)
+                )
                 if not matches:
                     raise MagikCubeTenantResolutionError(
                         f"Cube tenant was not found: {value}",
@@ -1907,7 +1912,7 @@ class CubeConnector(ConnectorPlugin):
         matches = _match_catalog_tenants(
             tenants,
             requested,
-            self._config.tenant_mappings,
+            effective_tenant_mappings(self._config),
         )
         if not matches:
             raise MagikCubeTenantResolutionError(

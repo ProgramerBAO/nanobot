@@ -16,6 +16,7 @@ from nanobot.agent.tools.magik_cube import (
     _PASSWORD_LOGIN_PATH,
     MagikCubeApiError,
     MagikCubeToolConfig,
+    effective_tenant_mappings,
 )
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -464,7 +465,7 @@ class MagikCubeAdminApiTool(Tool):
         tenant_id = next(
             (
                 value
-                for alias, value in self._config.tenant_mappings.items()
+                for alias, value in effective_tenant_mappings(self._config).items()
                 if alias.strip().casefold() == query.casefold()
             ),
             "",

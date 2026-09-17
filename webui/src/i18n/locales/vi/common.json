@@ -960,6 +960,23 @@
         "new": "Đăng ký mới",
         "empty": "Chưa có đăng ký"
       },
+      "tenantAliases": {
+        "title": "Biệt danh tên khách hàng",
+        "description": "Biệt danh dùng để chỉ định khách hàng theo tên trong chat và hiển thị tên thân thiện trên báo cáo. Toàn bộ bảng ghi đè tenantMappings của config.json và có hiệu lực ngay khi lưu; khách hàng mục tiêu phải tồn tại trong catalog Cube trực tiếp.",
+        "aliasPlaceholder": "Tên khách hàng, ví dụ: Mì Dương Xuân",
+        "aliasLabel": "Tên khách hàng",
+        "tenantLabel": "Khách hàng mục tiêu",
+        "tenantPlaceholder": "Chọn khách hàng mục tiêu",
+        "tenantIdPlaceholder": "tenant ID của khách hàng",
+        "add": "Thêm biệt danh",
+        "remove": "Xóa biệt danh này",
+        "empty": "Chưa có biệt danh. Thêm một biệt danh để chỉ định khách hàng theo tên trong chat.",
+        "save": "Lưu biệt danh",
+        "reset": "Khôi phục mặc định",
+        "resetTitle": "Khôi phục mặc định của config.json ({{count}} mục)",
+        "sourceOverride": "Ghi đè trang",
+        "sourceDefault": "Mặc định (config.json)"
+      },
       "permissions": {
         "rbacDescription": "Khi bật, kiểm tra quyền Connector, Template, khách hàng, mô hình và mẫu đăng ký."
       },

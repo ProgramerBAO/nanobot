@@ -144,4 +144,35 @@ describe("ReportsSettings delivery groups", () => {
     const targetsInput = await screen.findByLabelText(/Delivery chats/);
     expect((targetsInput as HTMLInputElement).value).toBe("chat-a、chat-b");
   });
+
+  it("edits tenant name aliases and saves the whole table", async () => {
+    const user = userEvent.setup();
+    const payload = payloadWithFlags();
+    payload.tenant_mappings = {
+      values: { "阳春面": "tenant-a" },
+      source: "default",
+      default_values: { "阳春面": "tenant-a" },
+    };
+    vi.mocked(fetchReportingSettings).mockResolvedValue(payload);
+    vi.mocked(runReportingSettingsAction).mockResolvedValue(payload);
+
+    render(<ReportsSettings token="token" />);
+    await user.click(await screen.findByRole("tab", { name: /Subscriptions/ }));
+
+    // The configured default renders with its source badge and one row.
+    expect(await screen.findByText("Customer name aliases")).toBeInTheDocument();
+    expect(screen.getByText("Default (config.json)")).toBeInTheDocument();
+    const aliasInput = screen.getByLabelText("Customer name");
+    expect((aliasInput as HTMLInputElement).value).toBe("阳春面");
+
+    // Saving posts the whole mapping through the update action.
+    await user.click(screen.getByRole("button", { name: /Save aliases/ }));
+    await waitFor(() =>
+      expect(runReportingSettingsAction).toHaveBeenCalledWith(
+        "token",
+        "tenant_mappings_update",
+        { tenant_mappings: { "阳春面": "tenant-a" } },
+      ),
+    );
+  });
 });
