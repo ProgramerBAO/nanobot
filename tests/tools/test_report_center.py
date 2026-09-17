@@ -2192,10 +2192,15 @@ async def test_multi_scope_all_models_expands_live_catalog_before_report_runner(
 
 
 @pytest.mark.asyncio
-async def test_multi_scope_all_models_stops_when_live_catalog_is_empty(
+async def test_multi_scope_all_models_empty_catalog_renders_no_usage_notice(
     monkeypatch, tmp_path
 ) -> None:
-    """An empty catalog is unavailable data, not a successful zero-model report."""
+    """An all-idle window is successful empty data: reminder card, no error (2026-09-17).
+
+    Previously the empty active-model discovery raised "请检查客户模型配置"
+    as an error; a tenant with configured models but no usage in the window
+    is now an informational no-usage notice instead.
+    """
 
     store = ReportStateStore(tmp_path / "state.db")
     monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
@@ -2246,8 +2251,236 @@ async def test_multi_scope_all_models_stops_when_live_catalog_is_empty(
             ],
         )
 
-    assert result.is_error is True
-    assert "实时模型目录未返回可用模型" in str(result)
+    assert result.is_error is False
+    ui = result.metadata[OUTBOUND_META_AGENT_UI]
+    assert ui["title"] == "多客户多模型日报简报（本期无用量）"
+    assert ui["quality"] == "complete"
+    content = ui["blocks"][0]["data"]["content"]
+    assert "tenant-a" in content
+    assert "没有可用量的模型" in content
+    assert "自动恢复完整报表" in content
+    # The successful empty-data state never queries Cube and never records a
+    # failed delivery.
+    query.assert_not_awaited()
+
+
+class _CatalogMagik:
+    """Test double exposing the direct active-model discovery entrypoint.
+
+    The real method lives on the concrete Cube tool's class, so the catalog
+    loader's ``type(...)`` native check only passes for a real method — an
+    AsyncMock attribute would fall through to the legacy selector path.
+    """
+
+    def __init__(self, active: dict[str, list[str]]) -> None:
+        self._active = active
+
+    async def list_active_models_for_tenants(
+        self, tenant_ids, *, start_date, end_date
+    ):
+        return {tenant_id: list(self._active.get(tenant_id, [])) for tenant_id in tenant_ids}
+
+
+def _hourly_all_model_subscription(subscription_id: str = "sub-hourly-idle") -> ReportSubscription:
+    now = "2026-09-17T00:00:00+00:00"
+    return ReportSubscription(
+        subscription_id=subscription_id,
+        channel="feishu",
+        chat_id="chat-a",
+        user_id="ou-a",
+        connector_id="magik_cube",
+        template_id="usage_customer_model_hourly_tpm",
+        template_version="2.1",
+        schedule="5 * * * *",
+        timezone="Asia/Shanghai",
+        report_params={
+            "report_family": "usage",
+            "report_template": "brief",
+            "report_variant": "customer_model_hourly_tpm",
+            "report_template_id": "usage_customer_model_hourly_tpm",
+            "subscription_period": "recent1h",
+            "tenant_scope": "selected",
+            "tenants": ["tenant-a", "tenant-b"],
+            "model_scope": "all",
+            "models": [],
+            "report_selections": [
+                {"tenant_query": "tenant-a", "model_scope": "all", "models": []},
+                {"tenant_query": "tenant-b", "model_scope": "all", "models": []},
+            ],
+        },
+        cron_job_id="job-hourly-idle",
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_all_idle_hourly_subscription_delivers_no_usage_notice(
+    monkeypatch, tmp_path
+) -> None:
+    """A fully idle scheduled window delivers a reminder card, not an error."""
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(),
+        _FakeCron(),
+        _CatalogMagik(active={}),
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            # Fixture-only config; no real credential is embedded.
+            access_token="",
+        ),
+    )
+    query = AsyncMock()
+    monkeypatch.setattr(CubeConnector, "query", query)
+
+    result = await tool._run_cube_subscription(
+        _hourly_all_model_subscription(),
+        run_id="run-idle",
+        idempotency_key="delivery-idle",
+    )
+
+    assert result.is_error is False
+    ui = result.metadata[OUTBOUND_META_AGENT_UI]
+    assert ui["title"] == "多客户多模型小时 TPM 报告（本期无用量）"
+    assert ui["quality"] == "complete"
+    content = ui["blocks"][0]["data"]["content"]
+    assert "tenant-a" in content
+    assert "tenant-b" in content
+    assert "自动恢复完整报表" in content
+    # The notice rides the normal delivery chain (idempotency metadata) and
+    # never queries Cube or records a failed run.
+    assert result.metadata[OUTBOUND_META_REPORT_DELIVERY]["idempotency_key"] == (
+        "delivery-idle"
+    )
+    query.assert_not_awaited()
+    runs = store.recent_runs("feishu", "ou-a")
+    assert runs and runs[0]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_partially_idle_hourly_subscription_annotates_no_usage_tenants(
+    monkeypatch, tmp_path
+) -> None:
+    """A partially idle window keeps every requested customer visible."""
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(),
+        _FakeCron(),
+        _CatalogMagik(active={"tenant-a": ["Kimi-K3"]}),
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            # Fixture-only config; no real credential is embedded.
+            access_token="",
+        ),
+    )
+
+    async def fake_query(_connector, _query):
+        return ReportDataset(
+            rows=(
+                {
+                    "metric": "ai.tpm.peak",
+                    "value": 900.0,
+                    "model": "Kimi-K3",
+                    "endpoint": "ep-k3",
+                    "tenant_id": "tenant-a",
+                },
+                {
+                    "metric": "ai.tpm.avg",
+                    "value": 600.0,
+                    "model": "Kimi-K3",
+                    "endpoint": "ep-k3",
+                    "tenant_id": "tenant-a",
+                },
+                {
+                    "metric": "ai.machine.count",
+                    "value": 3.0,
+                    "model": "Kimi-K3",
+                    "endpoint": "",
+                    "tenant_id": "",
+                    "metric_scope": "platform_model",
+                },
+            ),
+            quality="complete",
+            source="magik_cube",
+            metadata={
+                "tenant_models": {"tenant-a": ["Kimi-K3"]},
+                "tenant_scope": "selected",
+                "tenant_names": {},
+                "window_start": "2026-09-17T10:00:00+08:00",
+                "window_end": "2026-09-17T11:00:00+08:00",
+            },
+        )
+
+    monkeypatch.setattr(CubeConnector, "query", fake_query)
+
+    result = await tool._run_cube_subscription(
+        _hourly_all_model_subscription(),
+        run_id="run-partial-idle",
+        idempotency_key="delivery-partial-idle",
+    )
+
+    assert result.is_error is False
+    ui = result.metadata[OUTBOUND_META_AGENT_UI]
+    # The report renders for the active tenant...
+    assert any(block["kind"] == "table" for block in ui["blocks"])
+    # ...and the idle tenant stays explicitly listed instead of silently
+    # disappearing (the one-customer-loss failure class).
+    notes = [
+        block for block in ui["blocks"]
+        if block["kind"] == "note" and "本期无用量客户" in str(block["data"].get("content"))
+    ]
+    assert notes and "tenant-b" in notes[-1]["data"]["content"]
+    assert "本期无用量客户：tenant-b" in str(result)
+
+
+@pytest.mark.asyncio
+async def test_interactive_hourly_single_idle_tenant_renders_notice(
+    monkeypatch, tmp_path
+) -> None:
+    """“查看糖番茄上一小时TPM” with an idle tenant: reminder card, not error."""
+    store = ReportStateStore(tmp_path / "state.db")
+    monkeypatch.setattr(report_center_module, "get_report_state_store", lambda **_kwargs: store)
+    tool = ReportCenterTool(
+        ReportCenterToolConfig(),
+        _FakeCron(),
+        _CatalogMagik(active={}),
+        MagikCubeToolConfig(
+            enable=True,
+            base_url="https://cube.example.internal",
+            # Fixture-only config; no real credential is embedded.
+            access_token="",
+        ),
+    )
+    query = AsyncMock()
+    monkeypatch.setattr(CubeConnector, "query", query)
+
+    with request_context(
+        RequestContext(
+            channel="feishu",
+            chat_id="chat-a",
+            sender_id="ou_a",
+            session_key="feishu:chat-a",
+        )
+    ):
+        result = await tool.execute(
+            action="customer_model_hourly_tpm",
+            period="recent1h",
+            tenants=["tenant-idle"],
+            model_scope="all",
+            interactive=False,
+        )
+
+    assert result.is_error is False
+    ui = result.metadata[OUTBOUND_META_AGENT_UI]
+    assert ui["title"] == "多客户多模型小时 TPM 报告（本期无用量）"
+    content = ui["blocks"][0]["data"]["content"]
+    assert "tenant-idle" in content
+    assert "没有可用量的模型" in content
     query.assert_not_awaited()
 
 

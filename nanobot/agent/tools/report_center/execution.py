@@ -24,6 +24,7 @@ from nanobot.reporting.provider_quality import provider_quality_selector_documen
 from nanobot.reporting.schedules import (
     BRIEF_PERIOD_TEMPLATES,
     PERIOD_TEMPLATES,
+    report_template_label,
 )
 
 
@@ -690,7 +691,7 @@ class _ReportExecutionMixin:
             return ToolResult.error("多客户多模型简报需要完整的日报或自然周周期")
         if all_model_tenants:
             try:
-                catalog_models = await self._load_tenant_model_catalog(
+                catalog_models, idle_tenants = await self._load_tenant_model_catalog(
                     all_model_tenants,
                     start_date=target_start,
                     end_date=target_end,
@@ -699,9 +700,24 @@ class _ReportExecutionMixin:
                 return ToolResult.error(
                     f"{exc}。"
                 )
-            tenant_models.update(
-                {tenant_id: catalog_models[tenant_id] for tenant_id in all_model_tenants}
-            )
+            tenant_models.update(catalog_models)
+            if idle_tenants and not tenant_models:
+                # Every discovered tenant is idle this window: the
+                # successful empty-data state renders a reminder card
+                # instead of an error (user-confirmed 2026-09-17).
+                return self._result(
+                    self._no_usage_notice_document(
+                        title=report_template_label(
+                            "usage_customer_model_daily_brief"
+                            if period == "day"
+                            else "usage_customer_model_weekly_brief"
+                        ),
+                        window_text=f"{target_start} 至 {target_end}",
+                        tenant_labels=list(idle_tenants),
+                    )
+                )
+        else:
+            idle_tenants = []
         template_id = (
             "usage_customer_model_daily_brief"
             if period == "day"
@@ -778,10 +794,11 @@ class _ReportExecutionMixin:
             return ToolResult.error("当前账号没有执行多客户多模型简报的权限，请联系管理员授权。")
         except (LookupError, ValueError) as exc:
             return ToolResult.error(f"Error: multi-customer model brief unavailable: {exc}")
+        document = self._annotate_no_usage_tenants(outcome.document, list(idle_tenants))
         return self._result(
-            outcome.document,
+            document,
             report_reference=self._report_reference_payload(
-                intent, document=outcome.document, run_id=trace_id
+                intent, document=document, run_id=trace_id
             ),
         )
 
@@ -879,6 +896,9 @@ class _ReportExecutionMixin:
             return ToolResult.error("最多支持 20 个客户，请缩小范围")
         selected_models = self._canonical_cube_models(tuple(models))
         discovered: dict[str, list[str]] = {}
+        # Tenants whose active-model discovery came back empty; rendered as
+        # an explicit no-usage notice (2026-09-17), never silently dropped.
+        idle_tenant_ids: list[str] = []
         if selections:
             # Selector submissions already carry catalog-validated scope:
             # all-scope tenants get live active discovery for the hour's date,
@@ -896,13 +916,13 @@ class _ReportExecutionMixin:
                 now = datetime.now(ZoneInfo(self._config.timezone))
                 previous_hour = self._previous_complete_hour(now)
                 try:
-                    discovered.update(
-                        await self._load_tenant_model_catalog(
-                            discovery_tenants,
-                            start_date=previous_hour.date(),
-                            end_date=previous_hour.date(),
-                        )
+                    catalog_models, idle_found = await self._load_tenant_model_catalog(
+                        discovery_tenants,
+                        start_date=previous_hour.date(),
+                        end_date=previous_hour.date(),
                     )
+                    discovered.update(catalog_models)
+                    idle_tenant_ids = idle_found
                 except (LookupError, ValueError) as exc:
                     return ToolResult.error(str(exc))
             for item in selections:
@@ -951,7 +971,7 @@ class _ReportExecutionMixin:
             current_hour = now.replace(minute=0, second=0, microsecond=0)
             previous_hour = current_hour - timedelta(hours=1)
             try:
-                discovered = await self._load_tenant_model_catalog(
+                discovered, idle_tenant_ids = await self._load_tenant_model_catalog(
                     raw_tenants,
                     start_date=previous_hour.date(),
                     end_date=previous_hour.date(),
@@ -961,7 +981,34 @@ class _ReportExecutionMixin:
             selected_models = self._canonical_cube_models(
                 tuple(model for values in discovered.values() for model in values)
             )
+        tenant_names = {
+            str(item.get("tenant_id") or ""): str(
+                item.get("display_name") or item.get("tenant_name") or item.get("name") or item.get("tenant_id") or ""
+            )
+            for item in (resolved if callable(resolver) else [])
+            if isinstance(item, dict) and str(item.get("tenant_id") or "").strip()
+        }
         if not selected_models:
+            if idle_tenant_ids:
+                # Every tenant is idle this window: the successful
+                # empty-data state renders a reminder card instead of an
+                # error (user-confirmed 2026-09-17).
+                now = datetime.now(ZoneInfo(self._config.timezone))
+                previous_hour = self._previous_complete_hour(now)
+                window_text = (
+                    f"{previous_hour:%m-%d %H:00}–"
+                    f"{previous_hour + timedelta(hours=1):%H:00}"
+                )
+                return self._result(
+                    self._no_usage_notice_document(
+                        title=report_template_label("usage_customer_model_hourly_tpm"),
+                        window_text=window_text,
+                        tenant_labels=[
+                            tenant_names.get(tenant_id, tenant_id)
+                            for tenant_id in idle_tenant_ids
+                        ],
+                    )
+                )
             return ToolResult.error("所选客户当前没有可查询的有用量模型")
         if len(selected_models) > 20:
             return ToolResult.error("最多支持 20 个模型，请缩小范围")
@@ -987,13 +1034,6 @@ class _ReportExecutionMixin:
         intent_model_scope = "selected" if explicit_model_selection else "all"
         intent_models = selected_models if explicit_model_selection else ()
         channel, chat_id, user_id, _session_key, metadata = self._request_identity()
-        tenant_names = {
-            str(item.get("tenant_id") or ""): str(
-                item.get("display_name") or item.get("tenant_name") or item.get("name") or item.get("tenant_id") or ""
-            )
-            for item in (resolved if callable(resolver) else [])
-            if isinstance(item, dict) and str(item.get("tenant_id") or "").strip()
-        }
         intent = ReportIntent(
             connector_id="magik_cube",
             template_id=template.manifest.template_id,
@@ -1033,10 +1073,14 @@ class _ReportExecutionMixin:
             return ToolResult.error("当前账号没有执行小时 TPM 报表的权限，请联系管理员授权")
         except (LookupError, ValueError) as exc:
             return ToolResult.error(f"Error: hourly TPM report unavailable: {exc}")
-        return self._result(
+        document = self._annotate_no_usage_tenants(
             outcome.document,
+            [tenant_names.get(tenant_id, tenant_id) for tenant_id in idle_tenant_ids],
+        )
+        return self._result(
+            document,
             report_reference=self._report_reference_payload(
-                intent, document=outcome.document, run_id=trace_id
+                intent, document=document, run_id=trace_id
             ),
         )
 

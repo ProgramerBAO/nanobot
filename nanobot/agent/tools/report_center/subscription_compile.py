@@ -24,13 +24,16 @@ from nanobot.cron.session_turns import CRON_TRIGGER_META
 from nanobot.reporting import (
     CubeConnector,
     CubeProviderQualityConnector,
+    ReportDocument,
     ReportIntent,
     ReportRunContext,
     ReportRunner,
 )
+from nanobot.reporting.contracts import ReportBlock
 from nanobot.reporting.schedules import (
     BRIEF_PERIOD_TEMPLATES,
     PERIOD_TEMPLATES,
+    report_template_label,
 )
 from nanobot.reporting.store import ReportSubscription
 from nanobot.utils.report_failures import is_transient_report_failure
@@ -574,6 +577,55 @@ class _SubscriptionCompileMixin:
         )
 
 
+    def _no_usage_notice_document(
+        self, *, title: str, window_text: str, tenant_labels: list[str]
+    ) -> ReportDocument:
+        """Lightweight reminder card for an all-idle window (2026-09-17).
+
+        A window where every discovered tenant has no active models is a
+        successful empty-data state, not a failure: quality stays complete
+        with no warnings, so the delivery bookkeeping never records an error
+        and the transient-retry probe never re-runs it.
+        """
+
+        lines = "\n".join(f"- {label}" for label in tenant_labels)
+        content = (
+            f"以下 {len(tenant_labels)} 个客户在 {window_text} 内没有可用量的模型：\n"
+            f"{lines}\n\n"
+            "可能是新接入客户或该时段尚无请求，无需处理；模型有用量后自动恢复完整报表。"
+        )
+        return ReportDocument(
+            title=f"{title}（本期无用量）",
+            subtitle=window_text,
+            document_id="no_usage_notice",
+            blocks=(ReportBlock("markdown", {"content": content}),),
+            fallback_text=f"{title}（本期无用量）\n{window_text}\n{content}",
+            quality="complete",
+        )
+
+    @staticmethod
+    def _annotate_no_usage_tenants(
+        document: ReportDocument, tenant_labels: list[str]
+    ) -> ReportDocument:
+        """Append an explicit no-usage note for idle tenants.
+
+        Idle tenants are excluded from the run's tenant_models, so without
+        this note a partial report would silently show fewer customers than
+        requested — the one-customer-loss failure class. The note keeps the
+        exclusion explicit on every renderer (blocks + fallback).
+        """
+
+        if not tenant_labels:
+            return document
+        names = "、".join(tenant_labels)
+        content = f"本期无用量客户：{names}（有配置模型但窗口内无请求，已略过其模型行）"
+        note = ReportBlock("note", {"content": content})
+        return replace(
+            document,
+            blocks=(*document.blocks, note),
+            fallback_text=f"{document.fallback_text}\n{content}",
+        )
+
     async def _run_cube_subscription(
         self,
         subscription: ReportSubscription,
@@ -583,6 +635,11 @@ class _SubscriptionCompileMixin:
     ) -> ToolResult:
         params = self._dynamic_magik_params(subscription)
         tenant_models: dict[str, list[str]] | None = None
+        # Tenants whose active-model discovery came back empty (no usage in
+        # the window). They are excluded from the run and surfaced as an
+        # explicit notice (2026-09-17) — never silently dropped, and a fully
+        # idle window delivers a reminder card instead of failing.
+        idle_labels: list[str] = []
         if (
             subscription.template_id
             in {
@@ -629,11 +686,60 @@ class _SubscriptionCompileMixin:
                     raise ValueError(
                         "subscription has an invalid dynamic report window"
                     ) from exc
-            tenant_models = await self._load_tenant_model_catalog(
+            tenant_models, idle_tenants = await self._load_tenant_model_catalog(
                 tenants,
                 start_date=start_date,
                 end_date=end_date,
             )
+            labels_all = [
+                str(item).strip()
+                for item in params.get("tenant_labels") or []
+                if str(item).strip()
+            ]
+            label_map = {
+                tenant_id: labels_all[index]
+                for index, tenant_id in enumerate(tenants)
+                if index < len(labels_all)
+            }
+            idle_labels = [label_map.get(tenant_id, tenant_id) for tenant_id in idle_tenants]
+            if not tenant_models:
+                # Every tenant is idle this window: the successful
+                # empty-data state renders a reminder card, not an error
+                # (user-confirmed 2026-09-17). A minimal run-history row
+                # keeps the scheduled fire observable in the WebUI.
+                if subscription.template_id == "usage_customer_model_hourly_tpm":
+                    window_text = (
+                        f"{previous_hour:%m-%d %H:00}–"
+                        f"{previous_hour + timedelta(hours=1):%H:00}"
+                    )
+                else:
+                    window_text = f"{start_date} 至 {end_date}"
+                self._store.record_run(
+                    run_id=run_id,
+                    channel=subscription.channel,
+                    chat_id=subscription.chat_id,
+                    user_id=subscription.user_id,
+                    connector_id="magik_cube",
+                    template_id=subscription.template_id,
+                    template_version=subscription.template_version or "",
+                    request={"no_usage_tenants": idle_labels, "window": window_text},
+                    status="ok",
+                    duration_ms=0,
+                    quality="complete",
+                    error_type="",
+                )
+                return self._with_delivery_metadata(
+                    self._result(
+                        self._no_usage_notice_document(
+                            title=report_template_label(subscription.template_id),
+                            window_text=window_text,
+                            tenant_labels=idle_labels,
+                        )
+                    ),
+                    idempotency_key=idempotency_key,
+                    run_id=run_id,
+                    report_attempts=1,
+                )
         intent = self._subscription_cube_intent(
             subscription,
             tenant_models=tenant_models,
@@ -672,12 +778,16 @@ class _SubscriptionCompileMixin:
             await asyncio.sleep(self._config.cube_transient_retry_delay_seconds)
             outcome = await runner.run(intent, context)
             report_attempts = 2
+        # Partially idle windows keep every requested customer visible: the
+        # report runs for the active tenants and the idle ones are listed in
+        # an explicit note instead of silently disappearing.
+        document = self._annotate_no_usage_tenants(outcome.document, idle_labels)
         return self._with_delivery_metadata(
             self._result(
-                outcome.document,
+                document,
                 report_reference=self._report_reference_payload(
                     intent,
-                    document=outcome.document,
+                    document=document,
                     run_id=run_id,
                 ),
             ),

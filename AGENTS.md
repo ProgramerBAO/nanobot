@@ -148,7 +148,20 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   (recent1h ↔ hourly pinned both ways in compile_form; workdays/weekly/monthly ×
   hour lists stay unsupported). Hour-list helpers live in the dependency-free
   `nanobot/utils/schedule_hours.py` — the agent-layer intent parser must not
-  import the reporting package (connector-construction import cycle).
+  import the reporting package (connector-construction import cycle). The
+  subscription delivery vocabulary includes the bare verb 报 (2026-09-17):
+  vocabulary misses drop a message out of the deterministic subscription chain
+  into the interactive report flow, so any new delivery verb must be added to
+  BOTH gates (the signal regex's delivery group and has_delivery in
+  cube_subscription_intent.py) with a regression pinning the live phrasing.
+- All-model discovery (hourly TPM and multi-scope briefs, manual and
+  scheduled): a tenant with no active models in the window is successful empty
+  data, not a failure (user-confirmed 2026-09-17). Partially idle runs keep
+  every requested customer visible — the report renders for active tenants
+  plus an explicit 本期无用量客户 note; a fully idle window delivers a
+  no-usage reminder card (quality=complete, no error delivery record, no
+  transient retry, one ok run-history row). Catalog query failures still fail
+  closed with their original permission/upstream wording.
 - Delivery groups (2026-09-16): a broadcast fanning out to multiple chats is N
   subscription rows sharing the fingerprint identity minus the chat target
   (`subscription_group_key`, derived at read time — no group column). Each row

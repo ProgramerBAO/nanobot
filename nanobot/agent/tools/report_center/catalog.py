@@ -393,12 +393,27 @@ class _CatalogReconciliationMixin:
 
     async def _load_tenant_model_catalog(
         self, tenant_ids: list[str], *, start_date: date, end_date: date
-    ) -> dict[str, list[str]]:
-        """Load explicit model names for all-model multi-tenant execution.
+    ) -> tuple[dict[str, list[str]], list[str]]:
+        """Load active models per tenant plus the idle (no-usage) tenant list.
 
         The Cube usage endpoint may collapse an omitted model into a tenant
         aggregate, so every manual and scheduled run expands the live catalog
-        before entering ReportRunner.
+        before entering ReportRunner. A tenant whose discovery returns no
+        active models is NOT a failure (user-confirmed 2026-09-17): that is
+        the "configured models but no usage in the window" state, and callers
+        render it as an informational notice — an explicit no-usage note on
+        a partial report, or a dedicated reminder card when every tenant is
+        idle. Query failures (permission/upstream) still raise.
+
+        Known boundary: the active-usage loader folds a per-pair probe
+        failure into "not in result" exactly like no usage; only an
+        all-probes-failed run raises upstream_failed. The residual mix is
+        accepted as-is — the same trade the brief templates make between
+        probe failure and no-usage filtering.
+
+        Returns ``(active_models, idle_tenant_ids)``: idle tenants are
+        absent from the mapping so no caller can silently query them, and
+        the ordered idle list drives the explicit notice.
         """
 
         if self._magik_tool is None:
@@ -432,12 +447,7 @@ class _CatalogReconciliationMixin:
                 for tenant_id, models in loaded.items()
                 if str(tenant_id).strip() and isinstance(models, (list, tuple))
             }
-            missing = [tenant_id for tenant_id in tenant_ids if not catalog_models.get(tenant_id)]
-            if missing:
-                raise LookupError("Cube 实时模型目录未返回可用模型，请检查客户模型配置")
-            if sum(len(catalog_models[tenant_id]) for tenant_id in tenant_ids) > 200:
-                raise ValueError("客户模型组合超过 200 个，请缩小订阅范围")
-            return {tenant_id: catalog_models[tenant_id] for tenant_id in tenant_ids}
+            return self._split_active_and_idle(tenant_ids, catalog_models)
 
         # Compatibility fallback for older adapters and test doubles that only
         # expose configured model catalogs. The concrete Cube tool above must
@@ -463,12 +473,7 @@ class _CatalogReconciliationMixin:
                 for tenant_id, models in loaded.items()
                 if str(tenant_id).strip() and isinstance(models, (list, tuple))
             }
-            missing = [tenant_id for tenant_id in tenant_ids if not catalog_models.get(tenant_id)]
-            if missing:
-                raise LookupError("Cube 实时模型目录未返回可用模型，请检查客户模型配置")
-            if sum(len(catalog_models[tenant_id]) for tenant_id in tenant_ids) > 200:
-                raise ValueError("客户模型组合超过 200 个，请缩小订阅范围")
-            return {tenant_id: catalog_models[tenant_id] for tenant_id in tenant_ids}
+            return self._split_active_and_idle(tenant_ids, catalog_models)
 
         catalog_result = await self._magik_tool.execute(
             start_date=start_date.isoformat(),
@@ -504,11 +509,33 @@ class _CatalogReconciliationMixin:
             for item in catalog_entries
             if isinstance(item, dict) and str(item.get("tenant_query") or "").strip()
         }
-        missing = [tenant_id for tenant_id in tenant_ids if not catalog_models.get(tenant_id)]
-        if getattr(catalog_result, "is_error", False) or missing:
+        if getattr(catalog_result, "is_error", False):
             raise LookupError(
                 "Cube 实时模型目录未返回可用模型，请检查客户模型配置或目录查询权限"
             )
-        if sum(len(catalog_models[tenant_id]) for tenant_id in tenant_ids) > 200:
+        return self._split_active_and_idle(tenant_ids, catalog_models)
+
+    @staticmethod
+    def _split_active_and_idle(
+        tenant_ids: list[str], catalog_models: dict[str, list[str]]
+    ) -> tuple[dict[str, list[str]], list[str]]:
+        """Split discovery results into active models and idle tenants.
+
+        Idle tenants leave the mapping entirely (callers cannot silently
+        query them) and are returned in input order for the explicit
+        no-usage notice. The 200-pair fan-out cap only counts active pairs.
+        """
+
+        idle = [
+            tenant_id
+            for tenant_id in tenant_ids
+            if not catalog_models.get(tenant_id)
+        ]
+        active = {
+            tenant_id: list(catalog_models[tenant_id])
+            for tenant_id in tenant_ids
+            if tenant_id not in set(idle)
+        }
+        if sum(len(models) for models in active.values()) > 200:
             raise ValueError("客户模型组合超过 200 个，请缩小订阅范围")
-        return {tenant_id: catalog_models[tenant_id] for tenant_id in tenant_ids}
+        return active, idle
