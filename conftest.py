@@ -49,3 +49,23 @@ def _use_windows_system_ca_for_default_http_clients() -> Iterator[None]:
         yield
     finally:
         ssl.create_default_context = original
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tenant_mapping_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tenant-alias resolution away from the machine's live report store.
+
+    ``effective_tenant_mappings`` resolves the process-configured report
+    state store when no explicit store is passed, so a ``tenant_mappings``
+    override saved through the WebUI alias page on this machine would shadow
+    every config-level alias in tests (observed 2026-09-17: thirteen tests
+    failed the moment the live acceptance run saved a real alias table).
+    Pinning the process-local cache to ``False`` — the "resolution attempted
+    and failed" state — makes the default path fall back to the configured
+    mapping. Tests that exercise the store-override path pass their store
+    explicitly and are unaffected.
+    """
+
+    from nanobot.agent.tools import magik_cube
+
+    monkeypatch.setattr(magik_cube, "_tenant_mappings_store", False)
