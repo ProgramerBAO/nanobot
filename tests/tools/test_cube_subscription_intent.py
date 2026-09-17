@@ -102,6 +102,61 @@ def test_subscription_candidate_matches_meige_xiaoshi_wording() -> None:
     assert is_subscription_intent_candidate("每小时发送给我一次这个报表") is True
 
 
+def test_subscription_candidate_accepts_bare_bao_verb() -> None:
+    """The single-char 报 verb must enter the subscription chain (2026-09-17).
+
+    Live failure: “每天11点 13点 … 23点报上一小时…TPM” was rejected by the
+    delivery vocabulary (only 发/发送/推送/播报/报表/简报), fell out of the
+    subscription chain, and rendered the interactive report's customer
+    selector instead of a subscription confirmation card.
+    """
+
+    phrase = (
+        "每天11点 13点 15点 17点 19点 21点 23点"
+        "报上一小时阳春面、豆汁、佛跳墙全部模型TPM"
+    )
+    assert is_subscription_intent_candidate(phrase) is True
+
+    intent = parse_deterministic_subscription_intent(phrase)
+    assert intent == CubeSubscriptionIntent(
+        report_type="usage_customer_model_hourly_tpm",
+        tenant_scope="selected",
+        tenant_aliases=(),
+        model_scope="all",
+        models=(),
+        recurrence="hourly",
+        # The first mentioned clock is only the structural placeholder; the
+        # compiled cron derives from the full hour list.
+        send_time="11:00",
+        hours=(11, 13, 15, 17, 19, 21, 23),
+    )
+
+
+def test_bare_bao_daily_brief_wording_is_not_a_subscription_intent() -> None:
+    """A wider candidate gate must not fabricate subscriptions.
+
+    “每天9点报给我日报” is a legitimate daily-brief schedule and the
+    deterministic parser correctly compiles it once 报 is a delivery verb.
+    The guard case is the clock-less query “每天查看日报”: it enters the
+    candidate gate (报 now matches the delivery vocabulary through 日报),
+    but the deterministic parser must return None — no clock and no hourly
+    TPM wording — so the bounded classifier routes it back to the normal
+    report flow instead of fabricating a schedule.
+    """
+
+    schedule = "每天9点报给我日报"
+    assert is_subscription_intent_candidate(schedule) is True
+    compiled = parse_deterministic_subscription_intent(schedule)
+    assert compiled is not None
+    assert compiled.report_type == "usage_daily_brief"
+    assert compiled.recurrence == "every_day"
+    assert compiled.send_time == "09:00"
+
+    query = "每天查看日报"
+    assert is_subscription_intent_candidate(query) is True
+    assert parse_deterministic_subscription_intent(query) is None
+
+
 def test_deterministic_hourly_quoted_meige_xiaoshi_inherits_scope() -> None:
     """The exact live quoted-card wording must inherit the hourly scope."""
 

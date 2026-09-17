@@ -36,9 +36,14 @@ SubscriptionModelScope = Literal["all", "selected", "summary", "inherit"]
 _TOOL_NAME = "emit_cube_subscription_intent"
 # 每个小时 (with the measure word 个) does not contain the substring 每小时,
 # so the optional 个 must be part of every hourly wording check.
+# The delivery verb 报 (single char, e.g. “23点报上一小时TPM”) is part of the
+# vocabulary since 2026-09-17: it was missing and such phrasing fell out of
+# the subscription chain into the interactive report selector. The longer
+# words (日报/播报/报表/简报…) contain 报 as a substring, so one alternation
+# entry covers them all.
 _SUBSCRIPTION_SIGNAL_RE = re.compile(
     r"(?:订阅|定时|每个?小时|每天|工作日|每周|每月|发送给我|推送给我).{0,96}"
-    r"(?:发|发送|推送|播报|报表|简报)|"
+    r"(?:发|报|发送|推送|播报|报表|简报)|"
     r"(?:订阅|定时|每个?小时|每天|工作日|每周|每月).{0,128}"
     r"(?:日报|周报|月报|简报|这份报表|该报表|TPM|tpm)",
     re.IGNORECASE,
@@ -337,7 +342,12 @@ def is_subscription_intent_candidate(text: str) -> bool:
     tenants between the cadence and the report name.  The matcher therefore
     uses a bounded window rather than a short adjacency expression.  It still
     requires a delivery/schedule signal, so an ordinary ``每天查看日报`` query
-    is not silently turned into a subscription.
+    is not silently turned into a subscription: since the single-char 报 verb
+    joined the delivery vocabulary (2026-09-17), such queries may enter the
+    candidate gate and cost one bounded classification call, but the
+    deterministic parser (no clock, no hourly TPM wording) returns None and
+    the classifier routes them back to the normal report flow — a
+    subscription is only ever created from an explicit schedule.
     """
 
     raw = text.strip()
@@ -348,7 +358,7 @@ def is_subscription_intent_candidate(text: str) -> bool:
     # 每个小时 must gate exactly like 每小时, or a quoted hourly report
     # subscription falls through to the unstructured LLM turn.
     has_schedule = bool(re.search(r"订阅|定时|每天|工作日|每周|每月|每个?小时", raw, re.IGNORECASE))
-    has_delivery = bool(re.search(r"发|发送|推送|播报|报表|简报", raw, re.IGNORECASE))
+    has_delivery = bool(re.search(r"发|报|发送|推送|播报|报表|简报", raw, re.IGNORECASE))
     return has_schedule and has_delivery
 
 
