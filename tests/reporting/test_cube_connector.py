@@ -2193,18 +2193,18 @@ def test_hourly_tpm_template_renders_cluster_inventory_table() -> None:
     assert [column["name"] for column in columns] == [
         "cluster",
         "cluster_total",
+        "cluster_idle",
         "cluster_production",
         "cluster_test",
         "cluster_dev",
         "cluster_backup",
-        "cluster_idle",
     ]
     assert [column["display_name"] for column in columns] == [
-        "集群", "机器总数", "生产", "测试", "开发", "备用", "空闲",
+        "集群", "机器总数", "空闲", "生产", "测试", "开发", "备用",
     ]
     assert all(column.get("tag") == "column" for column in columns)
     assert inventory_block.data["headers"] == [
-        "集群", "机器总数", "生产", "测试", "开发", "备用", "空闲",
+        "集群", "机器总数", "空闲", "生产", "测试", "开发", "备用",
     ]
     assert inventory_block.data["page_size"] == 20
     rows = inventory_block.data["rows"]
@@ -2361,6 +2361,7 @@ def test_markdown_renderer_shows_hourly_tpm_table_and_no_baseline_context() -> N
     # The data row splits allocation and usage; the idle flag stays in the
     # usage column.
     assert "| 佛跳墙 | Kimi-K3 | 900 | 600 | 42 | 40（闲2） |" in rendered
-    # The cluster inventory section renders as its own GFM table.
-    assert "| 集群 | 机器总数 | 生产 | 测试 | 开发 | 备用 | 空闲 |" in rendered
-    assert "| cluster-a | 128 | 86 | 20 | 12 | 6 | 4 |" in rendered
+    # The cluster inventory section renders as its own GFM table (idle
+    # column right after the total, user-confirmed 2026-09-17).
+    assert "| 集群 | 机器总数 | 空闲 | 生产 | 测试 | 开发 | 备用 |" in rendered
+    assert "| cluster-a | 128 | 4 | 86 | 20 | 12 | 6 |" in rendered

@@ -123,8 +123,9 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   machine difference and summed into the subtitle as `N 机器空闲`; both values are
   platform-level and must never be attributed to a customer. A missing target-hour
   point stays 暂不可用 with `partial` quality and must never be rendered as zero.
-  The card appends a seven-column cluster inventory table (集群 | 机器总数 | 生产 |
-  测试 | 开发 | 备用 | 空闲) from `analysis/machine-usage-summary/query` (POST
+  The card appends a seven-column cluster inventory table (集群 | 机器总数 | 空闲 |
+  生产 | 测试 | 开发 | 备用, user-confirmed 2026-09-17 order with idle right
+  after the total) from `analysis/machine-usage-summary/query` (POST
   `{"noloading":true}`, send-time platform snapshot; `occupiedMachineCount` carries
   the TEST machine total; production = total − the other categories and renders `—`
   when parts are missing or exceed the total). The inventory table is

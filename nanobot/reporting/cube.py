@@ -2659,16 +2659,20 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         if inventory_table_rows:
             blocks.append(ReportBlock("table", {
                 "title": "集群机器库存",
+                # Column order user-confirmed 2026-09-17: idle right after
+                # the total (the headline number), then the category
+                # breakdown. Production stays a derived column
+                # (total − test − dev − backup − idle).
                 "columns": [
                     {"tag": "column", "name": "cluster", "display_name": "集群", "data_type": "text"},
                     {"tag": "column", "name": "cluster_total", "display_name": "机器总数", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_idle", "display_name": "空闲", "data_type": "text"},
                     {"tag": "column", "name": "cluster_production", "display_name": "生产", "data_type": "text"},
                     {"tag": "column", "name": "cluster_test", "display_name": "测试", "data_type": "text"},
                     {"tag": "column", "name": "cluster_dev", "display_name": "开发", "data_type": "text"},
                     {"tag": "column", "name": "cluster_backup", "display_name": "备用", "data_type": "text"},
-                    {"tag": "column", "name": "cluster_idle", "display_name": "空闲", "data_type": "text"},
                 ],
-                "headers": ["集群", "机器总数", "生产", "测试", "开发", "备用", "空闲"],
+                "headers": ["集群", "机器总数", "空闲", "生产", "测试", "开发", "备用"],
                 "rows": inventory_table_rows,
                 "page_size": 20,
             }))
