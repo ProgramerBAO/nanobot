@@ -8,6 +8,7 @@ import type {
   ChannelSetupContractField,
   SettingsPayload,
 } from "@/lib/types";
+import { SK_COMPANY } from "./credentials";
 
 function jsonResponse(body: unknown): Response {
   return {
@@ -2822,7 +2823,7 @@ describe("SettingsView Apps catalog", () => {
       target: { value: "https://gateway.example/v1" },
     });
     fireEvent.change(screen.getByPlaceholderText("Enter API key"), {
-      target: { value: "sk-company" },
+      target: { value: SK_COMPANY },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Advanced options" }));
@@ -2852,7 +2853,7 @@ describe("SettingsView Apps catalog", () => {
         headers["X-Nanobot-Provider-Values"],
       ))).toEqual({
         name: "Company Gateway",
-        apiKey: "sk-company",
+        apiKey: SK_COMPANY,
         apiBase: "https://gateway.example/v1",
         proxy: "http://127.0.0.1:7890",
         extraHeaders: '{"X-Tenant":"engineering"}',

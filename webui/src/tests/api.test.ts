@@ -53,6 +53,8 @@ import {
   validateChannel,
 } from "@/lib/api";
 
+import { BB_LIVE_TEST, SECRET_TOKEN, SK_COMPANY, SK_OR_TEST } from "./credentials";
+
 describe("webui API helpers", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -462,7 +464,7 @@ describe("webui API helpers", () => {
   it("serializes provider settings updates without returning secrets", async () => {
     await updateProviderSettings("tok", {
       provider: "openrouter",
-      apiKey: "sk-or-test",
+      apiKey: SK_OR_TEST,
       apiBase: "https://openrouter.ai/api/v1",
     });
 
@@ -472,7 +474,7 @@ describe("webui API helpers", () => {
         headers: {
           Authorization: "Bearer tok",
           "X-Nanobot-Provider-Values": encodeURIComponent(JSON.stringify({
-            apiKey: "sk-or-test",
+            apiKey: SK_OR_TEST,
             apiBase: "https://openrouter.ai/api/v1",
           })),
         },
@@ -504,7 +506,7 @@ describe("webui API helpers", () => {
   it("serializes custom provider creation with advanced settings", async () => {
     await createProviderSettings("tok", {
       name: "Company Gateway",
-      apiKey: "sk-company",
+      apiKey: SK_COMPANY,
       apiBase: "https://gateway.example/v1",
       extraHeaders: '{"X-Tenant":"engineering"}',
       extraBody: '{"service_tier":"priority"}',
@@ -520,7 +522,7 @@ describe("webui API helpers", () => {
           Authorization: "Bearer tok",
           "X-Nanobot-Provider-Values": encodeURIComponent(JSON.stringify({
             name: "Company Gateway",
-            apiKey: "sk-company",
+            apiKey: SK_COMPANY,
             apiBase: "https://gateway.example/v1",
             extraHeaders: '{"X-Tenant":"engineering"}',
             extraBody: '{"service_tier":"priority"}',
@@ -737,7 +739,7 @@ describe("webui API helpers", () => {
       expect.objectContaining({
         headers: {
           Authorization: "Bearer tok",
-          "X-Nanobot-API-Service-Values": JSON.stringify({ api_key: "secret-token" }),
+          "X-Nanobot-API-Service-Values": JSON.stringify({ api_key: SECRET_TOKEN }),
         },
       }),
     );
@@ -771,7 +773,7 @@ describe("webui API helpers", () => {
     );
 
     await runMcpPresetAction("tok", "enable", "browserbase", {
-      browserbase_api_key: "bb_live_test",
+      browserbase_api_key: BB_LIVE_TEST,
     });
     expect(fetch).toHaveBeenCalledWith(
       "/api/settings/mcp-presets/enable?name=browserbase",
@@ -779,7 +781,7 @@ describe("webui API helpers", () => {
         headers: expect.objectContaining({
           Authorization: "Bearer tok",
           "X-Nanobot-MCP-Values": JSON.stringify({
-            browserbase_api_key: "bb_live_test",
+            browserbase_api_key: BB_LIVE_TEST,
           }),
         }),
       }),
