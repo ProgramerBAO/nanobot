@@ -1,5 +1,8 @@
 # Nanobot Cube 报表产品
 
+> 使用者上手教程见 [USER_GUIDE.md](USER_GUIDE.md)（公司内部分发入口）；
+> 本文件是产品能力与数据口径的权威定义。
+
 ## 产品定位
 
 Nanobot 是面向内部 SRE、运营和管理人员的只读 Cube 报表与管理查询入口。固定报表使用确定性 `ReportRunner`，灵活管理问题使用 `magik-cube-admin` Skill。Grafana、企业微信和钉钉当前只保留扩展能力，不属于已启用产品范围。
