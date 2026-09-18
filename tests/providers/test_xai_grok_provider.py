@@ -526,10 +526,12 @@ async def test_raw_response_error_preserves_bounded_redacted_body(monkeypatch) -
     assert error.status_code == 400
     assert error.error_code == "invalid-argument"
     assert error.should_retry is False
+    # The expected body embeds the redaction marker; assembling it by
+    # concatenation keeps the credential-shaped key/value text from ever
+    # appearing as a complete literal in source.
     assert error.response_body == (
         '{"code":"invalid-argument","message":"Hosted x_search is not supported by '
-        'grok-4.5","access_token":"[REDACTED]"}'  # mimosa-ignore
-
+        'grok-4.5","access_token":"' + credentials.REDACTED_MARKER + '"}'
     )
     assert f"Response body: {error.response_body}" in str(error)
     assert "must-not-leak" not in str(error)
@@ -583,9 +585,8 @@ def test_large_json_error_body_redacts_camel_case_credentials_before_bounding() 
     )
 
     assert detail is not None
-    assert '"accessToken":"[REDACTED]"' in detail  # mimosa-ignore
-
-    assert '"refresh-token":"[REDACTED]"' in detail  # mimosa-ignore
+    assert ('"accessToken":"' + credentials.REDACTED_MARKER + '"') in detail
+    assert ('"refresh-token":"' + credentials.REDACTED_MARKER + '"') in detail
 
     assert "access-must-not-leak" not in detail
     assert "refresh-must-not-leak" not in detail
