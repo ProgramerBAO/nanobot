@@ -29,6 +29,7 @@ from nanobot.reporting.subscriptions import (
     ReportSubscriptionService,
     SubscriptionServiceError,
 )
+from nanobot.testing import credentials
 
 
 class _FakeCron:
@@ -1080,7 +1081,7 @@ async def test_agent_loop_routes_quoted_report_to_subscription_confirmation(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     provider = MagicMock()
@@ -1485,7 +1486,7 @@ async def test_multi_scope_subscription_falls_back_to_legacy_tool(
     cube_config = MagikCubeToolConfig(
         enable=True,
         base_url="https://cube.example.internal",
-        access_token="fixture-token",
+        access_token=credentials.FIXTURE_TOKEN,
     )
     tool = ReportCenterTool(ReportCenterToolConfig(), cron, magik, cube_config)
     owner_context = RequestContext(
@@ -1568,7 +1569,7 @@ async def test_cube_subscription_retries_one_transient_failure_with_same_run_id(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     calls = 0
@@ -1653,7 +1654,7 @@ async def test_cube_subscription_does_not_retry_non_transient_missing_data(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
 
@@ -1729,7 +1730,7 @@ async def test_fixed_cube_report_uses_runner_and_returns_report_document(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     assert tool.fixed_cube_reports_enabled is True
@@ -1791,7 +1792,7 @@ async def test_model_daily_report_queries_all_cube_customers_and_labels_scope(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
             model_aliases={"k3": "Kimi-K3"},
         ),
     )
@@ -1885,7 +1886,7 @@ async def test_model_all_customer_report_is_stopped_until_feature_flag_is_enable
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     with request_context(
@@ -1924,7 +1925,7 @@ async def test_all_customer_model_report_requires_tenant_wildcard_grant_when_rba
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     for resource_type, resource_id in (
@@ -1978,7 +1979,7 @@ async def test_fixed_period_interactive_route_restores_tenant_and_model_selector
     cube_config = MagikCubeToolConfig(
         enable=True,
         base_url="https://cube.example.internal",
-        access_token="fixture-token",
+        access_token=credentials.FIXTURE_TOKEN,
     )
     tool = ReportCenterTool(ReportCenterToolConfig(), cron, magik, cube_config)
 
@@ -2107,7 +2108,7 @@ async def test_multi_scope_all_models_expands_live_catalog_before_report_runner(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     catalog_models = [f"MODEL-{index:02d}" for index in range(1, 29)]
@@ -2212,7 +2213,7 @@ async def test_multi_scope_all_models_empty_catalog_renders_no_usage_notice(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     magik.execute.return_value = ToolResult(
@@ -2492,11 +2493,11 @@ async def test_cost_report_is_feature_gated_and_uses_report_runner(monkeypatch, 
     cube_config = MagikCubeToolConfig(
         enable=True,
         base_url="https://cube.example.internal",
-        access_token="admin-fixture-token",
+        access_token=credentials.ADMIN_FIXTURE_TOKEN,
         token_api=MagikCubeTokenApiConfig(
             enable=True,
             base_url="https://token-api.example.internal",
-            access_token="tokenapi-fixture",
+            access_token=credentials.TOKENAPI_FIXTURE,
         ),
     )
 
@@ -2589,7 +2590,7 @@ async def test_health_report_is_direct_and_visible_only_when_flags_are_enabled(
     cube_config = MagikCubeToolConfig(
         enable=True,
         base_url="https://cube.example.internal",
-        access_token="fixture-token",
+        access_token=credentials.FIXTURE_TOKEN,
     )
     config = ReportCenterToolConfig(
         cube_health_report=True,
@@ -2668,7 +2669,7 @@ async def test_health_subscription_supports_day_and_week_but_not_recent15m(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     context = RequestContext(
@@ -2706,7 +2707,7 @@ async def test_nlu_preview_preserves_three_customers_and_all_models(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     tool._magik_tool.resolve_tenant_queries = AsyncMock(
@@ -2806,7 +2807,7 @@ async def test_agent_loop_subscription_phrase_cannot_fall_back_to_one_tenant_dai
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     provider = MagicMock()
@@ -2862,7 +2863,7 @@ async def test_quoted_report_preview_revalidates_scope_without_history_date(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     store.save_message_reference(
@@ -2964,7 +2965,7 @@ async def test_quoted_schedule_forces_reference_scope_when_classifier_defaults_t
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     store.save_message_reference(
@@ -3053,7 +3054,7 @@ async def test_subscription_preview_validates_selected_models_against_live_catal
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     context = RequestContext(
@@ -3133,7 +3134,7 @@ async def test_subscription_preview_rejects_models_missing_from_live_catalog(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     context = RequestContext(
@@ -3191,7 +3192,7 @@ async def test_all_model_multi_scope_subscription_refreshes_catalog_before_run(
         MagikCubeToolConfig(
             enable=True,
             base_url="https://cube.example.internal",
-            access_token="fixture-token",
+            access_token=credentials.FIXTURE_TOKEN,
         ),
     )
     queries = []

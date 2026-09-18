@@ -24,6 +24,7 @@ from nanobot.agent.tools.magik_cube import (
     _Tenant,
 )
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI
+from nanobot.testing import credentials
 from nanobot.utils.report_failures import classify_report_failure
 
 
@@ -234,7 +235,7 @@ async def test_client_logs_in_with_password_before_read_queries() -> None:
             assert json.loads(request.content) == {"account": "operator", "password": "pw"}
             return httpx.Response(
                 200,
-                json={"code": 0, "data": {"accessToken": "runtime-token"}},
+                json={"code": 0, "data": {"accessToken": credentials.RUNTIME_TOKEN}},
             )
         return httpx.Response(200, json={"code": 0, "data": {"value": 42}})
 

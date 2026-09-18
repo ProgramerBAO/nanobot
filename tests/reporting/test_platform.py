@@ -46,6 +46,7 @@ from nanobot.reporting.templates import (
     load_builtin_template_specs,
     parse_template_spec,
 )
+from nanobot.testing import credentials
 
 
 def test_builtin_template_pack_is_versioned_and_compatible() -> None:
@@ -1207,7 +1208,7 @@ def test_guided_subscription_resolves_display_alias_to_live_cube_id(tmp_path) ->
     cube_config = MagikCubeToolConfig(
         enable=True,
         base_url="https://cube.example.internal",
-        access_token="fixture-token",
+        access_token=credentials.FIXTURE_TOKEN,
     )
     registry = build_default_registry(
         discover_external=False,

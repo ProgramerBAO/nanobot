@@ -6,6 +6,7 @@ import pytest
 from nanobot.agent.tools.registry import is_tool_error_result
 from nanobot.agent.tools.web import WebSearchTool
 from nanobot.config.schema import WebSearchConfig
+from nanobot.testing import credentials
 
 
 def _tool(
@@ -616,7 +617,7 @@ async def test_default_provider_is_brave(monkeypatch):
         return _response(json={"web": {"results": []}})
 
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
-    tool = _tool(provider="", api_key="test-key")
+    tool = _tool(provider=credentials.placeholder("NANOBOT_TEST_TEST_WEB_SEARCH_TOOL_1", ""), api_key=credentials.TEST_KEY)
     result = await tool.execute(query="test")
     assert "No results" in result
 

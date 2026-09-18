@@ -17,13 +17,14 @@ from nanobot.reporting import (
 )
 from nanobot.reporting.capabilities import home_document
 from nanobot.reporting.store import ReportStateStore
+from nanobot.testing import credentials
 
 
 def _config() -> MagikCubeToolConfig:
     return MagikCubeToolConfig(
         enable=True,
         base_url="https://cube.example.internal",
-        access_token="fixture-token",
+        access_token=credentials.FIXTURE_TOKEN,
         max_retries=0,
         max_pages=2,
     )
@@ -47,7 +48,7 @@ def _transport() -> httpx.MockTransport:
             "inputPrice": "0.000001",
             "outputPrice": "0.000002",
             "baseUrl": "https://must-not-appear.example",
-            "apiKey": "must-not-appear",
+            "apiKey": credentials.placeholder("NANOBOT_TEST_TEST_PROVIDER_QUALITY_1", "must-not-appear"),
         },
         {
             "id": "provider-other-k3",

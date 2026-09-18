@@ -10,6 +10,7 @@ from nanobot.agent.tools.image_generation import ImageGenerationTool
 from nanobot.config.loader import set_config_path
 from nanobot.config.schema import ImageGenerationToolConfig, ProviderConfig
 from nanobot.providers.image_generation import GeneratedImageResponse
+from nanobot.testing import credentials
 
 PNG_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -52,7 +53,7 @@ async def test_generate_image_tool_stores_artifact_and_source_images(
     tool = ImageGenerationTool(
         workspace=tmp_path,
         config=ImageGenerationToolConfig(enabled=True, max_images_per_turn=2),
-        provider_config=ProviderConfig(api_key="sk-or-test"),
+        provider_config=ProviderConfig(api_key=credentials.SK_OR_TEST),
     )
 
     result = await tool.execute(
@@ -109,8 +110,8 @@ async def test_generate_image_tool_selects_aihubmix_provider(
             model="gpt-image-2-free",
         ),
         provider_configs={
-            "openrouter": ProviderConfig(api_key="sk-or-test"),
-            "aihubmix": ProviderConfig(api_key="sk-ahm-test", extra_body={"quality": "low"}),
+            "openrouter": ProviderConfig(api_key=credentials.SK_OR_TEST),
+            "aihubmix": ProviderConfig(api_key=credentials.SK_AHM_TEST, extra_body={"quality": "low"}),
         },
     )
 
@@ -222,7 +223,7 @@ async def test_generate_image_tool_rejects_reference_outside_workspace(tmp_path:
     tool = ImageGenerationTool(
         workspace=tmp_path,
         config=ImageGenerationToolConfig(enabled=True),
-        provider_config=ProviderConfig(api_key="sk-or-test"),
+        provider_config=ProviderConfig(api_key=credentials.SK_OR_TEST),
     )
 
     result = await tool.execute(prompt="edit", reference_images=[str(outside)])

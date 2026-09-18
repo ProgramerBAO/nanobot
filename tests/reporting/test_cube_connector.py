@@ -37,6 +37,7 @@ from nanobot.reporting.contracts import (
 )
 from nanobot.reporting.cube import CubeCustomerModelHourlyTpmTemplate
 from nanobot.reporting.renderer import document_to_markdown
+from nanobot.testing import credentials
 
 
 def _query(*metrics: str) -> ReportQuery:
@@ -55,7 +56,7 @@ def _config(**overrides: object) -> MagikCubeToolConfig:
     return MagikCubeToolConfig(
         enable=True,
         base_url="https://cube.example.internal",
-        access_token="fixture-token",
+        access_token=credentials.FIXTURE_TOKEN,
         max_retries=0,
         max_pages=2,
         **overrides,
@@ -317,7 +318,7 @@ async def test_cube_account_connector_uses_tokenapi_and_monthly_baseline() -> No
         token_api=MagikCubeTokenApiConfig(
             enable=True,
             base_url="https://token-api.example.internal",
-            access_token="tokenapi-fixture",
+            access_token=credentials.TOKENAPI_FIXTURE,
             max_retries=0,
         )
     )

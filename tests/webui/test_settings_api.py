@@ -10,6 +10,7 @@ import pytest
 from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config, InlineFallbackConfig, ModelPresetConfig
 from nanobot.providers.registry import find_by_name
+from nanobot.testing import credentials
 from nanobot.webui.settings_api import (
     WebUISettingsError,
     _docs_version,
@@ -582,20 +583,20 @@ def test_provider_settings_redacts_and_preserves_structured_secrets(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.openai.api_key = "sk-openai"
+    config.providers.openai.api_key = credentials.SK_OPENAI
     config.providers.openai.extra_headers = {
         "Authorization": "Bearer header-secret",
         "X-Trace": "visible",
     }
     config.providers.openai.extra_body = {
-        "access_token": "body-secret",
+        "access_token": credentials.BODY_SECRET,
         "metadata": {
-            "client_secret": "nested-secret",
+            "client_secret": credentials.NESTED_SECRET,
             "label": "visible",
         },
     }
     config.providers.openai.extra_query = {
-        "api_key": "query-secret",
+        "api_key": credentials.QUERY_SECRET,
         "api-version": "2026-01-01",
     }
     save_config(config, config_path)
@@ -632,14 +633,14 @@ def test_provider_settings_redacts_and_preserves_structured_secrets(
         "X-Trace": "updated",
     }
     assert saved.extra_body == {
-        "access_token": "replacement-secret",
+        "access_token": credentials.REPLACEMENT_SECRET,
         "metadata": {
-            "client_secret": "nested-secret",
+            "client_secret": credentials.NESTED_SECRET,
             "label": "updated",
         },
     }
     assert saved.extra_query == {
-        "api_key": "query-secret",
+        "api_key": credentials.QUERY_SECRET,
         "api-version": "2026-07-24",
     }
 
@@ -650,7 +651,7 @@ def test_update_provider_settings_persists_provider_specific_advanced_options(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.openai.api_key = "sk-openai"
+    config.providers.openai.api_key = credentials.SK_OPENAI
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -899,7 +900,7 @@ def test_settings_payload_groups_opencode_compatibility_alias(tmp_path, monkeypa
 def test_settings_payload_keeps_configured_opencode_legacy_alias(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "config.json"
     config = Config.model_validate({
-        "providers": {"opencodeZen": {"apiKey": "legacy-key"}},
+        "providers": {"opencodeZen": {"apiKey": credentials.LEGACY_KEY_FAKE}},
         "agents": {
             "defaults": {
                 "provider": "opencode_zen",
@@ -987,7 +988,7 @@ def test_update_web_search_settings_accepts_keenable_without_api_key(
     config_path = tmp_path / "config.json"
     config = Config()
     config.tools.web.search.provider = "brave"
-    config.tools.web.search.api_key = "brave-key"
+    config.tools.web.search.api_key = credentials.BRAVE_KEY_FAKE
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1007,7 +1008,7 @@ def test_update_web_search_settings_can_clear_optional_api_key(
     config_path = tmp_path / "config.json"
     config = Config()
     config.tools.web.search.provider = "keenable"
-    config.tools.web.search.api_key = "keen-key"
+    config.tools.web.search.api_key = credentials.KEEN_KEY_FAKE
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1045,7 +1046,7 @@ def test_settings_payload_exposes_openrouter_transcription_provider(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.openrouter.api_key = "sk-or-test"
+    config.providers.openrouter.api_key = credentials.SK_OR_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1080,7 +1081,7 @@ def test_settings_payload_exposes_xiaomi_mimo_transcription_provider(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.xiaomi_mimo.api_key = "mimo-test"
+    config.providers.xiaomi_mimo.api_key = credentials.MIMO_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1098,7 +1099,7 @@ def test_settings_payload_exposes_assemblyai_transcription_provider(
     config_path = tmp_path / "config.json"
     config = Config()
     config.transcription.provider = "assemblyai"
-    config.providers.assemblyai.api_key = "aai-test"
+    config.providers.assemblyai.api_key = credentials.AAI_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1121,7 +1122,7 @@ def test_model_configuration_rejects_transcription_only_provider(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.assemblyai.api_key = "aai-test"
+    config.providers.assemblyai.api_key = credentials.AAI_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1143,7 +1144,7 @@ def test_update_transcription_settings_writes_top_level_only(
     config = Config()
     config.channels.transcription_provider = "openai"
     config.channels.transcription_language = "en"
-    config.providers.groq.api_key = "gsk-test"
+    config.providers.groq.api_key = credentials.GSK_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1177,7 +1178,7 @@ def test_update_transcription_settings_accepts_openrouter(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.openrouter.api_key = "sk-or-test"
+    config.providers.openrouter.api_key = credentials.SK_OR_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1201,7 +1202,7 @@ def test_update_transcription_settings_accepts_xiaomi_mimo(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.xiaomi_mimo.api_key = "mimo-test"
+    config.providers.xiaomi_mimo.api_key = credentials.MIMO_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -1227,7 +1228,7 @@ def test_update_transcription_settings_accepts_assemblyai(
 ) -> None:
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.assemblyai.api_key = "aai-test"
+    config.providers.assemblyai.api_key = credentials.AAI_TEST
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 

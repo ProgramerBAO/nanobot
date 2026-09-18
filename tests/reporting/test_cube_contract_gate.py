@@ -13,6 +13,7 @@ from nanobot.reporting.cube_contract_gate import (
     compare_metric_summaries,
     profile_cube_contract_fixture,
 )
+from nanobot.testing import credentials
 
 
 def _fixture() -> dict[str, object]:
@@ -26,7 +27,7 @@ def _config(**overrides: object) -> MagikCubeToolConfig:
         "deployment_environment": "staging",
         "contract_validation_enabled": True,
         "base_url": "https://cube.staging.example.internal",
-        "access_token": "fixture-token",
+        "access_token": credentials.FIXTURE_TOKEN,
         "max_retries": 0,
     }
     values.update(overrides)

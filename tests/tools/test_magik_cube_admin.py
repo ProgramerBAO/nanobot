@@ -18,6 +18,7 @@ from nanobot.agent.tools.magik_cube_admin import (
     _load_catalog,
     _sanitize_response,
 )
+from nanobot.testing import credentials
 
 ROOT = Path(__file__).parents[2]
 OPENAPI_PATH = ROOT / "run/magik-cube/app/admin/internal/server/openapi.yaml"
@@ -340,13 +341,13 @@ async def test_tenant_endpoints_resolves_tenant_then_lists_endpoints() -> None:
 
 def test_response_sanitizer_redacts_credentials_without_hiding_usage_tokens() -> None:
     value = {
-        "apiKey": "secret-api-key",
+        "apiKey": credentials.SECRET_API_KEY_FAKE,
         "totalTokens": 123,
         "encoded": '{"authorization":"Bearer secret","prompt_tokens":42}',
     }
 
     assert _sanitize_response(value) == {
-        "apiKey": "[REDACTED]",
+        "apiKey": credentials.REDACTED_MARKER,
         "totalTokens": 123,
         "encoded": {"authorization": "[REDACTED]", "prompt_tokens": 42},
     }

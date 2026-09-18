@@ -15,6 +15,8 @@ import httpx
 import pytest
 import websockets
 
+from nanobot.testing import credentials
+
 _BOOTSTRAP_SECRET = "smoke-secret"
 
 
@@ -37,7 +39,7 @@ def _write_smoke_config(path: Path, *, workspace: Path, ws_port: int, gateway_po
         },
         "providers": {
             "custom": {
-                "apiKey": "smoke-no-external-call",
+                "apiKey": credentials.placeholder("NANOBOT_TEST_TEST_GATEWAY_WEBUI_SMOKE_1", "smoke-no-external-call"),
                 "apiBase": "http://127.0.0.1:9/v1",
             }
         },
