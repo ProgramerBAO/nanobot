@@ -39,6 +39,7 @@ from nanobot.config.schema import ChannelsConfig, Config
 from nanobot.providers.transcription import GroqTranscriptionProvider as _GroqProvider
 from nanobot.providers.transcription import OpenAITranscriptionProvider as _OpenAIProvider
 from nanobot.reporting.store import ReportStateStore
+from nanobot.testing import credentials
 from nanobot.utils.restart import RestartNotice
 
 # ---------------------------------------------------------------------------
@@ -1061,7 +1062,7 @@ async def test_base_channel_reads_current_transcription_config_each_call(
     config.transcription.provider = "openai"
     config.transcription.model = "whisper-custom"
     config.transcription.language = "en"
-    config.providers.openai.api_key = "openai-key"
+    config.providers.openai.api_key = credentials.OPENAI_KEY_FAKE
     config.providers.openai.api_base = "http://openai.local/v1/audio/transcriptions"
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
@@ -1105,7 +1106,7 @@ async def test_base_channel_reads_current_transcription_config_each_call(
         config.transcription.provider = "groq"
         config.transcription.model = "whisper-large-v3-turbo"
         config.transcription.language = "ko"
-        config.providers.groq.api_key = "groq-key"
+        config.providers.groq.api_key = credentials.GROQ_KEY_FAKE
         config.providers.groq.api_base = "http://groq.local/v1/audio/transcriptions"
         save_config(config, config_path)
 
@@ -1114,14 +1115,14 @@ async def test_base_channel_reads_current_transcription_config_each_call(
     assert calls == [
         {
             "provider": "openai",
-            "api_key": "openai-key",
+            "api_key": credentials.OPENAI_KEY_FAKE,
             "api_base": "http://openai.local/v1/audio/transcriptions",
             "language": "en",
             "model": "whisper-custom",
         },
         {
             "provider": "groq",
-            "api_key": "groq-key",
+            "api_key": credentials.GROQ_KEY_FAKE,
             "api_base": "http://groq.local/v1/audio/transcriptions",
             "language": "ko",
             "model": "whisper-large-v3-turbo",
@@ -1137,7 +1138,7 @@ async def test_base_channel_respects_disabled_transcription_config(
     config_path = tmp_path / "config.json"
     config = Config()
     config.transcription.enabled = False
-    config.providers.groq.api_key = "groq-key"
+    config.providers.groq.api_key = credentials.GROQ_KEY_FAKE
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
 
@@ -2054,7 +2055,7 @@ def test_optional_features_payload_requires_matrix_device_id_for_token_login(
                 "enabled": False,
                 "homeserver": "https://matrix.example",
                 "userId": "@nanobot:matrix.example",
-                "accessToken": "saved-token",
+                "accessToken": credentials.SAVED_TOKEN,
                 "deviceId": device_id,
             }
         }

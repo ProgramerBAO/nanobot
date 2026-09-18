@@ -13,6 +13,7 @@ from nanobot.config.loader import set_config_path
 from nanobot.config.schema import ImageGenerationToolConfig, ProviderConfig, ToolsConfig
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.providers.image_generation import GeneratedImageResponse
+from nanobot.testing import credentials
 
 PNG_DATA_URL = (
     "data:image/png;base64,"
@@ -67,7 +68,7 @@ async def test_outbound_no_longer_carries_generated_media(
         tools_config=ToolsConfig(
             image_generation=ImageGenerationToolConfig(enabled=True),
         ),
-        image_generation_provider_config=ProviderConfig(api_key="sk-or-test"),
+        image_generation_provider_config=ProviderConfig(api_key=credentials.SK_OR_TEST),
     )
     loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
 

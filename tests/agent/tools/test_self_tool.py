@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.self import MyTool
 from nanobot.config.schema import ModelPresetConfig
+from nanobot.testing import credentials
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +49,7 @@ def _make_mock_loop(**overrides):
     loop.web_config = MagicMock()
     loop.web_config.enable = True
     loop.web_config.search = MagicMock()
-    loop.web_config.search.api_key = "sk-secret-key-12345"
+    loop.web_config.search.api_key = credentials.placeholder("NANOBOT_TEST_TEST_SELF_TOOL_1", "sk-secret-key-12345")
 
     # Tools registry mock
     loop.tools = MagicMock()

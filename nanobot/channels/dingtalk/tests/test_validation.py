@@ -5,6 +5,7 @@ import pytest
 from nanobot.channels.validation import validate_channel_config
 from nanobot.config.loader import save_config
 from nanobot.config.schema import Config
+from nanobot.testing import credentials
 
 
 def test_validate_manual_channel_returns_configured(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -15,7 +16,7 @@ def test_validate_manual_channel_returns_configured(tmp_path, monkeypatch: pytes
                 "channels": {
                     "dingtalk": {
                         "clientId": "ding-client",
-                        "clientSecret": "ding-secret",
+                        "clientSecret": credentials.DING_SECRET,
                     }
                 }
             }

@@ -11,6 +11,7 @@ from loguru import logger
 from nanobot.config.schema import ModelPresetConfig
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.providers.fallback_provider import FallbackProvider
+from nanobot.testing import credentials
 
 
 def _make_response(
@@ -148,8 +149,8 @@ def test_provider_signature_tracks_fallback_presets_and_provider_config() -> Non
             "deep": {"model": "anthropic/claude-sonnet-4-6", "provider": "anthropic"},
         },
         "providers": {
-            "openai": {"apiKey": "primary-key"},
-            "anthropic": {"apiKey": "fallback-key"},
+            "openai": {"apiKey": credentials.PRIMARY_KEY_FAKE},
+            "anthropic": {"apiKey": credentials.FALLBACK_KEY_FAKE},
         },
     }
     changed_fallback = {
@@ -161,14 +162,14 @@ def test_provider_signature_tracks_fallback_presets_and_provider_config() -> Non
         },
         "providers": {
             **base["providers"],
-            "deepseek": {"apiKey": "deepseek-key"},
+            "deepseek": {"apiKey": credentials.DEEPSEEK_KEY_FAKE},
         },
     }
     changed_key = {
         **base,
         "providers": {
-            "openai": {"apiKey": "primary-key"},
-            "anthropic": {"apiKey": "new-fallback-key"},
+            "openai": {"apiKey": credentials.PRIMARY_KEY_FAKE},
+            "anthropic": {"apiKey": credentials.NEW_FALLBACK_KEY_FAKE},
         },
     }
 
@@ -202,8 +203,8 @@ def test_provider_snapshot_uses_smallest_fallback_context_window() -> None:
             },
         },
         "providers": {
-            "openai": {"apiKey": "primary-key"},
-            "deepseek": {"apiKey": "fallback-key"},
+            "openai": {"apiKey": credentials.PRIMARY_KEY_FAKE},
+            "deepseek": {"apiKey": credentials.FALLBACK_KEY_FAKE},
         },
     })
 
@@ -234,8 +235,8 @@ def test_inline_fallback_reasoning_effort_does_not_inherit_primary() -> None:
             }
         },
         "providers": {
-            "anthropic": {"apiKey": "primary-key"},
-            "openai": {"apiKey": "fallback-key"},
+            "anthropic": {"apiKey": credentials.PRIMARY_KEY_FAKE},
+            "openai": {"apiKey": credentials.FALLBACK_KEY_FAKE},
         },
     })
 

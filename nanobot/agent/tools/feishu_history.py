@@ -143,11 +143,14 @@ class FeishuChatHistoryTool(Tool):
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
-        # ctx.config here is ToolsConfig (no .channels), so load the full config.
+        # Use the instance's own channels config instead of re-reading
+        # config.json: tool registration must stay hermetic (a disk read
+        # here polluted the facade test's load_config patch window,
+        # 2026-09-19) and instance-scoped enablement is the correct
+        # semantics anyway.
         try:
-            from nanobot.config.loader import load_config
-
-            feishu_cfg = getattr(load_config().channels, "feishu", None)
+            channels = getattr(ctx, "channels_config", None)
+            feishu_cfg = getattr(channels, "feishu", None)
         except Exception:
             return False
         if feishu_cfg is None:

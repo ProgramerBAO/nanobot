@@ -36,12 +36,13 @@ from nanobot.runtime_context import (
     append_runtime_context,
 )
 from nanobot.session.manager import FILE_MAX_MESSAGES
+from nanobot.testing import credentials
 from nanobot.utils.llm_runtime import runtime_from_provider_snapshot
 
 
 def _write_config(tmp_path: Path, overrides: dict | None = None) -> Path:
     data = {
-        "providers": {"openrouter": {"apiKey": "sk-test-key"}},
+        "providers": {"openrouter": {"apiKey": credentials.SK_TEST_KEY}},
         "agents": {"defaults": {"model": "openai/gpt-4.1"}},
     }
     if overrides:

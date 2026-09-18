@@ -27,6 +27,7 @@ from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_name
 from nanobot.providers.unconfigured_provider import UnconfiguredProvider
 from nanobot.session.webui_turns import WebuiTurnRoutePolicy
+from nanobot.testing import credentials
 from nanobot.webui.metadata import (
     WEBUI_MESSAGE_SOURCE_METADATA_KEY,
     WEBUI_TURN_METADATA_KEY,
@@ -925,7 +926,7 @@ def test_config_accepts_camel_case_explicit_provider_name_for_coding_plan():
             },
             "providers": {
                 "volcengineCodingPlan": {
-                    "apiKey": "test-key",
+                    "apiKey": credentials.TEST_KEY,
                 }
             },
         }
@@ -1001,7 +1002,7 @@ def test_config_explicit_longcat_provider_resolves_provider_name():
             },
             "providers": {
                 "longcat": {
-                    "apiKey": "test-key",
+                    "apiKey": credentials.TEST_KEY,
                 }
             },
         }
@@ -1015,7 +1016,7 @@ def test_config_auto_detects_longcat_from_model_keyword():
     config = Config.model_validate(
         {
             "agents": {"defaults": {"provider": "auto", "model": "longcat/LongCat-Flash-Chat"}},
-            "providers": {"longcat": {"apiKey": "test-key"}},
+            "providers": {"longcat": {"apiKey": credentials.TEST_KEY}},
         }
     )
 
@@ -1033,7 +1034,7 @@ def test_config_explicit_xiaomi_mimo_provider_uses_default_api_base():
             },
             "providers": {
                 "xiaomiMimo": {
-                    "apiKey": "test-key",
+                    "apiKey": credentials.TEST_KEY,
                 }
             },
         }
@@ -1047,7 +1048,7 @@ def test_config_auto_detects_xiaomi_mimo_from_model_keyword():
     config = Config.model_validate(
         {
             "agents": {"defaults": {"provider": "auto", "model": "mimo/MiniMax-M1-80k"}},
-            "providers": {"xiaomiMimo": {"apiKey": "test-key"}},
+            "providers": {"xiaomiMimo": {"apiKey": credentials.TEST_KEY}},
         }
     )
 
@@ -1066,7 +1067,7 @@ def test_config_explicit_minimax_anthropic_provider_uses_default_api_base():
             },
             "providers": {
                 "minimaxAnthropic": {
-                    "apiKey": "test-key",
+                    "apiKey": credentials.TEST_KEY,
                 }
             },
         }
@@ -1256,7 +1257,7 @@ def test_make_provider_passes_extra_headers_to_custom_provider():
             "agents": {"defaults": {"provider": "custom", "model": "gpt-4o-mini"}},
             "providers": {
                 "custom": {
-                    "apiKey": "test-key",
+                    "apiKey": credentials.TEST_KEY,
                     "apiBase": "https://example.com/v1",
                     "extraHeaders": {
                         "APP-Code": "demo-app",
@@ -1427,7 +1428,7 @@ def test_make_provider_rejects_auto_dynamic_custom_prefix_without_api_base():
                     "apiBase": "https://other.example.test/v1",
                 },
                 "companyProxy": {
-                    "apiKey": "sk-company",
+                    "apiKey": credentials.SK_COMPANY,
                 },
             },
         }

@@ -84,10 +84,10 @@ class FeishuDocReadTool(Tool):
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
+        # Same instance-scoped rationale as feishu_history.enabled.
         try:
-            from nanobot.config.loader import load_config
-
-            feishu_cfg = getattr(load_config().channels, "feishu", None)
+            channels = getattr(ctx, "channels_config", None)
+            feishu_cfg = getattr(channels, "feishu", None)
         except Exception:
             return False
         if feishu_cfg is None:

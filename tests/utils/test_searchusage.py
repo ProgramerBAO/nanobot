@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nanobot.testing import credentials
 from nanobot.utils.helpers import build_status_content
 from nanobot.utils.searchusage import (
     SearchUsageInfo,
@@ -211,7 +212,7 @@ class TestFetchSearchUsageRouting:
         mock_client.get = AsyncMock(return_value=mock_response)
 
         with patch("httpx.AsyncClient", return_value=mock_client):
-            info = await fetch_search_usage("tavily", api_key="test-key")
+            info = await fetch_search_usage("tavily", api_key=credentials.TEST_KEY)
 
         assert info.provider == "tavily"
         assert info.supported is True
@@ -252,7 +253,7 @@ class TestFetchSearchUsageRouting:
         mock_client.get = AsyncMock(side_effect=httpx.ConnectError("timeout"))
 
         with patch("httpx.AsyncClient", return_value=mock_client):
-            info = await fetch_search_usage("tavily", api_key="test-key")
+            info = await fetch_search_usage("tavily", api_key=credentials.TEST_KEY)
 
         assert info.supported is True
         assert info.error is not None

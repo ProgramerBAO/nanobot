@@ -9,6 +9,7 @@ from nanobot.config.loader import (
     save_config,
 )
 from nanobot.config.schema import Config
+from nanobot.testing import credentials
 
 
 class TestResolveEnvVars:
@@ -110,10 +111,10 @@ class TestResolveConfig:
                 {
                     "agents": {"defaults": {"dream": {"cron": "0 */4 * * *"}}},
                     "providers": {
-                        "openaiCodex": {"apiKey": "codex-secret"},
-                        "xaiGrok": {"apiKey": "xai-secret"},
-                        "githubCopilot": {"apiKey": "copilot-secret"},
-                        "groq": {"apiKey": "groq-secret"},
+                        "openaiCodex": {"apiKey": credentials.CODEX_SECRET},
+                        "xaiGrok": {"apiKey": credentials.XAI_SECRET},
+                        "githubCopilot": {"apiKey": credentials.COPILOT_SECRET},
+                        "groq": {"apiKey": credentials.GROQ_SECRET},
                     },
                 }
             ),
@@ -137,11 +138,11 @@ class TestResolveConfig:
             {
                 "providers": {
                     "openaiCodex": {
-                        "apiKey": "codex-secret",
+                        "apiKey": credentials.CODEX_SECRET,
                         "proxy": proxy,
                         "extraBody": {"service_tier": "priority"},
                     },
-                    "groq": {"apiKey": "groq-secret"},
+                    "groq": {"apiKey": credentials.GROQ_SECRET},
                 }
             }
         )
@@ -167,7 +168,7 @@ class TestResolveConfig:
             {
                 "providers": {
                     "xaiGrok": {
-                        "apiKey": "must-not-be-saved",
+                        "apiKey": credentials.placeholder("NANOBOT_TEST_TEST_ENV_INTERPOLATION_1", "must-not-be-saved"),
                         "proxy": proxy,
                         "extraBody": {"parallel_tool_calls": False},
                     }
@@ -195,11 +196,11 @@ class TestResolveConfig:
             {
                 "providers": {
                     "openaiCodex": {
-                        "apiKey": "codex-secret",
+                        "apiKey": credentials.CODEX_SECRET,
                         "extraBody": {"service_tier": "${CODEX_SERVICE_TIER}"},
                     },
                     "xaiGrok": {
-                        "apiKey": "xai-secret",
+                        "apiKey": credentials.XAI_SECRET,
                         "proxy": "http://127.0.0.1:7890",
                         "extraBody": {"parallel_tool_calls": False},
                     },

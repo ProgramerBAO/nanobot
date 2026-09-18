@@ -36,6 +36,7 @@ from nanobot.config.schema import Config, ModelPresetConfig
 from nanobot.runtime_context import RUNTIME_CONTEXT_INPUT_META, WEBUI_QUOTE_SOURCE
 from nanobot.session import webui_turns as wth
 from nanobot.session.manager import SessionManager
+from nanobot.testing import credentials
 from nanobot.webui.gateway_services import GatewayServices, build_gateway_services
 from nanobot.webui.http_utils import (
     issue_route_secret_matches as _issue_route_secret_matches,
@@ -1978,14 +1979,14 @@ async def test_settings_api_returns_safe_subset_and_updates_whitelist(
     config_path = tmp_path / "config.json"
     config = Config()
     config.agents.defaults.model = "openai/gpt-4o"
-    config.providers.openai.api_key = "secret-key"
+    config.providers.openai.api_key = credentials.placeholder("NANOBOT_TEST_TEST_WEBSOCKET_CHANNEL_1", "secret-key")
     config.model_presets["deep"] = ModelPresetConfig(
         model="anthropic/claude-opus-4-5",
         provider="anthropic",
         reasoning_effort="high",
     )
     config.tools.web.search.provider = "brave"
-    config.tools.web.search.api_key = "brave-secret"
+    config.tools.web.search.api_key = credentials.BRAVE_SECRET
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
     monkeypatch.setattr(
@@ -2119,7 +2120,7 @@ async def test_settings_api_returns_safe_subset_and_updates_whitelist(
                     {
                         "name": "Company Gateway",
                         "apiBase": "https://gateway.example/v1",
-                        "apiKey": "sk-company",
+                        "apiKey": credentials.SK_COMPANY,
                         "extraHeaders": json.dumps({"X-Tenant": "engineering"}),
                         "extraBody": json.dumps({"service_tier": "priority"}),
                         "extraQuery": json.dumps({"api-version": "2026-01-01"}),
@@ -2355,7 +2356,7 @@ async def test_image_settings_hot_reload_without_restart(
     port = 29935
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.openrouter.api_key = "image-key"
+    config.providers.openrouter.api_key = credentials.IMAGE_KEY_FAKE
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
     image_reload = AsyncMock(
@@ -2399,7 +2400,7 @@ async def test_image_settings_fall_back_to_restart_when_hot_reload_fails(
     port = 29936
     config_path = tmp_path / "config.json"
     config = Config()
-    config.providers.openrouter.api_key = "image-key"
+    config.providers.openrouter.api_key = credentials.IMAGE_KEY_FAKE
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
     monkeypatch.setattr(

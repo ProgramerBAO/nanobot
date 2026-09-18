@@ -27,6 +27,7 @@ from nanobot.runtime_context import (
 )
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.session.manager import Session, SessionManager
+from nanobot.testing import credentials
 from nanobot.triggers.local_store import LocalTriggerStore
 from nanobot.webui.gateway_services import GatewayServices, build_gateway_services
 
@@ -861,7 +862,7 @@ async def test_pairing_routes_require_token_and_approve_or_deny(
 def test_api_service_settings_read_api_key_from_private_header(bus: MagicMock) -> None:
     channel = _ch(bus)
     request = _FakeReq(
-        {"X-Nanobot-API-Service-Values": json.dumps({"api_key": "secret-token"})},
+        {"X-Nanobot-API-Service-Values": json.dumps({"api_key": credentials.SECRET_TOKEN})},
         path="/api/settings/api-service/start?host=0.0.0.0&port=8900&timeout=120",
     )
 
@@ -1455,7 +1456,7 @@ async def test_channel_configure_route_saves_matrix_device_id_without_replacing_
             "enabled": False,
             "homeserver": "https://matrix.example",
             "userId": "@nanobot:matrix.example",
-            "accessToken": "saved-token",
+            "accessToken": credentials.SAVED_TOKEN,
         },
     )
     loader.save_config(config, config_path)
@@ -1823,7 +1824,7 @@ async def test_mcp_presets_routes_require_token_and_return_payload(
             headers={
                 **auth,
                 "X-Nanobot-MCP-Values": json.dumps(
-                    {"browserbase_api_key": "bb_live_secret"}
+                    {"browserbase_api_key": credentials.BB_LIVE_SECRET}
                 ),
             },
         )

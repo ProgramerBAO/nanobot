@@ -3,6 +3,7 @@ import warnings
 import pytest
 
 from nanobot.config.schema import Config
+from nanobot.testing import credentials
 
 
 def test_resolve_preset_returns_defaults_when_no_preset() -> None:
@@ -131,7 +132,7 @@ def test_dynamic_custom_provider_prefix_does_not_fall_through_when_base_missing(
                 "apiBase": "https://other.example.test/v1",
             },
             "companyProxy": {
-                "apiKey": "sk-company",
+                "apiKey": credentials.SK_COMPANY,
             },
         },
     })
@@ -359,7 +360,7 @@ def test_match_provider_routes_forced_novita_model_api_models() -> None:
 def test_transcription_only_provider_is_not_chat_fallback() -> None:
     config = Config.model_validate({
         "providers": {
-            "assemblyai": {"apiKey": "aai-test"},
+            "assemblyai": {"apiKey": credentials.AAI_TEST},
         },
         "agents": {
             "defaults": {
