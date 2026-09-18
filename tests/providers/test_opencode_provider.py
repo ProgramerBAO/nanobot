@@ -3,6 +3,7 @@
 from nanobot.config.schema import Config, ProvidersConfig
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 from nanobot.providers.registry import PROVIDERS, find_by_name
+from nanobot.testing import credentials
 
 
 def test_opencode_config_fields_exist() -> None:
@@ -56,7 +57,7 @@ def test_find_by_name_opencode_providers() -> None:
 def test_opencode_forced_providers_use_default_api_base() -> None:
     zen_config = Config.model_validate(
         {
-            "providers": {"opencode": {"apiKey": "opencode-key"}},
+            "providers": {"opencode": {"apiKey": credentials.OPENCODE_KEY_FAKE}},
             "agents": {"defaults": {"provider": "opencode", "model": "opencode/o3"}},
         }
     )
@@ -67,7 +68,7 @@ def test_opencode_forced_providers_use_default_api_base() -> None:
 
     legacy_zen_config = Config.model_validate(
         {
-            "providers": {"opencodeZen": {"apiKey": "opencode-key"}},
+            "providers": {"opencodeZen": {"apiKey": credentials.OPENCODE_KEY_FAKE}},
             "agents": {"defaults": {"provider": "opencode_zen", "model": "opencode/o3"}},
         }
     )
@@ -78,7 +79,7 @@ def test_opencode_forced_providers_use_default_api_base() -> None:
 
     go_config = Config.model_validate(
         {
-            "providers": {"opencodeGo": {"apiKey": "opencode-key"}},
+            "providers": {"opencodeGo": {"apiKey": credentials.OPENCODE_KEY_FAKE}},
             "agents": {"defaults": {"provider": "opencode_go", "model": "opencode-go/o3"}},
         }
     )

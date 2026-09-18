@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from nanobot.providers import github_copilot_provider as gc
+from nanobot.testing import credentials
 
 
 def test_resolve_falls_back_to_default_without_env(monkeypatch):
@@ -81,7 +82,7 @@ def test_login_uses_enterprise_endpoint_overrides(monkeypatch):
                         "expires_in": 60,
                     }
                 )
-            return FakeResponse({"access_token": "github-token", "expires_in": 3600})
+            return FakeResponse({"access_token": credentials.GITHUB_TOKEN_FAKE, "expires_in": 3600})
 
         def get(self, url, *, headers):
             calls.append(("get", url, headers))

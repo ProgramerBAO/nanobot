@@ -5,6 +5,7 @@ from __future__ import annotations
 from nanobot.config.schema import Config, ProviderConfig, ProvidersConfig
 from nanobot.providers.factory import provider_signature
 from nanobot.providers.registry import create_dynamic_spec
+from nanobot.testing import credentials
 
 
 class TestCustomProviderThinkingStyle:
@@ -96,7 +97,7 @@ class TestCustomProviderThinkingStyle:
                     "fallback": {"model": "tenant-model", "provider": "tenant"},
                 },
                 "providers": {
-                    "openai": {"apiKey": "sk-openai"},
+                    "openai": {"apiKey": credentials.SK_OPENAI},
                     "tenant": {
                         "apiBase": "https://example.com/v1",
                         "thinkingStyle": "thinking_type",

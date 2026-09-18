@@ -2,6 +2,7 @@ from unittest.mock import patch, sentinel
 
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 from nanobot.providers.registry import ProviderSpec
+from nanobot.testing import credentials
 
 
 def _assert_openai_compat_timeout(timeout) -> None:
@@ -10,7 +11,7 @@ def _assert_openai_compat_timeout(timeout) -> None:
 
 async def test_openai_compat_provider_defers_sdk_client_until_first_use() -> None:
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
-        provider = OpenAICompatProvider(api_key="test-key", api_base="https://example.com/v1")
+        provider = OpenAICompatProvider(api_key=credentials.TEST_KEY, api_base="https://example.com/v1")
         mock_async_openai.assert_not_called()
         await provider._ensure_client()
 
@@ -55,7 +56,7 @@ async def test_openai_compat_provider_timeout_can_be_overridden_by_env(monkeypat
     monkeypatch.setenv("NANOBOT_OPENAI_COMPAT_TIMEOUT_S", "45")
 
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
-        provider = OpenAICompatProvider(api_key="test-key", api_base="https://example.com/v1")
+        provider = OpenAICompatProvider(api_key=credentials.TEST_KEY, api_base="https://example.com/v1")
         await provider._ensure_client()
 
     assert mock_async_openai.call_args.kwargs["timeout"] == 45.0

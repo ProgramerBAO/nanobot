@@ -23,6 +23,7 @@ from typing import Any
 from nanobot.config.schema import ProvidersConfig
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 from nanobot.providers.registry import PROVIDERS
+from nanobot.testing import credentials
 
 
 def _mimo_spec():
@@ -39,7 +40,7 @@ def _openrouter_spec():
 
 def _mimo_provider() -> OpenAICompatProvider:
     return OpenAICompatProvider(
-        api_key="test-key",
+        api_key=credentials.TEST_KEY,
         default_model="mimo-v2.5-pro",
         spec=_mimo_spec(),
     )
@@ -48,7 +49,7 @@ def _mimo_provider() -> OpenAICompatProvider:
 def _openrouter_provider(default_model: str) -> OpenAICompatProvider:
     """Provider configured as OpenRouter (gateway, no thinking_style on spec)."""
     return OpenAICompatProvider(
-        api_key="sk-or-test",
+        api_key=credentials.SK_OR_TEST,
         default_model=default_model,
         spec=_openrouter_spec(),
     )

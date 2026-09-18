@@ -22,6 +22,7 @@ from nanobot.providers.image_generation import (
     StepFunImageGenerationClient,
     ZhipuImageGenerationClient,
 )
+from nanobot.testing import credentials
 
 PNG_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -121,7 +122,7 @@ async def test_openrouter_image_generation_payload_and_response(tmp_path: Path) 
         )
     )
     client = OpenRouterImageGenerationClient(
-        api_key="sk-or-test",
+        api_key=credentials.SK_OR_TEST,
         api_base="https://openrouter.ai/api/v1/",
         extra_headers={"X-Test": "1"},
         client=fake,  # type: ignore[arg-type]
@@ -153,7 +154,7 @@ async def test_openrouter_image_generation_payload_and_response(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_openrouter_image_generation_requires_images() -> None:
     fake = FakeClient(FakeResponse({"choices": [{"message": {"content": "text only"}}]}))
-    client = OpenRouterImageGenerationClient(api_key="sk-or-test", client=fake)  # type: ignore[arg-type]
+    client = OpenRouterImageGenerationClient(api_key=credentials.SK_OR_TEST, client=fake)  # type: ignore[arg-type]
 
     with pytest.raises(ImageGenerationError, match="returned no images"):
         await client.generate(prompt="draw", model="model")
@@ -172,7 +173,7 @@ async def test_ollama_image_generation_payload_and_response() -> None:
     raw_b64 = PNG_DATA_URL.removeprefix("data:image/png;base64,")
     fake = FakeClient(FakeResponse({"image": raw_b64}))
     client = OllamaImageGenerationClient(
-        api_key="ollama-test",
+        api_key=credentials.OLLAMA_TEST,
         api_base="http://localhost:11434/v1/",
         extra_headers={"X-Test": "1"},
         extra_body={"seed": 123},
@@ -220,7 +221,7 @@ async def test_aihubmix_image_generation_payload_and_response() -> None:
     raw_b64 = PNG_DATA_URL.removeprefix("data:image/png;base64,")
     fake = FakeClient(FakeResponse({"output": {"b64_json": [{"bytesBase64": raw_b64}]}}))
     client = AIHubMixImageGenerationClient(
-        api_key="sk-ahm-test",
+        api_key=credentials.SK_AHM_TEST,
         api_base="https://aihubmix.com/v1/",
         extra_headers={"APP-Code": "nanobot"},
         extra_body={"quality": "low"},
@@ -256,7 +257,7 @@ async def test_aihubmix_image_edit_payload_uses_reference_images(tmp_path: Path)
     ref = tmp_path / "ref.png"
     ref.write_bytes(PNG_BYTES)
     client = AIHubMixImageGenerationClient(
-        api_key="sk-ahm-test",
+        api_key=credentials.SK_AHM_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -281,7 +282,7 @@ async def test_aihubmix_image_generation_downloads_url_response() -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
     client = AIHubMixImageGenerationClient(
-        api_key="sk-ahm-test",
+        api_key=credentials.SK_AHM_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -296,7 +297,7 @@ async def test_aihubmix_base64_response_uses_detected_mime() -> None:
     raw_b64 = base64.b64encode(JPEG_BYTES).decode("ascii")
     fake = FakeClient(FakeResponse({"output": {"b64_json": raw_b64}}))
     client = AIHubMixImageGenerationClient(
-        api_key="sk-ahm-test",
+        api_key=credentials.SK_AHM_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -314,7 +315,7 @@ async def test_gemini_imagen_payload_and_response() -> None:
         FakeResponse({"predictions": [{"bytesBase64Encoded": RAW_B64, "mimeType": "image/png"}]})
     )
     client = GeminiImageGenerationClient(
-        api_key="AIza-test",
+        api_key=credentials.AIZA_TEST,
         api_base="https://generativelanguage.googleapis.com/v1beta",
         client=fake,  # type: ignore[arg-type]
     )
@@ -342,7 +343,7 @@ async def test_gemini_imagen_ignores_unsupported_aspect_ratio() -> None:
     fake = FakeClient(
         FakeResponse({"predictions": [{"bytesBase64Encoded": RAW_B64, "mimeType": "image/png"}]})
     )
-    client = GeminiImageGenerationClient(api_key="AIza-test", client=fake)  # type: ignore[arg-type]
+    client = GeminiImageGenerationClient(api_key=credentials.AIZA_TEST, client=fake)  # type: ignore[arg-type]
 
     await client.generate(prompt="a sunset", model="imagen-4.0-generate-001", aspect_ratio="2:3")
 
@@ -369,7 +370,7 @@ async def test_gemini_flash_payload_and_response() -> None:
         )
     )
     client = GeminiImageGenerationClient(
-        api_key="AIza-test",
+        api_key=credentials.AIZA_TEST,
         api_base="https://generativelanguage.googleapis.com/v1beta",
         client=fake,  # type: ignore[arg-type]
     )
@@ -407,7 +408,7 @@ async def test_gemini_flash_reference_images(tmp_path: Path) -> None:
             }
         )
     )
-    client = GeminiImageGenerationClient(api_key="AIza-test", client=fake)  # type: ignore[arg-type]
+    client = GeminiImageGenerationClient(api_key=credentials.AIZA_TEST, client=fake)  # type: ignore[arg-type]
 
     response = await client.generate(
         prompt="edit this",
@@ -431,14 +432,14 @@ async def test_gemini_requires_api_key() -> None:
 
 
 def test_gemini_image_client_uses_native_api_base_by_default() -> None:
-    client = GeminiImageGenerationClient(api_key="AIza-test")
+    client = GeminiImageGenerationClient(api_key=credentials.AIZA_TEST)
     assert client.api_base == "https://generativelanguage.googleapis.com/v1beta"
 
 
 @pytest.mark.asyncio
 async def test_gemini_no_images_raises() -> None:
     fake = FakeClient(FakeResponse({"candidates": [{"content": {"parts": [{"text": "sorry"}]}}]}))
-    client = GeminiImageGenerationClient(api_key="AIza-test", client=fake)  # type: ignore[arg-type]
+    client = GeminiImageGenerationClient(api_key=credentials.AIZA_TEST, client=fake)  # type: ignore[arg-type]
 
     with pytest.raises(ImageGenerationError, match="returned no images"):
         await client.generate(prompt="draw", model="gemini-2.0-flash-preview-image-generation")
@@ -450,7 +451,7 @@ async def test_minimax_payload_and_response_with_reference_image(tmp_path: Path)
     ref.write_bytes(PNG_BYTES)
     fake = FakeClient(FakeResponse({"data": {"image_base64": [RAW_B64]}}))
     client = MiniMaxImageGenerationClient(
-        api_key="sk-mm-test",
+        api_key=credentials.SK_MM_TEST,
         api_base="https://api.minimaxi.com/v1/",
         extra_headers={"X-Test": "1"},
         client=fake,  # type: ignore[arg-type]
@@ -481,7 +482,7 @@ async def test_minimax_payload_and_response_with_reference_image(tmp_path: Path)
 async def test_minimax_base64_response_uses_detected_mime() -> None:
     raw_b64 = base64.b64encode(JPEG_BYTES).decode("ascii")
     fake = FakeClient(FakeResponse({"data": {"image_base64": [raw_b64]}}))
-    client = MiniMaxImageGenerationClient(api_key="sk-mm-test", client=fake)  # type: ignore[arg-type]
+    client = MiniMaxImageGenerationClient(api_key=credentials.SK_MM_TEST, client=fake)  # type: ignore[arg-type]
 
     response = await client.generate(prompt="draw", model="image-01")
 
@@ -496,7 +497,7 @@ async def test_minimax_base64_response_uses_detected_mime() -> None:
 async def test_stepfun_payload_and_response_with_aspect_ratio() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = StepFunImageGenerationClient(
-        api_key="sk-sf-test",
+        api_key=credentials.SK_SF_TEST,
         api_base="https://api.stepfun.com/v1",
         extra_headers={"X-Test": "1"},
         client=fake,  # type: ignore[arg-type]
@@ -525,7 +526,7 @@ async def test_stepfun_payload_and_response_with_aspect_ratio() -> None:
 async def test_stepfun_default_size_when_no_aspect_ratio() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = StepFunImageGenerationClient(
-        api_key="sk-sf-test",
+        api_key=credentials.SK_SF_TEST,
         api_base="https://api.stepfun.com/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -540,7 +541,7 @@ async def test_stepfun_default_size_when_no_aspect_ratio() -> None:
 async def test_stepfun_uses_explicit_image_size() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = StepFunImageGenerationClient(
-        api_key="sk-sf-test",
+        api_key=credentials.SK_SF_TEST,
         api_base="https://api.stepfun.com/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -562,7 +563,7 @@ async def test_stepfun_style_reference_on_1x_model(tmp_path: Path) -> None:
     ref.write_bytes(PNG_BYTES)
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = StepFunImageGenerationClient(
-        api_key="sk-sf-test",
+        api_key=credentials.SK_SF_TEST,
         api_base="https://api.stepfun.com/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -583,7 +584,7 @@ async def test_stepfun_no_style_reference_on_non_1x_model() -> None:
     """step-image-edit-2 does not use style_reference; reference images are ignored."""
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = StepFunImageGenerationClient(
-        api_key="sk-sf-test",
+        api_key=credentials.SK_SF_TEST,
         api_base="https://api.stepfun.com/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -609,7 +610,7 @@ async def test_stepfun_requires_api_key() -> None:
 @pytest.mark.asyncio
 async def test_stepfun_no_images_raises() -> None:
     fake = FakeClient(FakeResponse({"data": [{"text": "sorry"}]}))
-    client = StepFunImageGenerationClient(api_key="sk-sf-test", client=fake)  # type: ignore[arg-type]
+    client = StepFunImageGenerationClient(api_key=credentials.SK_SF_TEST, client=fake)  # type: ignore[arg-type]
 
     with pytest.raises(ImageGenerationError, match="returned no images"):
         await client.generate(prompt="draw", model="step-image-edit-2")
@@ -624,7 +625,7 @@ async def test_stepfun_no_images_raises() -> None:
 async def test_openai_payload_and_response() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         api_base="https://api.openai.com/v1",
         extra_headers={"X-Test": "1"},
         client=fake,  # type: ignore[arg-type]
@@ -653,7 +654,7 @@ async def test_openai_payload_and_response() -> None:
 async def test_openai_extra_body_null_drops_default_params_only() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         extra_body={
             "response_format": None,
             "seed": 0,
@@ -676,7 +677,7 @@ async def test_openai_b64_json_response_uses_detected_mime() -> None:
     raw_b64 = base64.b64encode(JPEG_BYTES).decode("ascii")
     fake = FakeClient(FakeResponse({"data": [{"b64_json": raw_b64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -690,7 +691,7 @@ async def test_openai_url_download_fallback() -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -709,7 +710,7 @@ async def test_openai_multiple_images() -> None:
         ]
     }))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -723,7 +724,7 @@ async def test_openai_multiple_images() -> None:
 async def test_openai_aspect_ratio_to_size() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -735,7 +736,7 @@ async def test_openai_aspect_ratio_to_size() -> None:
 async def test_openai_dalle3_uses_supported_orientation_sizes() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -750,7 +751,7 @@ async def test_openai_dalle3_uses_supported_orientation_sizes() -> None:
 async def test_openai_dalle2_uses_square_size_for_non_square_ratios() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -763,7 +764,7 @@ async def test_openai_dalle2_uses_square_size_for_non_square_ratios() -> None:
 async def test_openai_gpt_image_uses_supported_landscape_size() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -776,7 +777,7 @@ async def test_openai_gpt_image_uses_supported_landscape_size() -> None:
 async def test_openai_gpt_image_uses_supported_orientation_sizes() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -793,7 +794,7 @@ async def test_openai_reference_images_use_edits_endpoint(tmp_path: Path) -> Non
     ref.write_bytes(PNG_BYTES)
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         api_base="https://api.openai.com/v1",
         extra_headers={"X-Test": "1"},
         client=fake,  # type: ignore[arg-type]
@@ -834,7 +835,7 @@ async def test_openai_reference_images_expand_user_paths(
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -862,7 +863,7 @@ async def test_openai_reference_images_send_multiple_multipart_files(
     second.write_bytes(PNG_BYTES)
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         extra_body={
             "quality": "high",
             "seed": 0,
@@ -897,7 +898,7 @@ async def test_openai_reference_images_send_multiple_multipart_files(
 async def test_openai_gpt_image_without_reference_images_uses_generations_json() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -917,7 +918,7 @@ async def test_openai_gpt_image_without_reference_images_uses_generations_json()
 async def test_openai_dalle_reference_images_raise_clear_error(tmp_path: Path) -> None:
     ref = tmp_path / "ref.png"
     ref.write_bytes(PNG_BYTES)
-    client = OpenAIImageGenerationClient(api_key="sk-openai-test")
+    client = OpenAIImageGenerationClient(api_key=credentials.SK_OPENAI_TEST)
 
     with pytest.raises(ImageGenerationError, match="does not support reference images"):
         await client.generate(
@@ -931,7 +932,7 @@ async def test_openai_dalle_reference_images_raise_clear_error(tmp_path: Path) -
 async def test_openai_default_size_when_no_aspect_ratio() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -945,7 +946,7 @@ async def test_openai_default_size_when_no_aspect_ratio() -> None:
 async def test_openai_ignores_explicit_size_unsupported_by_model_family() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -964,7 +965,7 @@ async def test_openai_ignores_explicit_size_unsupported_by_model_family() -> Non
 async def test_openai_uses_explicit_image_size() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -996,7 +997,7 @@ async def test_openai_requires_api_key() -> None:
 async def test_custom_generate_success() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = CustomImageGenerationClient(
-        api_key="sk-custom-test",
+        api_key=credentials.SK_CUSTOM_TEST,
         api_base="https://custom.example/v1/",
         extra_headers={"X-Test": "1"},
         client=fake,  # type: ignore[arg-type]
@@ -1027,7 +1028,7 @@ async def test_custom_generate_success() -> None:
 async def test_custom_generate_preserves_provider_size_hint() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = CustomImageGenerationClient(
-        api_key="sk-custom-test",
+        api_key=credentials.SK_CUSTOM_TEST,
         api_base="https://custom.example/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -1045,7 +1046,7 @@ async def test_custom_generate_preserves_provider_size_hint() -> None:
 async def test_custom_generate_maps_one_k_to_openai_dimension() -> None:
     fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
     client = CustomImageGenerationClient(
-        api_key="sk-custom-test",
+        api_key=credentials.SK_CUSTOM_TEST,
         api_base="https://custom.example/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -1064,7 +1065,7 @@ async def test_custom_generate_extra_body_can_override_defaults() -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://images.example/cat.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
     client = CustomImageGenerationClient(
-        api_key="sk-custom-test",
+        api_key=credentials.SK_CUSTOM_TEST,
         api_base="https://custom.example/v1",
         extra_body={"response_format": "url", "size": "2K"},
         client=fake,  # type: ignore[arg-type]
@@ -1101,7 +1102,7 @@ async def test_custom_generate_without_api_key_omits_authorization() -> None:
 
 @pytest.mark.asyncio
 async def test_custom_generate_requires_api_base() -> None:
-    client = CustomImageGenerationClient(api_key="sk-custom-test")
+    client = CustomImageGenerationClient(api_key=credentials.SK_CUSTOM_TEST)
 
     with pytest.raises(ImageGenerationError, match="providers.custom.apiBase"):
         await client.generate(prompt="draw", model="custom-image-model")
@@ -1111,7 +1112,7 @@ async def test_custom_generate_requires_api_base() -> None:
 async def test_custom_generate_http_error() -> None:
     fake = FakeClient(FakeResponse({"error": "bad request"}, status_code=400))
     client = CustomImageGenerationClient(
-        api_key="sk-custom-test",
+        api_key=credentials.SK_CUSTOM_TEST,
         api_base="https://custom.example/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -1420,7 +1421,7 @@ async def test_codex_json_result_format(monkeypatch) -> None:
 async def test_openai_no_images_raises() -> None:
     fake = FakeClient(FakeResponse({"data": []}))
     client = OpenAIImageGenerationClient(
-        api_key="sk-openai-test",
+        api_key=credentials.SK_OPENAI_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1438,7 +1439,7 @@ async def test_zhipu_image_generation_payload_and_response() -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
     client = ZhipuImageGenerationClient(
-        api_key="sk-zhipu-test",
+        api_key=credentials.SK_ZHIPU_TEST,
         api_base="https://open.bigmodel.cn/api/paas/v4",
         extra_headers={"X-Test": "1"},
         extra_body={"watermark_enabled": False},
@@ -1469,7 +1470,7 @@ async def test_zhipu_image_generation_with_explicit_size() -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
     client = ZhipuImageGenerationClient(
-        api_key="sk-zhipu-test",
+        api_key=credentials.SK_ZHIPU_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1488,7 +1489,7 @@ async def test_zhipu_image_generation_downloads_url_response() -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
     client = ZhipuImageGenerationClient(
-        api_key="sk-zhipu-test",
+        api_key=credentials.SK_ZHIPU_TEST,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1509,7 +1510,7 @@ async def test_zhipu_image_generation_requires_api_key() -> None:
 @pytest.mark.asyncio
 async def test_zhipu_image_generation_no_images_raises() -> None:
     fake = FakeClient(FakeResponse({"data": [{"text": "sorry"}]}))
-    client = ZhipuImageGenerationClient(api_key="sk-zhipu-test", client=fake)  # type: ignore[arg-type]
+    client = ZhipuImageGenerationClient(api_key=credentials.SK_ZHIPU_TEST, client=fake)  # type: ignore[arg-type]
 
     with pytest.raises(ImageGenerationError, match="returned no images"):
         await client.generate(prompt="draw", model="glm-image")
@@ -1517,7 +1518,7 @@ async def test_zhipu_image_generation_no_images_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_zhipu_image_generation_rejects_reference_images() -> None:
-    client = ZhipuImageGenerationClient(api_key="sk-zhipu-test")
+    client = ZhipuImageGenerationClient(api_key=credentials.SK_ZHIPU_TEST)
 
     with pytest.raises(ImageGenerationError, match="reference images"):
         await client.generate(
@@ -1586,7 +1587,7 @@ async def test_modelscope_image_generation_submit_and_poll() -> None:
     ]
     fake = ModelScopeFakeClient(submit, poll_responses)
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         api_base="https://api-inference.modelscope.cn/v1",
         client=fake,  # type: ignore[arg-type]
     )
@@ -1619,7 +1620,7 @@ async def test_modelscope_image_generation_with_size() -> None:
     poll = [FakeResponse({"task_status": "SUCCEED", "output_images": ["https://cdn/img.png"]})]
     fake = ModelScopeFakeClient(submit, poll)
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1652,7 +1653,7 @@ async def test_modelscope_image_generation_aspect_ratio_mapping(
     poll = [FakeResponse({"task_status": "SUCCEED", "output_images": ["https://cdn/img.png"]})]
     fake = ModelScopeFakeClient(submit, poll)
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1667,7 +1668,7 @@ async def test_modelscope_image_generation_task_failed() -> None:
     poll = [FakeResponse({"task_status": "FAILED", "errors": "oom"})]
     fake = ModelScopeFakeClient(submit, poll)
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1688,7 +1689,7 @@ async def test_modelscope_image_generation_missing_task_id() -> None:
     submit = FakeResponse({"unexpected": "response"})
     fake = ModelScopeFakeClient(submit, [])
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1703,7 +1704,7 @@ async def test_modelscope_image_generation_with_reference_image() -> None:
     poll = [FakeResponse({"task_status": "SUCCEED", "output_images": ["https://cdn/img.png"]})]
     fake = ModelScopeFakeClient(submit, poll)
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1734,7 +1735,7 @@ async def test_modelscope_image_generation_extra_body_passthrough() -> None:
     poll = [FakeResponse({"task_status": "SUCCEED", "output_images": ["https://cdn/img.png"]})]
     fake = ModelScopeFakeClient(submit, poll)
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         extra_body={"loras": "lora-repo-1", "seed": 42},
         client=fake,  # type: ignore[arg-type]
     )
@@ -1757,7 +1758,7 @@ async def test_modelscope_image_generation_poll_timeout(monkeypatch) -> None:
     poll = [FakeResponse({"task_status": "PENDING"})]
     fake = ModelScopeFakeClient(submit, poll)
     client = ModelScopeImageGenerationClient(
-        api_key="ms-token",
+        api_key=credentials.MS_TOKEN,
         client=fake,  # type: ignore[arg-type]
     )
 

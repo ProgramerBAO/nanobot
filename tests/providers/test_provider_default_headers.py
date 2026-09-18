@@ -1,6 +1,7 @@
 from nanobot.config.schema import Config, ProviderConfig
 from nanobot.providers.factory import _provider_extra_headers, provider_signature
 from nanobot.providers.registry import find_by_name
+from nanobot.testing import credentials
 
 
 def test_kimi_coding_uses_default_user_agent_header() -> None:
@@ -31,7 +32,7 @@ def test_provider_signature_tracks_default_extra_headers() -> None:
     config = Config.model_validate({
         "providers": {
             "kimiCoding": {
-                "apiKey": "sk-kimi-test",
+                "apiKey": credentials.SK_KIMI_TEST,
             },
         },
         "modelPresets": {

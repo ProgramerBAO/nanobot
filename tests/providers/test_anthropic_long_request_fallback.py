@@ -15,6 +15,7 @@ import pytest
 
 from nanobot.providers.anthropic_provider import AnthropicProvider
 from nanobot.providers.base import LLMResponse
+from nanobot.testing import credentials
 
 _LONG_REQUEST_MESSAGE = (
     "Streaming is required for operations that may take longer than 10 minutes. "
@@ -23,7 +24,7 @@ _LONG_REQUEST_MESSAGE = (
 
 
 def _make_provider() -> AnthropicProvider:
-    provider = AnthropicProvider(api_key="test-key")
+    provider = AnthropicProvider(api_key=credentials.TEST_KEY)
     provider._client = MagicMock()
     return provider
 

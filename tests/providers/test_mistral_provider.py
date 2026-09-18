@@ -7,6 +7,7 @@ from unittest.mock import patch
 from nanobot.config.schema import ProvidersConfig
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 from nanobot.providers.registry import PROVIDERS, find_by_name
+from nanobot.testing import credentials
 
 
 def _mistral_provider(default_model: str = "mistral-medium-3-5") -> OpenAICompatProvider:
@@ -14,7 +15,7 @@ def _mistral_provider(default_model: str = "mistral-medium-3-5") -> OpenAICompat
     assert spec is not None
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
         return OpenAICompatProvider(
-            api_key="test-key",
+            api_key=credentials.TEST_KEY,
             default_model=default_model,
             spec=spec,
         )
@@ -48,7 +49,7 @@ def test_mistral_keyword_match_covers_model_families() -> None:
         "devstral-medium-latest",
     ):
         config = Config.model_validate({
-            "providers": {"mistral": {"apiKey": "test-key"}},
+            "providers": {"mistral": {"apiKey": credentials.TEST_KEY}},
             "agents": {"defaults": {"model": model}},
         })
         assert config.get_provider_name(model) == "mistral", model
@@ -202,7 +203,7 @@ def test_thinking_content_only_for_mistral_spec() -> None:
     assert other_spec is not None
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
         p = OpenAICompatProvider(
-            api_key="test-key",
+            api_key=credentials.TEST_KEY,
             default_model="gpt-4o",
             spec=other_spec,
         )

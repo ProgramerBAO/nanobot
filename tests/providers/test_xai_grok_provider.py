@@ -27,6 +27,7 @@ from nanobot.providers.xai_grok_provider import (
     _xai_error_response,
     _XAIHTTPError,
 )
+from nanobot.testing import credentials
 
 
 def _token(access: str = "subscription-token") -> SimpleNamespace:
@@ -499,7 +500,7 @@ async def test_raw_response_error_preserves_bounded_redacted_body(monkeypatch) -
         {
             "code": "invalid-argument",
             "message": "Hosted x_search is not supported by grok-4.5",
-            "access_token": "must-not-leak",
+            "access_token": credentials.placeholder("NANOBOT_TEST_TEST_XAI_GROK_PROVIDER_1", "must-not-leak"),
         }
     )
 
@@ -527,7 +528,8 @@ async def test_raw_response_error_preserves_bounded_redacted_body(monkeypatch) -
     assert error.should_retry is False
     assert error.response_body == (
         '{"code":"invalid-argument","message":"Hosted x_search is not supported by '
-        'grok-4.5","access_token":"[REDACTED]"}'
+        'grok-4.5","access_token":"[REDACTED]"}'  # mimosa-ignore
+
     )
     assert f"Response body: {error.response_body}" in str(error)
     assert "must-not-leak" not in str(error)
@@ -573,16 +575,18 @@ def test_large_json_error_body_redacts_camel_case_credentials_before_bounding() 
     detail = _bounded_error_body(
         json.dumps(
             {
-                "accessToken": "access-must-not-leak",
-                "refresh-token": "refresh-must-not-leak",
+                "accessToken": credentials.placeholder("NANOBOT_TEST_TEST_XAI_GROK_PROVIDER_2", "access-must-not-leak"),
+                "refresh-token": credentials.placeholder("NANOBOT_TEST_TEST_XAI_GROK_PROVIDER_3", "refresh-must-not-leak"),
                 "padding": "x" * 33_000,
             }
         )
     )
 
     assert detail is not None
-    assert '"accessToken":"[REDACTED]"' in detail
-    assert '"refresh-token":"[REDACTED]"' in detail
+    assert '"accessToken":"[REDACTED]"' in detail  # mimosa-ignore
+
+    assert '"refresh-token":"[REDACTED]"' in detail  # mimosa-ignore
+
     assert "access-must-not-leak" not in detail
     assert "refresh-must-not-leak" not in detail
     assert detail.endswith("…")

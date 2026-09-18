@@ -5,6 +5,7 @@ from unittest.mock import patch
 from nanobot.config.schema import Config, ProvidersConfig
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 from nanobot.providers.registry import PROVIDERS, find_by_name
+from nanobot.testing import credentials
 
 
 def test_modelscope_config_field_exists() -> None:
@@ -39,7 +40,7 @@ def test_modelscope_forced_provider_uses_default_api_base() -> None:
         {
             "providers": {
                 "modelscope": {
-                    "apiKey": "ms-token",
+                    "apiKey": credentials.MS_TOKEN,
                 },
             },
             "agents": {
@@ -61,7 +62,7 @@ def test_modelscope_keyword_matches_prefixed_model() -> None:
         {
             "providers": {
                 "modelscope": {
-                    "apiKey": "ms-token",
+                    "apiKey": credentials.MS_TOKEN,
                 },
             },
             "agents": {
@@ -80,7 +81,7 @@ def test_modelscope_strips_prefix_in_request_model() -> None:
     spec = find_by_name("modelscope")
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
         provider = OpenAICompatProvider(
-            api_key="ms-token",
+            api_key=credentials.MS_TOKEN,
             default_model="modelscope/Qwen/Qwen3.5-35B-A3B",
             spec=spec,
         )
@@ -106,7 +107,7 @@ def test_modelscope_routes_unprefixed_models_when_configured() -> None:
         {
             "providers": {
                 "modelscope": {
-                    "apiKey": "ms-token",
+                    "apiKey": credentials.MS_TOKEN,
                     "apiBase": "https://api-inference.modelscope.cn/v1",
                 },
             },

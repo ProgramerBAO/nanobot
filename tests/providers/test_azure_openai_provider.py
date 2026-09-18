@@ -12,6 +12,7 @@ from nanobot.providers.azure_openai_provider import (
     _AzureTokenProvider,
 )
 from nanobot.providers.base import LLMResponse
+from nanobot.testing import credentials
 
 # ---------------------------------------------------------------------------
 # Init & validation
@@ -21,7 +22,7 @@ from nanobot.providers.base import LLMResponse
 def test_init_creates_sdk_client():
     """Provider creates an AsyncOpenAI client with correct base_url."""
     provider = AzureOpenAIProvider(
-        api_key="test-key",
+        api_key=credentials.TEST_KEY,
         api_base="https://test-resource.openai.azure.com",
         default_model="gpt-4o-deployment",
     )
@@ -148,7 +149,7 @@ def test_init_explicit_key_does_not_construct_credential(monkeypatch):
     _install_fake_azure_identity(monkeypatch, credential_factory)
 
     provider = AzureOpenAIProvider(
-        api_key="real-key", api_base="https://res.openai.azure.com",
+        api_key=credentials.placeholder("NANOBOT_TEST_TEST_AZURE_OPENAI_PROVIDER_1", "real-key"), api_base="https://res.openai.azure.com",
     )
 
     assert provider._token_provider is None
@@ -344,7 +345,7 @@ def _make_sdk_response(
 @pytest.mark.asyncio
 async def test_chat_success():
     provider = AzureOpenAIProvider(
-        api_key="test-key", api_base="https://test.openai.azure.com", default_model="gpt-4o",
+        api_key=credentials.TEST_KEY, api_base="https://test.openai.azure.com", default_model="gpt-4o",
     )
     mock_resp = _make_sdk_response(content="Hello!")
     provider._client.responses = MagicMock()
@@ -456,7 +457,7 @@ async def test_chat_reasoning_param_format():
 async def test_chat_stream_success():
     """Streaming should call on_content_delta and return combined response."""
     provider = AzureOpenAIProvider(
-        api_key="test-key", api_base="https://test.openai.azure.com", default_model="gpt-4o",
+        api_key=credentials.TEST_KEY, api_base="https://test.openai.azure.com", default_model="gpt-4o",
     )
 
     # Build mock SDK stream events

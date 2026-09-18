@@ -29,6 +29,7 @@ from nanobot.providers.xai_oauth import (
     logout_xai_oauth,
     start_xai_oauth_login,
 )
+from nanobot.testing import credentials
 
 
 def _use_temp_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -116,8 +117,8 @@ def test_login_uses_random_loopback_callback_and_saves_separate_credentials(
     def fake_exchange(endpoint: str, **kwargs):
         exchanged.update(endpoint=endpoint, **kwargs)
         return {
-            "access_token": "access-secret",
-            "refresh_token": "refresh-secret",
+            "access_token": credentials.placeholder("NANOBOT_TEST_TEST_XAI_OAUTH_1", "access-secret"),
+            "refresh_token": credentials.placeholder("NANOBOT_TEST_TEST_XAI_OAUTH_2", "refresh-secret"),
             "expires_in": 3600,
         }
 
@@ -171,7 +172,7 @@ def test_pending_login_accepts_authorization_code_from_remote_browser(
 
     def fake_exchange(endpoint: str, **kwargs):
         exchanged.update(endpoint=endpoint, **kwargs)
-        return {"access_token": "remote-access", "expires_in": 3600}
+        return {"access_token": credentials.placeholder("NANOBOT_TEST_TEST_XAI_OAUTH_3", "remote-access"), "expires_in": 3600}
 
     monkeypatch.setattr(xai_oauth, "_exchange_code", fake_exchange)
 

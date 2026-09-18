@@ -31,6 +31,7 @@ from nanobot.providers.transcription import (
     _resolve_chat_completions_url,
     _resolve_transcription_url,
 )
+from nanobot.testing import credentials
 
 
 @pytest.fixture
@@ -86,7 +87,7 @@ def test_resolver_prefers_top_level_transcription_over_legacy_channels() -> None
     config.transcription.provider = "groq"
     config.transcription.model = "whisper-large-v3-turbo"
     config.transcription.language = "ko"
-    config.providers.groq.api_key = "gsk-test"
+    config.providers.groq.api_key = credentials.GSK_TEST
     config.providers.groq.api_base = "https://groq.example/openai/v1"
 
     resolved = resolve_transcription_config(config)
@@ -103,7 +104,7 @@ def test_resolver_supports_openrouter_transcription_provider() -> None:
     config.transcription.provider = "openrouter"
     config.transcription.model = "nvidia/parakeet-tdt-0.6b-v3"
     config.transcription.language = "en"
-    config.providers.openrouter.api_key = "sk-or-test"
+    config.providers.openrouter.api_key = credentials.SK_OR_TEST
     config.providers.openrouter.api_base = "https://openrouter.ai/api/v1"
 
     resolved = resolve_transcription_config(config)
@@ -200,7 +201,7 @@ def test_resolver_missing_embedded_api_key_ref_degrades_to_not_configured() -> N
 def test_resolver_interpolates_env_ref_in_api_base() -> None:
     config = Config()
     config.transcription.provider = "groq"
-    config.providers.groq.api_key = "gsk-test"
+    config.providers.groq.api_key = credentials.GSK_TEST
     config.providers.groq.api_base = "${MY_GROQ_BASE}"
 
     with patch.dict(os.environ, {"MY_GROQ_BASE": "https://groq.example/v1"}, clear=True):
@@ -212,7 +213,7 @@ def test_resolver_interpolates_env_ref_in_api_base() -> None:
 def test_resolver_missing_embedded_api_base_ref_uses_provider_default() -> None:
     config = Config()
     config.transcription.provider = "groq"
-    config.providers.groq.api_key = "gsk-test"
+    config.providers.groq.api_key = credentials.GSK_TEST
     config.providers.groq.api_base = "https://${MISSING_GROQ_HOST}/openai/v1"
 
     with patch.dict(os.environ, {}, clear=True):
@@ -226,7 +227,7 @@ def test_resolver_supports_xiaomi_mimo_transcription_provider() -> None:
     config.transcription.provider = "xiaomi_mimo"
     config.transcription.model = "mimo-v2.5-asr"
     config.transcription.language = "zh"
-    config.providers.xiaomi_mimo.api_key = "mimo-test"
+    config.providers.xiaomi_mimo.api_key = credentials.MIMO_TEST
     config.providers.xiaomi_mimo.api_base = "https://api.xiaomimimo.com/v1"
 
     resolved = resolve_transcription_config(config)
@@ -242,7 +243,7 @@ def test_resolver_accepts_legacy_xiaomi_transcription_alias() -> None:
     config = Config()
     config.channels.transcription_provider = "xiaomi"
     config.channels.transcription_language = "zh"
-    config.providers.xiaomi_mimo.api_key = "mimo-test"
+    config.providers.xiaomi_mimo.api_key = credentials.MIMO_TEST
 
     resolved = resolve_transcription_config(config)
 
@@ -270,7 +271,7 @@ def test_resolver_supports_assemblyai_provider_config() -> None:
     config.transcription.provider = "assemblyai"
     config.transcription.model = "universal-3-pro"
     config.transcription.language = "en"
-    config.providers.assemblyai.api_key = "aai-test"
+    config.providers.assemblyai.api_key = credentials.AAI_TEST
     config.providers.assemblyai.api_base = "https://assembly.example/v2"
 
     resolved = resolve_transcription_config(config)
@@ -299,7 +300,7 @@ async def test_transcribe_audio_file_routes_openrouter_provider(audio_file: Path
         provider="openrouter",
         model="nvidia/parakeet-tdt-0.6b-v3",
         language="en",
-        api_key="sk-or-test",
+        api_key=credentials.SK_OR_TEST,
         api_base="https://openrouter.ai/api/v1",
         max_duration_sec=120,
         max_upload_mb=25,
@@ -310,7 +311,7 @@ async def test_transcribe_audio_file_routes_openrouter_provider(audio_file: Path
 
     assert result == "openrouter ok"
     assert captured == {
-        "api_key": "sk-or-test",
+        "api_key": credentials.SK_OR_TEST,
         "api_base": "https://openrouter.ai/api/v1",
         "language": "en",
         "model": "nvidia/parakeet-tdt-0.6b-v3",
@@ -335,7 +336,7 @@ async def test_transcribe_audio_file_routes_xiaomi_mimo_provider(audio_file: Pat
         provider="xiaomi_mimo",
         model="mimo-v2.5-asr",
         language="zh",
-        api_key="mimo-test",
+        api_key=credentials.MIMO_TEST,
         api_base="https://api.xiaomimimo.com/v1",
         max_duration_sec=120,
         max_upload_mb=25,
@@ -346,7 +347,7 @@ async def test_transcribe_audio_file_routes_xiaomi_mimo_provider(audio_file: Pat
 
     assert result == "mimo ok"
     assert captured == {
-        "api_key": "mimo-test",
+        "api_key": credentials.MIMO_TEST,
         "api_base": "https://api.xiaomimimo.com/v1",
         "language": "zh",
         "model": "mimo-v2.5-asr",
@@ -371,7 +372,7 @@ async def test_transcribe_audio_file_routes_assemblyai_provider(audio_file: Path
         provider="assemblyai",
         model="universal-3-pro",
         language="en",
-        api_key="aai-test",
+        api_key=credentials.AAI_TEST,
         api_base="https://assembly.example/v2",
         max_duration_sec=120,
         max_upload_mb=25,
@@ -382,7 +383,7 @@ async def test_transcribe_audio_file_routes_assemblyai_provider(audio_file: Path
 
     assert result == "assembly ok"
     assert captured == {
-        "api_key": "aai-test",
+        "api_key": credentials.AAI_TEST,
         "api_base": "https://assembly.example/v2",
         "language": "en",
         "model": "universal-3-pro",
@@ -392,7 +393,7 @@ async def test_transcribe_audio_file_routes_assemblyai_provider(audio_file: Path
 
 def test_resolved_transcription_repr_hides_api_key() -> None:
     config = Config()
-    config.providers.groq.api_key = "gsk-secret"
+    config.providers.groq.api_key = credentials.GSK_SECRET
 
     resolved = resolve_transcription_config(config)
 
@@ -494,7 +495,7 @@ async def test_openai_backoff_grows_exponentially(audio_file: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_groq_retries_on_5xx_then_succeeds(audio_file: Path) -> None:
-    provider = GroqTranscriptionProvider(api_key="gsk-test")
+    provider = GroqTranscriptionProvider(api_key=credentials.GSK_TEST)
     post = AsyncMock(side_effect=[_response(502), _response(200, {"text": "groq ok"})])
     with patch("httpx.AsyncClient.post", post), patch("asyncio.sleep", AsyncMock()):
         result = await provider.transcribe(audio_file)
@@ -504,7 +505,7 @@ async def test_groq_retries_on_5xx_then_succeeds(audio_file: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_groq_does_not_retry_on_auth_error(audio_file: Path) -> None:
-    provider = GroqTranscriptionProvider(api_key="gsk-test")
+    provider = GroqTranscriptionProvider(api_key=credentials.GSK_TEST)
     post = AsyncMock(return_value=_response(403))
     with patch("httpx.AsyncClient.post", post), patch("asyncio.sleep", AsyncMock()):
         result = await provider.transcribe(audio_file)
@@ -819,13 +820,13 @@ async def test_xiaomi_mimo_shares_retry_contract(audio_file: Path) -> None:
 
 
 def test_assemblyai_defaults_and_base_normalization() -> None:
-    provider = AssemblyAITranscriptionProvider(api_key="aai-test")
+    provider = AssemblyAITranscriptionProvider(api_key=credentials.AAI_TEST)
     assert provider.upload_url == "https://api.assemblyai.com/v2/upload"
     assert provider.transcript_url == "https://api.assemblyai.com/v2/transcript"
     assert provider.model == "universal-3-pro,universal-2"
 
     custom = AssemblyAITranscriptionProvider(
-        api_key="aai-test",
+        api_key=credentials.AAI_TEST,
         api_base="https://assembly.example/v2",
         model="universal-3-pro",
     )
@@ -837,7 +838,7 @@ def test_assemblyai_defaults_and_base_normalization() -> None:
 @pytest.mark.asyncio
 async def test_assemblyai_uploads_creates_and_polls(audio_file: Path) -> None:
     provider = AssemblyAITranscriptionProvider(
-        api_key="aai-test",
+        api_key=credentials.AAI_TEST,
         api_base="https://assembly.example/v2",
         language="en",
         model="universal-3-pro,universal-2",
@@ -881,7 +882,7 @@ async def test_assemblyai_uploads_creates_and_polls(audio_file: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_assemblyai_polls_until_completed(audio_file: Path) -> None:
-    provider = AssemblyAITranscriptionProvider(api_key="aai-test")
+    provider = AssemblyAITranscriptionProvider(api_key=credentials.AAI_TEST)
     post = AsyncMock(
         side_effect=[
             _json_response(200, {"upload_url": "https://cdn.example/audio"}, url=provider.upload_url),
@@ -907,7 +908,7 @@ async def test_assemblyai_polls_until_completed(audio_file: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_assemblyai_returns_empty_on_failed_transcript(audio_file: Path) -> None:
-    provider = AssemblyAITranscriptionProvider(api_key="aai-test")
+    provider = AssemblyAITranscriptionProvider(api_key=credentials.AAI_TEST)
     post = AsyncMock(
         side_effect=[
             _json_response(200, {"upload_url": "https://cdn.example/audio"}, url=provider.upload_url),
@@ -1004,5 +1005,5 @@ def test_resolve_transcription_url_keeps_full_endpoint() -> None:
 
 def test_groq_provider_normalizes_chat_style_api_base() -> None:
     """Regression for #3637: apiBase set to the v1 base resolves to the audio endpoint."""
-    provider = GroqTranscriptionProvider(api_key="gsk-test", api_base="https://api.groq.com/openai/v1")
+    provider = GroqTranscriptionProvider(api_key=credentials.GSK_TEST, api_base="https://api.groq.com/openai/v1")
     assert provider.api_url == "https://api.groq.com/openai/v1/audio/transcriptions"

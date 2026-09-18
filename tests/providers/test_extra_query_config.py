@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from nanobot.config.schema import Config, ProviderConfig
 from nanobot.providers.factory import provider_signature
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
+from nanobot.testing import credentials
 
 
 class TestExtraQuerySchema:
@@ -81,7 +82,7 @@ class TestProviderSignatureIncludesExtraQuery:
             },
             "providers": {
                 "custom": {
-                    "apiKey": "test-key",
+                    "apiKey": credentials.TEST_KEY,
                     "extra_query": None,
                 },
             },
@@ -90,7 +91,7 @@ class TestProviderSignatureIncludesExtraQuery:
             **base,
             "providers": {
                 "custom": {
-                    "apiKey": "test-key",
+                    "apiKey": credentials.TEST_KEY,
                     "extra_query": {"api-version": "v1"},
                 },
             },

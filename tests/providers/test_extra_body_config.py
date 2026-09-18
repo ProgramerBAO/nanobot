@@ -10,6 +10,7 @@ from nanobot.providers.openai_compat_provider import (
     _deep_merge,
 )
 from nanobot.providers.registry import find_by_name
+from nanobot.testing import credentials
 
 # ---------------------------------------------------------------------------
 # _deep_merge unit tests
@@ -84,7 +85,7 @@ class TestExtraBodyInit:
 
 def _make_provider(extra_body: dict[str, Any] | None = None) -> OpenAICompatProvider:
     return OpenAICompatProvider(
-        api_key="test-key",
+        api_key=credentials.TEST_KEY,
         default_model="test-model",
         extra_body=extra_body,
     )
@@ -191,7 +192,7 @@ class TestBuildResponsesBodyExtraBody:
 
     def test_responses_extra_body_merges_top_level_fields(self) -> None:
         provider = OpenAICompatProvider(
-            api_key="test-key",
+            api_key=credentials.TEST_KEY,
             default_model="gpt-5",
             spec=find_by_name("openai"),
             extra_body={
@@ -211,7 +212,7 @@ class TestBuildResponsesBodyExtraBody:
 
     def test_responses_extra_body_appends_tools(self) -> None:
         provider = OpenAICompatProvider(
-            api_key="test-key",
+            api_key=credentials.TEST_KEY,
             default_model="gpt-5",
             spec=find_by_name("openai"),
             extra_body={"tools": [{"type": "web_search"}]},
@@ -243,7 +244,7 @@ class TestBuildResponsesBodyExtraBody:
 
     def test_responses_extra_body_merges_include_without_duplicates(self) -> None:
         provider = OpenAICompatProvider(
-            api_key="test-key",
+            api_key=credentials.TEST_KEY,
             default_model="gpt-5",
             spec=find_by_name("openai"),
             extra_body={

@@ -16,6 +16,7 @@ import pytest
 
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 from nanobot.providers.registry import find_by_name
+from nanobot.testing import credentials
 
 
 def _fake_chat_response(content: str = "ok") -> SimpleNamespace:
@@ -477,7 +478,7 @@ async def test_openrouter_sets_default_attribution_headers() -> None:
     spec = find_by_name("openrouter")
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_client_cls:
         provider = OpenAICompatProvider(
-            api_key="sk-or-test-key",
+            api_key=credentials.SK_OR_TEST_KEY,
             api_base="https://openrouter.ai/api/v1",
             default_model="anthropic/claude-sonnet-4-5",
             spec=spec,
@@ -495,7 +496,7 @@ async def test_openrouter_user_headers_override_default_attribution() -> None:
     spec = find_by_name("openrouter")
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_client_cls:
         provider = OpenAICompatProvider(
-            api_key="sk-or-test-key",
+            api_key=credentials.SK_OR_TEST_KEY,
             api_base="https://openrouter.ai/api/v1",
             default_model="anthropic/claude-sonnet-4-5",
             extra_headers={
@@ -525,7 +526,7 @@ async def test_openrouter_keeps_model_name_intact() -> None:
         client_instance.chat.completions.create = mock_create
 
         provider = OpenAICompatProvider(
-            api_key="sk-or-test-key",
+            api_key=credentials.SK_OR_TEST_KEY,
             api_base="https://openrouter.ai/api/v1",
             default_model="anthropic/claude-sonnet-4-5",
             spec=spec,
@@ -550,7 +551,7 @@ async def test_aihubmix_strips_model_prefix() -> None:
         client_instance.chat.completions.create = mock_create
 
         provider = OpenAICompatProvider(
-            api_key="sk-aihub-test-key",
+            api_key=credentials.placeholder("NANOBOT_TEST_TEST_LITELLM_KWARGS_1", "sk-aihub-test-key"),
             api_base="https://aihubmix.com/v1",
             default_model="claude-sonnet-4-5",
             spec=spec,
@@ -575,7 +576,7 @@ async def test_standard_provider_passes_model_through() -> None:
         client_instance.chat.completions.create = mock_create
 
         provider = OpenAICompatProvider(
-            api_key="sk-deepseek-test-key",
+            api_key=credentials.placeholder("NANOBOT_TEST_TEST_LITELLM_KWARGS_2", "sk-deepseek-test-key"),
             default_model="deepseek-chat",
             spec=spec,
         )
@@ -599,7 +600,7 @@ async def test_openai_compat_preserves_extra_content_on_tool_calls() -> None:
         client_instance.chat.completions.create = mock_create
 
         provider = OpenAICompatProvider(
-            api_key="test-key",
+            api_key=credentials.TEST_KEY,
             api_base="https://generativelanguage.googleapis.com/v1beta/openai/",
             default_model="google/gemini-3.1-pro-preview",
             spec=spec,
@@ -643,7 +644,7 @@ def test_openai_model_passthrough() -> None:
     spec = find_by_name("openai")
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-4o",
             spec=spec,
         )
@@ -662,7 +663,7 @@ async def test_direct_openai_gpt5_uses_responses_api() -> None:
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-5-chat",
             spec=spec,
         )
@@ -693,7 +694,7 @@ async def test_direct_openai_reasoning_prefers_responses_api() -> None:
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-4o",
             spec=spec,
         )
@@ -722,7 +723,7 @@ async def test_direct_openai_gpt4o_stays_on_chat_completions() -> None:
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-4o",
             spec=spec,
         )
@@ -747,7 +748,7 @@ async def test_openrouter_gpt5_stays_on_chat_completions() -> None:
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-or-test-key",
+            api_key=credentials.SK_OR_TEST_KEY,
             api_base="https://openrouter.ai/api/v1",
             default_model="openai/gpt-5",
             spec=spec,
@@ -773,7 +774,7 @@ async def test_direct_openai_streaming_gpt5_uses_responses_api() -> None:
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-5-chat",
             spec=spec,
         )
@@ -800,7 +801,7 @@ async def test_direct_openai_responses_404_falls_back_to_chat_completions() -> N
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-5-chat",
             spec=spec,
         )
@@ -826,7 +827,7 @@ async def test_direct_openai_open_circuit_skips_responses_api() -> None:
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-5-chat",
             spec=spec,
         )
@@ -857,7 +858,7 @@ async def test_direct_openai_stream_responses_unsupported_param_falls_back() -> 
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-5-chat",
             spec=spec,
         )
@@ -883,7 +884,7 @@ async def test_direct_openai_responses_rate_limit_does_not_fallback() -> None:
         client_instance.responses.create = mock_responses
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-5-chat",
             spec=spec,
         )
@@ -908,7 +909,7 @@ def test_openai_compat_build_kwargs_uses_gpt5_safe_parameters() -> None:
     spec = find_by_name("openai")
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-5-chat",
             spec=spec,
         )
@@ -948,7 +949,7 @@ def test_openai_compat_build_kwargs_max_completion_tokens_by_model_name(
     spec = find_by_name("custom")
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model=model_name,
             spec=spec,
         )
@@ -1237,7 +1238,7 @@ async def test_openai_compat_stream_watchdog_returns_error_on_stall(monkeypatch)
         client_instance.chat.completions.create = mock_create
 
         provider = OpenAICompatProvider(
-            api_key="sk-test-key",
+            api_key=credentials.SK_TEST_KEY,
             default_model="gpt-4o",
             spec=spec,
         )
