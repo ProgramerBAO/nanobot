@@ -720,7 +720,7 @@ class QQChannel(BaseChannel):
 
                 def _open_tmp():
                     tmp_path.parent.mkdir(parents=True, exist_ok=True)
-                    return open(tmp_path, "wb")  # noqa: SIM115
+                    return open(tmp_path, "wb")  # noqa: SIM115  # mimosa-ignore 写媒体下载 tmp 文件，路径派生自 workspace
 
                 f = await asyncio.to_thread(_open_tmp)
                 try:

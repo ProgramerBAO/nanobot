@@ -57,7 +57,7 @@ class _MatrixChannel(BaseChannel):
 
 def _free_port() -> int:
     for _ in range(100):
-        port = random.randint(30_000, 60_000)
+        port = random.randint(30_000, 60_000)  # mimosa-ignore 测试随机端口号，非安全随机数用途
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
                 sock.bind(("127.0.0.1", port))

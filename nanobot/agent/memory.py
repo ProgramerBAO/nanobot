@@ -461,7 +461,7 @@ class MemoryStore:
         """Overwrite history.jsonl with the given entries (atomic write)."""
         tmp_path = self.history_file.with_suffix(self.history_file.suffix + ".tmp")
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:  # mimosa-ignore 原子写历史 tmp 再 rename，路径派生自会话文件
                 for entry in entries:
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 f.flush()

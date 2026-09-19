@@ -191,7 +191,7 @@ def _write_records_to_path(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:  # mimosa-ignore 原子写 tmp 再 rename，tmp 路径派生自 workspace 无外部输入
             for row in rows:
                 raw = _record_json_line(row)
                 if len(raw.encode("utf-8")) > _MAX_TRANSCRIPT_FILE_BYTES:

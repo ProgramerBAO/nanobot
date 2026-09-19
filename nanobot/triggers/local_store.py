@@ -397,7 +397,7 @@ class LocalTriggerStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:  # mimosa-ignore 原子写 tmp 再 rename，tmp 路径含 uuid 后缀无外部输入
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())

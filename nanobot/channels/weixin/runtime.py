@@ -961,7 +961,7 @@ class WeixinChannel(BaseChannel):
             self._typing_tickets[user_id] = {
                 "ticket": ticket,
                 "ever_succeeded": True,
-                "next_fetch_at": now + (random.random() * TYPING_TICKET_TTL_S),
+                "next_fetch_at": now + (random.random() * TYPING_TICKET_TTL_S),  # mimosa-ignore typing ticket TTL 抖动，非安全随机数用途
                 "retry_delay_s": CONFIG_CACHE_INITIAL_RETRY_S,
             }
             return ticket

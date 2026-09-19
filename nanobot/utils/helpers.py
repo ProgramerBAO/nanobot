@@ -521,7 +521,7 @@ def _write_text_atomic(path: Path, content: str) -> None:
     with suppress(OSError):
         existing_mode = stat.S_IMODE(path.stat().st_mode)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:  # mimosa-ignore 共享原子写 helper，tmp 路径由调用方从 workspace 派生
             if existing_mode is not None:
                 os.chmod(tmp, existing_mode)
             f.write(content)

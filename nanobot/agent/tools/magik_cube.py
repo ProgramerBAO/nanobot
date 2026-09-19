@@ -2253,7 +2253,7 @@ class MagikCubeReporter:
             for day, value in chunk_tokens.items():
                 tokens[day] = tokens.get(day, 0) + value
             for day, value in chunk_requests.items():
-                requests[day] = requests.get(day, 0) + value
+                requests[day] = requests.get(day, 0) + value  # mimosa-ignore requests 是本地请求数字典的 .get，不是 HTTP 客户端调用
         for chunk_tpm, chunk_endpoints, chunk_points, complete in tpm_results:
             tpm_complete = tpm_complete and complete
             for day, value in chunk_tpm.items():
@@ -2340,7 +2340,7 @@ class MagikCubeReporter:
         ]
         daily_tokens = {day: metrics.tokens.get(day, 0) for day in days}
         tokens = sum(daily_tokens.values())
-        requests = sum(metrics.requests.get(day, 0) for day in days)
+        requests = sum(metrics.requests.get(day, 0) for day in days)  # mimosa-ignore metrics.requests 是计数字典属性，不是 HTTP 客户端调用
         peak_tpm = max((metrics.max_tpm.get(day, 0) for day in days), default=0)
         tpm_points = [
             point
@@ -2378,7 +2378,7 @@ class MagikCubeReporter:
             for day, value in item.tokens.items():
                 combined.tokens[day] = combined.tokens.get(day, 0) + value
             for day, value in item.requests.items():
-                combined.requests[day] = combined.requests.get(day, 0) + value
+                combined.requests[day] = combined.requests.get(day, 0) + value  # mimosa-ignore combined.requests 是计数字典属性，不是 HTTP 客户端调用
             for day, value in item.max_tpm.items():
                 if value >= combined.max_tpm.get(day, -1):
                     combined.max_tpm[day] = value

@@ -253,7 +253,7 @@ def test_exec_extract_absolute_paths_ignores_urls() -> None:
     [
         'curl -s -o /dev/null -w "%{http_code}" https://www.google.com',
         'wget -q -O - http://example.com 2>&1 | head -c 100',
-        'python3 -c "import urllib.request; print(urllib.request.urlopen(\'http://example.com\').read()[:100])"',
+        'python3 -c "import urllib.request; print(urllib.request.urlopen(\'http://example.com\').read()[:100])"',  # mimosa-ignore 工具黑名单样例字符串数据，不发起任何请求
     ],
 )
 def test_exec_guard_allows_public_urls(tmp_path, command: str) -> None:

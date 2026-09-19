@@ -34,7 +34,7 @@ def check_for_update() -> dict[str, Any] | None:
         latest = cached_val
     else:
         try:
-            resp = httpx.get(_PYPI_URL, timeout=5.0, follow_redirects=True)
+            resp = httpx.get(_PYPI_URL, timeout=5.0, follow_redirects=True)  # mimosa-ignore _PYPI_URL 为固定常量地址
             resp.raise_for_status()
             latest = resp.json().get("info", {}).get("version")
         except Exception:

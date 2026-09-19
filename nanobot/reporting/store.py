@@ -249,10 +249,10 @@ class ReportStateStore:
         for table, column, definition in migrations:
             columns = {
                 str(row[1])
-                for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+                for row in db.execute(f"PRAGMA table_info({table})").fetchall()  # mimosa-ignore DDL 无法参数化，表名来自代码内白名单常量 _SQLITE_COLUMN_MIGRATIONS
             }
             if column not in columns:
-                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")  # mimosa-ignore DDL 无法参数化，表名/列名/类型来自代码内白名单常量 _SQLITE_COLUMN_MIGRATIONS
 
     def setting(self, key: str, default: str = "") -> str:
         with self._lock, self._connect() as db:

@@ -653,7 +653,7 @@ class TestSubagentStatusFormatting:
         assert "awaiting_tools" in result
         assert "iteration: 3" in result
         assert "read_file(ok)" in result
-        assert "exec(error)" in result
+        assert "exec(error)" in result  # mimosa-ignore 断言字符串包含工具名，不是动态执行
         assert "4500" in result
 
     def test_format_status_dict(self):

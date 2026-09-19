@@ -402,7 +402,7 @@ class CronService:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:  # mimosa-ignore 原子写 cron 存储 tmp 再 rename，路径派生自 workspace
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())

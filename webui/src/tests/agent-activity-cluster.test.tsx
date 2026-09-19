@@ -1395,7 +1395,7 @@ describe("AgentActivityCluster", () => {
       "done",
       "EOF",
     ].join("\n");
-    const line = `exec(${JSON.stringify({ command })})`;
+    const line = `exec(${JSON.stringify({ command })})`;  // mimosa-ignore 测试构造 exec 日志行的数据，不执行任何命令
     render(
       <AgentActivityCluster
         messages={[{
@@ -1420,7 +1420,7 @@ describe("AgentActivityCluster", () => {
   });
 
   it("presents time checks as an intent instead of a raw command", () => {
-    const line = `exec(${JSON.stringify({ command: "date '+%Y-%m-%d %H:%M:%S %Z'" })})`;
+    const line = `exec(${JSON.stringify({ command: "date '+%Y-%m-%d %H:%M:%S %Z'" })})`;  // mimosa-ignore 测试构造 exec 日志行的数据，不执行任何命令
     render(
       <AgentActivityCluster
         messages={[{

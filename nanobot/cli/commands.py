@@ -742,7 +742,7 @@ def _onboard_plugins(config_path: Path) -> None:
         else:
             channels[name] = merge_missing_defaults(channels[name], defaults)
 
-    with open(config_path, "w", encoding="utf-8") as f:
+    with open(config_path, "w", encoding="utf-8") as f:  # mimosa-ignore 写回用户指定的本地配置文件（config 命令语义）
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 

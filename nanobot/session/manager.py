@@ -700,7 +700,7 @@ class SessionManager:
         tmp_path = path.with_suffix(".jsonl.tmp")
 
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:  # mimosa-ignore 原子写会话元数据 tmp 再 rename，路径派生自会话键
                 metadata_line = {
                     "_type": "metadata",
                     "key": session.key,

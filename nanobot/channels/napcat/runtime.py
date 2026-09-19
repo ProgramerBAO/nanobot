@@ -363,7 +363,7 @@ class NapcatChannel(BaseChannel):
         if policy == "mention":
             return False
         # Probability case: float in [0.0, 1.0].
-        return random.random() < float(policy)
+        return random.random() < float(policy)  # mimosa-ignore 概率采样阈值，非安全随机数用途
 
     @staticmethod
     def _format_group_content(

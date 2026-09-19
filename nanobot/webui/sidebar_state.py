@@ -179,7 +179,7 @@ def write_webui_sidebar_state(raw: dict[str, Any]) -> dict[str, Any]:
     path = webui_sidebar_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    with open(tmp, "wb") as f:
+    with open(tmp, "wb") as f:  # mimosa-ignore 原子写 tmp 再 rename，tmp 路径派生自 workspace 无外部输入
         f.write(encoded)
         f.write(b"\n")
         f.flush()

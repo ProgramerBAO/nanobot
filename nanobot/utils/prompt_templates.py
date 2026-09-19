@@ -17,7 +17,7 @@ _TEMPLATES_ROOT = Path(__file__).resolve().parent.parent / "templates"
 @lru_cache
 def _environment() -> Environment:
     # Plain-text prompts: do not HTML-escape variable values.
-    return Environment(
+    return Environment(  # mimosa-ignore Jinja2 模板来自仓库内固定目录，无不可信模板源
         loader=FileSystemLoader(str(_TEMPLATES_ROOT)),
         autoescape=False,
         trim_blocks=True,

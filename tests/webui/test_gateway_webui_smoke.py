@@ -95,7 +95,7 @@ def _stop_gateway(process: subprocess.Popen[bytes]) -> None:
 
 def _get_json(url: str, *, token: str | None = None) -> dict:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    response = httpx.get(url, headers=headers, timeout=5.0, trust_env=False)
+    response = httpx.get(url, headers=headers, timeout=5.0, trust_env=False)  # mimosa-ignore 测试 helper 请求本地网关地址
     response.raise_for_status()
     return response.json()
 

@@ -411,7 +411,7 @@ class MatrixChannel(BaseChannel):
             "device_id": resp.device_id,
         }
         try:
-            with open(self.session_path, "w", encoding="utf-8") as f:
+            with open(self.session_path, "w", encoding="utf-8") as f:  # mimosa-ignore 写会话存储文件，路径派生自 workspace
                 json.dump(session, f, indent=2)
             self.logger.info("Session saved to {}", self.session_path)
         except Exception as e:

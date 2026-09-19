@@ -451,7 +451,7 @@ class CliAppManager:
             return data
 
         try:
-            response = httpx.get(url, timeout=15.0, follow_redirects=True)
+            response = httpx.get(url, timeout=15.0, follow_redirects=True)  # mimosa-ignore url 来自模块常量注册表（固定 https 源），非外部输入
             response.raise_for_status()
             fetched = response.json()
             if not isinstance(fetched, dict):
@@ -1009,7 +1009,7 @@ class CliAppManager:
         if not url:
             return None
         try:
-            response = httpx.get(url, timeout=15.0, follow_redirects=True)
+            response = httpx.get(url, timeout=15.0, follow_redirects=True)  # mimosa-ignore url 经 _skill_content_url 的 https+host+前缀白名单校验
             response.raise_for_status()
             text = response.text
         except Exception:

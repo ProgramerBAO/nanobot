@@ -264,7 +264,7 @@ def read_config_data(path: Path) -> dict[str, Any]:
 
 def write_config_data(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8") as f:  # mimosa-ignore 写回本地功能开关文件，路径派生自 workspace 无外部输入
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
