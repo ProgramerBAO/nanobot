@@ -4,7 +4,9 @@
 禁止无记录的隐性负债。每条含位置、类型、借债原因、风险与持续伤害（利息）、
 偿还触发条件、预计偿还成本。
 
-## TD-20260919-001 · Mimosa 非凭据存量 findings（31 条）
+## TD-20260919-001 · Mimosa 非凭据存量 findings（31 条）——已甄别，残留为登记基线
+
+**状态更新（2026-09-19 晚，commit `3fb99b8`）**：31/31 已逐条甄别完毕，全部为误报或非安全用途；每处已落位带具体理由的行内 `mimosa-ignore` 注释（空格分隔格式）。**关键实测：deep audit / git-gate 口径不尊重行内 ignore**（空 commit 探针 + 4 种 policy exclusion 形状均复现全量 31 条），行内注释仅对编辑门禁/单文件扫描口径生效并充当行级文档。因此本条债务的"偿还"至此为止：**deep-gate 残留为已甄别、已注释的永久已知基线**，升级 `MIMOSA_GIT_GATE_MODE=graded/deny` 不可行（会永久阻断全部提交）——需上游提供 deep 口径豁免机制后再评估。门禁策略维持现状：编辑门禁 graded（写入时强制拦截，2026-09-19 当天实证拦截 5 次）+ git gate warn（报告增量）。
 
 - **位置**：全仓（明细见下）
 - **类型**：实现 / 安全工具误报与既有风险面
@@ -13,10 +15,10 @@
 - **风险与持续伤害**：commit 门禁（warn 模式）每次提交仍会列出这 31 条
   high，掩盖新增问题；部分为误报（原子写的 tmp_path 被判路径穿越），部分
   值得逐条甄别（SSRF 报告的 config 驱动 URL）。**利息 = 门禁信噪比。**
-- **偿还触发条件**：下次安全治理专项，或 MIMOSA_GIT_GATE_MODE 计划升级为
-  graded/deny 前（必须先清零或逐条 triage）。
-- **预计偿还成本**：半天——逐条 triage（误报加 `# mimosa-ignore` + 理由，
-  真问题逐个修复），或引入 policy exclusions。
+- **偿还触发条件**：~~下次安全治理专项~~ **已完成甄别（见状态更新）**；
+  彻底清零需 Mimosa 上游支持 deep 口径 ignore/allowlist。
+- **预计偿还成本**：~~半天——逐条 triage~~ 已花费（2026-09-19）；
+  剩余为上游依赖，无本仓库内可行动作。
 
 ### 明细（deep audit 2026-09-19，复扫确认仍为 31 条）
 
@@ -32,8 +34,14 @@
 ### 关联工具机制备注（2026-09-19 调研实证）
 
 - 无通用 baseline/ignore 文件；`mimosa backlog triage` 只分流不 dismiss。
-- 代码内 `# mimosa-ignore` 注释：代码行有效；**字符串内匹配需裸 token 后跟空白/行尾**（`# mimosa-ignore: reason` 带冒号在嵌串匹配上无效——探针 v5 实证）。
+- 代码内 `# mimosa-ignore` 注释：**仅对编辑门禁/单文件扫描口径生效**；
+  格式上代码行任意形式可用，**嵌串匹配需裸 token 后跟空白/行尾**
+  （`# mimosa-ignore: reason` 带冒号在嵌串上无效——探针 v5 实证）。
+- **deep audit / git gate（L3）不尊重行内 ignore**（空 commit 探针实测：
+  31 条注释全部落位后 gate 原样报 12 条展开 + 折叠总结）；
+  `threatModel.exclusions` 四种形状（路径 glob/通配/规则/路径:规则）对
+  deep audit findings 数量零影响（探针实测）。
 - `mimosa policy init` 生成的 `.mimosa/security-policy.json`（gitignored）会把
   `command.forbidShell=true` 应用到全仓，令测试里的 exec mock 新增 44 条
-  command-no-shell findings——本次调研后已删除该文件还原基线；后续启用
+  command-no-shell findings——2026-09-19 调研后已删除该文件还原基线；启用
   policy 前需先处置这批测试误报。
