@@ -201,6 +201,21 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   connectors (Grafana/WeCom/DingTalk/cost TokenAPI) stay config-level. New user-
   facing configuration must ship with a page-level control in the Report platform
   settings; do not add config.json-only switches for report features.
+- Grafana connections (2026-09-30, read-only phase 1): the WebUI Settings
+  "Grafana" section is the single management surface for
+  `tools.mcpServers["grafana-<slug>"]` entries, and the generic MCP page filters
+  them out. The facade (`nanobot/webui/grafana_api.py`) owns the invariants:
+  uvx + pinned `mcp-grafana@<version>` + `--disable-write`, `enabled_tools`
+  limited to the curated 11-tool read-only allowlist, absolute http(s) URL
+  without userinfo; update normalizes an older pin, refuses hand-edited
+  (unmanaged) entries with 409, and never returns a raw token (hint in API
+  responses, token-free audit summaries, scrubbed test errors). The test action
+  spawns the child process and calls `user_info` end-to-end — Grafana requests
+  are made by mcp-grafana, not by nanobot's HTTP stack.
+  `MCPServerConfig.enabled: false` keeps any MCP server configured but never
+  connects it (spawn, retry, and hot reload all skip it). Do not hand-edit
+  grafana-* entries or bypass the facade; bump the pinned package only after
+  re-verifying the read-only tool list against the new release.
 
 ## Common File Locations
 

@@ -84,7 +84,8 @@
       "apps": "Applications",
       "automations": "Automatisations",
       "skills": "Compétences",
-      "reports": "Rapports"
+      "reports": "Rapports",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "Interface utilisateur",
@@ -817,6 +818,50 @@
       "selectProvider": "Choisir un fournisseur",
       "configureProvider": "Configurer le fournisseur",
       "languageAuto": "Auto"
+    },
+    "grafana": {
+      "subtitle": "Gérez les connexions Grafana en lecture seule pour l'assistant de chat.",
+      "readOnlyNote": "La phase 1 est en lecture seule : chaque connexion exécute {{package}} avec --disable-write et une liste d'outils sélectionnés ({{count}} outils).",
+      "loading": "Chargement des connexions Grafana",
+      "loadFailed": "Échec du chargement des connexions Grafana",
+      "actionApplied": "Modification appliquée sans redémarrer nanobot.",
+      "actionFailed": "Échec de l'action de connexion Grafana",
+      "add": "Ajouter une connexion",
+      "uvxMissing": "uvx n'est pas dans le PATH de nanobot. Installez uv (https://docs.astral.sh/uv/) sur l'hôte de la passerelle avant de tester les connexions.",
+      "connectionsTitle": "Connexions",
+      "empty": "Aucune connexion Grafana pour l'instant. Ajoutez-en une pour donner à l'assistant des outils Grafana en lecture seule.",
+      "deleteConfirm": "Supprimer la connexion Grafana « {{slug}} » ? L'assistant de chat perd immédiatement ses outils.",
+      "test": {
+        "noResult": "Le test s'est terminé sans message de résultat."
+      },
+      "row": {
+        "enabled": "Activée",
+        "disabled": "Désactivée",
+        "readOnly": "Lecture seule",
+        "unmanaged": "Modifiée à la main",
+        "unmanagedTitle": "Cette entrée grafana-* de config.json a été modifiée hors de cette page ; supprimez-la et recréez-la ici pour la gérer.",
+        "meta": "token {{hint}} · {{count}} outils · {{package}}",
+        "envMissing": "variable d'environnement référencée non définie",
+        "test": "Tester",
+        "testTitle": "Lancer la connexion et vérifier le jeton de bout en bout",
+        "edit": "Modifier",
+        "toggleAria": "État activé de {{slug}}",
+        "deleteTitle": "Supprimer {{slug}}"
+      },
+      "editor": {
+        "createTitle": "Ajouter une connexion Grafana",
+        "editTitle": "Modifier {{slug}}",
+        "slug": "ID de connexion",
+        "slugHelp": "Lettres minuscules, chiffres, '-' et '_'. Les outils de chat apparaissent sous la forme mcp_grafana-<id>_… .",
+        "baseUrl": "URL Grafana",
+        "token": "Jeton de compte de service",
+        "tokenHelp": "Jeton de compte de service au rôle Viewer ; stocké localement dans config.json et affiché ensuite uniquement sous forme d'indice.",
+        "tokenKeep": "Laissez vide pour conserver le jeton actuel ({{hint}}).",
+        "orgId": "ID d'organisation (facultatif)",
+        "test": "Tester avant d'enregistrer",
+        "save": "Enregistrer la connexion",
+        "cancel": "Annuler"
+      }
     },
     "reports": {
       "loading": "Chargement de la plateforme de rapports",

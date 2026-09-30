@@ -84,7 +84,8 @@
       "apps": "Aplicativos",
       "automations": "Automações",
       "skills": "Skills",
-      "reports": "Relatórios"
+      "reports": "Relatórios",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "Interface do usuário",
@@ -817,6 +818,50 @@
       "selectProvider": "Selecionar provedor",
       "configureProvider": "Configurar provedor",
       "languageAuto": "Auto"
+    },
+    "grafana": {
+      "subtitle": "Gerencie conexões Grafana somente leitura para o assistente de chat.",
+      "readOnlyNote": "A fase 1 é somente leitura: cada conexão executa {{package}} com --disable-write e uma lista selecionada de ferramentas ({{count}} ferramentas).",
+      "loading": "Carregando conexões Grafana",
+      "loadFailed": "Falha ao carregar conexões Grafana",
+      "actionApplied": "Alteração aplicada sem reiniciar o nanobot.",
+      "actionFailed": "Falha na ação de conexão Grafana",
+      "add": "Adicionar conexão",
+      "uvxMissing": "uvx não está no PATH do nanobot. Instale o uv (https://docs.astral.sh/uv/) no host do gateway antes de testar conexões.",
+      "connectionsTitle": "Conexões",
+      "empty": "Ainda não há conexões Grafana. Adicione uma para dar ao assistente ferramentas Grafana somente leitura.",
+      "deleteConfirm": "Excluir a conexão Grafana \"{{slug}}\"? O assistente de chat perde as ferramentas imediatamente.",
+      "test": {
+        "noResult": "O teste terminou sem mensagem de resultado."
+      },
+      "row": {
+        "enabled": "Ativada",
+        "disabled": "Desativada",
+        "readOnly": "Somente leitura",
+        "unmanaged": "Editada manualmente",
+        "unmanagedTitle": "Esta entrada grafana-* do config.json foi editada manualmente fora desta página; exclua e recrie-a aqui para gerenciá-la.",
+        "meta": "token {{hint}} · {{count}} ferramentas · {{package}}",
+        "envMissing": "variável de ambiente referenciada não definida",
+        "test": "Testar",
+        "testTitle": "Iniciar a conexão e verificar o token de ponta a ponta",
+        "edit": "Editar",
+        "toggleAria": "Estado de ativação de {{slug}}",
+        "deleteTitle": "Excluir {{slug}}"
+      },
+      "editor": {
+        "createTitle": "Adicionar conexão Grafana",
+        "editTitle": "Editar {{slug}}",
+        "slug": "ID da conexão",
+        "slugHelp": "Letras minúsculas, dígitos, '-' e '_'. As ferramentas do chat aparecem como mcp_grafana-<id>_… .",
+        "baseUrl": "URL do Grafana",
+        "token": "Token da conta de serviço",
+        "tokenHelp": "Token de conta de serviço com papel Viewer; armazenado localmente no config.json e mostrado depois apenas como dica.",
+        "tokenKeep": "Deixe vazio para manter o token atual ({{hint}}).",
+        "orgId": "ID da organização (opcional)",
+        "test": "Testar antes de salvar",
+        "save": "Salvar conexão",
+        "cancel": "Cancelar"
+      }
     },
     "reports": {
       "loading": "Carregando plataforma de relatórios",

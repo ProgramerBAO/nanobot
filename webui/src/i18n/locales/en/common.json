@@ -84,7 +84,8 @@
       "apps": "Apps",
       "automations": "Automations",
       "skills": "Skills",
-      "reports": "Reports"
+      "reports": "Reports",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "Interface",
@@ -817,6 +818,50 @@
       "selectProvider": "Select provider",
       "configureProvider": "Configure provider",
       "languageAuto": "Auto"
+    },
+    "grafana": {
+      "subtitle": "Manage read-only Grafana platform connections for the chat assistant.",
+      "readOnlyNote": "Phase 1 is read-only: every connection runs {{package}} with --disable-write and a curated tool list ({{count}} tools).",
+      "loading": "Loading Grafana connections",
+      "loadFailed": "Failed to load Grafana connections",
+      "actionApplied": "Change applied without restarting nanobot.",
+      "actionFailed": "Grafana connection action failed",
+      "add": "Add connection",
+      "uvxMissing": "uvx is not on the nanobot PATH. Install uv (https://docs.astral.sh/uv/) on the gateway host before testing connections.",
+      "connectionsTitle": "Connections",
+      "empty": "No Grafana connections yet. Add one to give the chat assistant read-only Grafana tools.",
+      "deleteConfirm": "Delete Grafana connection \"{{slug}}\"? The chat assistant immediately loses its tools.",
+      "test": {
+        "noResult": "Test finished without a result message."
+      },
+      "row": {
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "readOnly": "Read-only",
+        "unmanaged": "Hand-edited",
+        "unmanagedTitle": "This grafana-* config.json entry was hand-edited outside this page; delete and re-create it here to manage it.",
+        "meta": "token {{hint}} · {{count}} tools · {{package}}",
+        "envMissing": "referenced env var is not set",
+        "test": "Test",
+        "testTitle": "Spawn the connection and verify the token end-to-end",
+        "edit": "Edit",
+        "toggleAria": "{{slug}} enabled state",
+        "deleteTitle": "Delete {{slug}}"
+      },
+      "editor": {
+        "createTitle": "Add Grafana connection",
+        "editTitle": "Edit {{slug}}",
+        "slug": "Connection ID",
+        "slugHelp": "Lowercase letters, digits, '-' and '_'. Chat tools appear as mcp_grafana-<id>… .",
+        "baseUrl": "Grafana URL",
+        "token": "Service account token",
+        "tokenHelp": "Viewer-role service account token; stored locally in config.json and shown only as a hint afterwards.",
+        "tokenKeep": "Leave empty to keep the current token ({{hint}}).",
+        "orgId": "Organization ID (optional)",
+        "test": "Test before saving",
+        "save": "Save connection",
+        "cancel": "Cancel"
+      }
     },
     "reports": {
       "loading": "Loading report platform",

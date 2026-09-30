@@ -84,7 +84,8 @@
       "apps": "應用程式",
       "automations": "自動任務",
       "skills": "技能",
-      "reports": "報表"
+      "reports": "報表",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "介面",
@@ -817,6 +818,50 @@
       "selectProvider": "選擇供應商",
       "configureProvider": "設定供應商",
       "languageAuto": "自動"
+    },
+    "grafana": {
+      "subtitle": "為聊天助理管理唯讀的 Grafana 平台連線。",
+      "readOnlyNote": "第一階段為唯讀：每個連線都以 --disable-write 執行 {{package}}，並使用精選工具列表（{{count}} 個工具）。",
+      "loading": "正在載入 Grafana 連線",
+      "loadFailed": "載入 Grafana 連線失敗",
+      "actionApplied": "變更已生效，無需重新啟動 nanobot。",
+      "actionFailed": "Grafana 連線操作失敗",
+      "add": "新增連線",
+      "uvxMissing": "nanobot 的 PATH 上沒有 uvx。請先在閘道主機安裝 uv（https://docs.astral.sh/uv/）再測試連線。",
+      "connectionsTitle": "連線列表",
+      "empty": "還沒有 Grafana 連線。新增一個，即可讓聊天助理取得唯讀的 Grafana 工具。",
+      "deleteConfirm": "確認刪除 Grafana 連線「{{slug}}」？聊天助理會立即失去對應工具。",
+      "test": {
+        "noResult": "測試結束，但沒有回傳結果訊息。"
+      },
+      "row": {
+        "enabled": "啟用",
+        "disabled": "停用",
+        "readOnly": "唯讀",
+        "unmanaged": "手動編輯",
+        "unmanagedTitle": "該 grafana-* 條目在本頁之外被手動修改；請在此刪除並重新建立後再管理。",
+        "meta": "token {{hint}} · {{count}} 個工具 · {{package}}",
+        "envMissing": "參照的環境變數未設定",
+        "test": "測試",
+        "testTitle": "啟動連線並端對端驗證 token",
+        "edit": "編輯",
+        "toggleAria": "{{slug}} 啟用狀態",
+        "deleteTitle": "刪除 {{slug}}"
+      },
+      "editor": {
+        "createTitle": "新增 Grafana 連線",
+        "editTitle": "編輯 {{slug}}",
+        "slug": "連線識別碼",
+        "slugHelp": "小寫字母、數字、'-' 與 '_'。聊天工具將以 mcp_grafana-<識別碼>_… 形式出現。",
+        "baseUrl": "Grafana 位址",
+        "token": "Service Account token",
+        "tokenHelp": "Viewer 角色的服務帳號 token；儲存在本機 config.json，之後僅顯示遮罩提示。",
+        "tokenKeep": "留空保持目前 token 不變（{{hint}}）。",
+        "orgId": "組織 ID（選填）",
+        "test": "儲存前測試",
+        "save": "儲存連線",
+        "cancel": "取消"
+      }
     },
     "reports": {
       "loading": "載入報表平台",

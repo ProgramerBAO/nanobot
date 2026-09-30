@@ -84,7 +84,8 @@
       "apps": "アプリ",
       "automations": "自動タスク",
       "skills": "スキル",
-      "reports": "レポート"
+      "reports": "レポート",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "インターフェース",
@@ -817,6 +818,50 @@
       "selectProvider": "プロバイダーを選択",
       "configureProvider": "プロバイダーを設定",
       "languageAuto": "自動"
+    },
+    "grafana": {
+      "subtitle": "チャットアシスタント用の読み取り専用 Grafana 接続を管理します。",
+      "readOnlyNote": "フェーズ 1 は読み取り専用です。各接続は --disable-write 付きで {{package}} を実行し、厳選されたツールリスト（{{count}} 個）を使います。",
+      "loading": "Grafana 接続を読み込み中",
+      "loadFailed": "Grafana 接続の読み込みに失敗しました",
+      "actionApplied": "変更は nanobot の再起動なしで反映されました。",
+      "actionFailed": "Grafana 接続の操作に失敗しました",
+      "add": "接続を追加",
+      "uvxMissing": "uvx が nanobot の PATH 上にありません。接続をテストする前に、ゲートウェイホストに uv（https://docs.astral.sh/uv/）をインストールしてください。",
+      "connectionsTitle": "接続一覧",
+      "empty": "Grafana 接続はまだありません。追加すると、チャットアシスタントが読み取り専用の Grafana ツールを使えるようになります。",
+      "deleteConfirm": "Grafana 接続「{{slug}}」を削除しますか？チャットアシスタントは直ちに該当ツールを失います。",
+      "test": {
+        "noResult": "テストは終了しましたが、結果メッセージがありません。"
+      },
+      "row": {
+        "enabled": "有効",
+        "disabled": "無効",
+        "readOnly": "読み取り専用",
+        "unmanaged": "手動編集",
+        "unmanagedTitle": "この grafana-* エントリはこのページの外で手動編集されています。管理するにはここで削除して作成し直してください。",
+        "meta": "token {{hint}} · {{count}} 個のツール · {{package}}",
+        "envMissing": "参照している環境変数が未設定です",
+        "test": "テスト",
+        "testTitle": "接続を起動してトークンをエンドツーエンドで検証",
+        "edit": "編集",
+        "toggleAria": "{{slug}} の有効状態",
+        "deleteTitle": "{{slug}} を削除"
+      },
+      "editor": {
+        "createTitle": "Grafana 接続を追加",
+        "editTitle": "{{slug}} を編集",
+        "slug": "接続 ID",
+        "slugHelp": "小文字・数字・'-'・'_'。チャットツールは mcp_grafana-<id>_… として表示されます。",
+        "baseUrl": "Grafana URL",
+        "token": "サービスアカウントトークン",
+        "tokenHelp": "Viewer ロールのサービスアカウントトークン。ローカルの config.json に保存され、以降はヒントのみ表示されます。",
+        "tokenKeep": "空欄のままにすると現在のトークンを保持します（{{hint}}）。",
+        "orgId": "組織 ID（任意）",
+        "test": "保存前にテスト",
+        "save": "接続を保存",
+        "cancel": "キャンセル"
+      }
     },
     "reports": {
       "loading": "レポートプラットフォームを読み込み中",

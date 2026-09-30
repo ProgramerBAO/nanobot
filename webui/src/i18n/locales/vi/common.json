@@ -84,7 +84,8 @@
       "apps": "Ứng dụng",
       "automations": "Tự động hóa",
       "skills": "Kỹ năng",
-      "reports": "Báo cáo"
+      "reports": "Báo cáo",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "Giao diện",
@@ -817,6 +818,50 @@
       "selectProvider": "Chon nha cung cap",
       "configureProvider": "Cau hinh nha cung cap",
       "languageAuto": "Tu dong"
+    },
+    "grafana": {
+      "subtitle": "Quản lý các kết nối Grafana chỉ đọc cho trợ lý trò chuyện.",
+      "readOnlyNote": "Giai đoạn 1 là chỉ đọc: mỗi kết nối chạy {{package}} với --disable-write và danh sách công cụ được chọn lọc ({{count}} công cụ).",
+      "loading": "Đang tải các kết nối Grafana",
+      "loadFailed": "Không tải được các kết nối Grafana",
+      "actionApplied": "Thay đổi đã có hiệu lực mà không cần khởi động lại nanobot.",
+      "actionFailed": "Thao tác kết nối Grafana thất bại",
+      "add": "Thêm kết nối",
+      "uvxMissing": "uvx không có trên PATH của nanobot. Hãy cài uv (https://docs.astral.sh/uv/) trên máy gateway trước khi kiểm tra kết nối.",
+      "connectionsTitle": "Danh sách kết nối",
+      "empty": "Chưa có kết nối Grafana nào. Thêm một kết nối để trợ lý có các công cụ Grafana chỉ đọc.",
+      "deleteConfirm": "Xóa kết nối Grafana \"{{slug}}\"? Trợ lý trò chuyện sẽ mất công cụ ngay lập tức.",
+      "test": {
+        "noResult": "Kiểm tra đã kết thúc nhưng không có thông điệp kết quả."
+      },
+      "row": {
+        "enabled": "Đang bật",
+        "disabled": "Đã tắt",
+        "readOnly": "Chỉ đọc",
+        "unmanaged": "Sửa tay",
+        "unmanagedTitle": "Mục grafana-* này trong config.json đã bị sửa tay ngoài trang này; hãy xóa và tạo lại tại đây để quản lý.",
+        "meta": "token {{hint}} · {{count}} công cụ · {{package}}",
+        "envMissing": "biến môi trường được tham chiếu chưa đặt",
+        "test": "Kiểm tra",
+        "testTitle": "Khởi động kết nối và xác minh token đầu cuối",
+        "edit": "Sửa",
+        "toggleAria": "Trạng thái bật của {{slug}}",
+        "deleteTitle": "Xóa {{slug}}"
+      },
+      "editor": {
+        "createTitle": "Thêm kết nối Grafana",
+        "editTitle": "Sửa {{slug}}",
+        "slug": "Mã kết nối",
+        "slugHelp": "Chữ thường, chữ số, '-' và '_'. Công cụ trò chuyện hiển thị dạng mcp_grafana-<id>_… .",
+        "baseUrl": "URL Grafana",
+        "token": "Token tài khoản dịch vụ",
+        "tokenHelp": "Token tài khoản dịch vụ vai trò Viewer; lưu cục bộ trong config.json và sau đó chỉ hiển thị dạng gợi ý.",
+        "tokenKeep": "Để trống để giữ token hiện tại ({{hint}}).",
+        "orgId": "Mã tổ chức (tùy chọn)",
+        "test": "Kiểm tra trước khi lưu",
+        "save": "Lưu kết nối",
+        "cancel": "Hủy"
+      }
     },
     "reports": {
       "loading": "Đang tải nền tảng báo cáo",

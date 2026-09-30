@@ -84,7 +84,8 @@
       "apps": "Aplikasi",
       "automations": "Otomasi",
       "skills": "Skill",
-      "reports": "Laporan"
+      "reports": "Laporan",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "Antarmuka",
@@ -817,6 +818,50 @@
       "selectProvider": "Pilih penyedia",
       "configureProvider": "Konfigurasi penyedia",
       "languageAuto": "Auto"
+    },
+    "grafana": {
+      "subtitle": "Kelola koneksi Grafana baca-saja untuk asisten obrolan.",
+      "readOnlyNote": "Fase 1 bersifat baca-saja: setiap koneksi menjalankan {{package}} dengan --disable-write dan daftar alat terkurasi ({{count}} alat).",
+      "loading": "Memuat koneksi Grafana",
+      "loadFailed": "Gagal memuat koneksi Grafana",
+      "actionApplied": "Perubahan diterapkan tanpa memulai ulang nanobot.",
+      "actionFailed": "Tindakan koneksi Grafana gagal",
+      "add": "Tambah koneksi",
+      "uvxMissing": "uvx tidak ada di PATH nanobot. Pasang uv (https://docs.astral.sh/uv/) di host gateway sebelum menguji koneksi.",
+      "connectionsTitle": "Daftar koneksi",
+      "empty": "Belum ada koneksi Grafana. Tambahkan satu agar asisten memperoleh alat Grafana baca-saja.",
+      "deleteConfirm": "Hapus koneksi Grafana \"{{slug}}\"? Asisten obrolan langsung kehilangan alatnya.",
+      "test": {
+        "noResult": "Pengujian selesai tanpa pesan hasil."
+      },
+      "row": {
+        "enabled": "Aktif",
+        "disabled": "Nonaktif",
+        "readOnly": "Baca-saja",
+        "unmanaged": "Sunting manual",
+        "unmanagedTitle": "Entri grafana-* ini di config.json disunting manual di luar halaman ini; hapus dan buat ulang di sini untuk mengelolanya.",
+        "meta": "token {{hint}} · {{count}} alat · {{package}}",
+        "envMissing": "variabel lingkungan yang dirujuk belum diatur",
+        "test": "Uji",
+        "testTitle": "Jalankan koneksi dan verifikasi token ujung-ke-ujung",
+        "edit": "Sunting",
+        "toggleAria": "Status aktif {{slug}}",
+        "deleteTitle": "Hapus {{slug}}"
+      },
+      "editor": {
+        "createTitle": "Tambah koneksi Grafana",
+        "editTitle": "Sunting {{slug}}",
+        "slug": "ID koneksi",
+        "slugHelp": "Huruf kecil, angka, '-' dan '_'. Alat obrolan muncul sebagai mcp_grafana-<id>_… .",
+        "baseUrl": "URL Grafana",
+        "token": "Token akun layanan",
+        "tokenHelp": "Token akun layanan peran Viewer; disimpan lokal di config.json dan selanjutnya hanya ditampilkan sebagai petunjuk.",
+        "tokenKeep": "Biarkan kosong untuk mempertahankan token saat ini ({{hint}}).",
+        "orgId": "ID organisasi (opsional)",
+        "test": "Uji sebelum menyimpan",
+        "save": "Simpan koneksi",
+        "cancel": "Batal"
+      }
     },
     "reports": {
       "loading": "Memuat platform laporan",

@@ -36,6 +36,7 @@ import {
   Hexagon,
   ImageIcon,
   Layers,
+  LineChart,
   ListOrdered,
   Loader2,
   LogOut,
@@ -67,6 +68,7 @@ import { channelUiPresentation } from "@/channel-plugins/registry";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { SkillsCatalogSettings } from "@/components/settings/SkillsCatalogSettings";
 import { ReportsSettings } from "@/components/settings/ReportsSettings";
+import { GrafanaSettings } from "@/components/settings/GrafanaSettings";
 import { TokenUsageHeatmap } from "@/components/settings/TokenUsageHeatmap";
 import { ToggleButton } from "@/components/settings/ToggleButton";
 import {
@@ -196,6 +198,7 @@ export type SettingsSectionKey =
   | "browser"
   | "channels"
   | "reports"
+  | "grafana"
   | "apps"
   | "automations"
   | "skills"
@@ -2168,6 +2171,8 @@ export function SettingsView({
         );
       case "reports":
         return <ReportsSettings token={token} />;
+      case "grafana":
+        return <GrafanaSettings token={token} />;
       case "apps":
         return (
           <AppsCatalogSettings
@@ -2418,6 +2423,7 @@ const SETTINGS_NAV_ITEMS: Array<{ key: SettingsSectionKey; icon: LucideIcon; fal
   { key: "browser", icon: Globe2, fallback: "Web" },
   { key: "channels", icon: MessageCircle, fallback: "Channels" },
   { key: "reports", icon: Database, fallback: "Reports" },
+  { key: "grafana", icon: LineChart, fallback: "Grafana" },
   { key: "runtime", icon: Server, fallback: "System" },
   { key: "advanced", icon: ShieldCheck, fallback: "Security" },
 ];

@@ -139,6 +139,7 @@ const SETTINGS_SECTION_KEYS: SettingsSectionKey[] = [
   "browser",
   "channels",
   "reports",
+  "grafana",
   "apps",
   "automations",
   "skills",

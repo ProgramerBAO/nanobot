@@ -35,6 +35,7 @@ import type {
   WorkspacesPayload,
   WebuiThreadPersistedPayload,
   WorkspaceScopePayload,
+  GrafanaSettingsPayload,
 } from "./types";
 import { fetchWithTimeout } from "./http";
 
@@ -58,6 +59,7 @@ const API_SERVICE_VALUES_HEADER = "X-Nanobot-API-Service-Values";
 const OAUTH_CODE_HEADER = "X-Nanobot-OAuth-Code";
 const PROVIDER_VALUES_HEADER = "X-Nanobot-Provider-Values";
 const REPORTING_VALUES_HEADER = "X-Nanobot-Reporting-Values";
+const GRAFANA_VALUES_HEADER = "X-Nanobot-Grafana-Values";
 
 export class ApiError extends Error {
   status: number;
@@ -715,6 +717,45 @@ export async function fetchReportingSubscriptionOptions(
     token,
     undefined,
     API_READ_TIMEOUT_MS,
+  );
+}
+
+export type GrafanaSettingsAction = "create" | "update" | "delete" | "test";
+
+// The grafana header carries raw JSON (like the MCP header): the gateway
+// parser json.loads it directly. Values must never ride the URL — tokens
+// stay in this private header.
+function grafanaValuesHeader(values: Record<string, unknown>): HeadersInit {
+  return { [GRAFANA_VALUES_HEADER]: JSON.stringify(values) };
+}
+
+export async function fetchGrafanaSettings(
+  token: string,
+  base: string = "",
+): Promise<GrafanaSettingsPayload> {
+  return request<GrafanaSettingsPayload>(
+    `${base}/api/settings/grafana`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function runGrafanaSettingsAction(
+  token: string,
+  action: GrafanaSettingsAction,
+  values: Record<string, unknown>,
+  base: string = "",
+): Promise<GrafanaSettingsPayload> {
+  // GET-only transport (see runReportingSettingsAction): the embedded WebUI
+  // HTTP shim only accepts GET, so actions ride a GET with the structured
+  // private header. The test action spawns the MCP server and calls Grafana
+  // (30s server budget, cold uvx included) — the client budget covers it.
+  return request<GrafanaSettingsPayload>(
+    `${base}/api/settings/grafana/${action}`,
+    token,
+    { headers: grafanaValuesHeader(values) },
+    action === "test" ? 45_000 : 0,
   );
 }
 

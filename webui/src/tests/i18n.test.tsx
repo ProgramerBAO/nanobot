@@ -42,6 +42,7 @@ const SETTINGS_NAV_KEYS = [
   "browser",
   "apps",
   "automations",
+  "grafana",
   "runtime",
   "advanced",
 ];

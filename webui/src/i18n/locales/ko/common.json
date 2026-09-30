@@ -84,7 +84,8 @@
       "apps": "앱",
       "automations": "자동화",
       "skills": "스킬",
-      "reports": "리포트"
+      "reports": "리포트",
+      "grafana": "Grafana"
     },
     "sections": {
       "interface": "인터페이스",
@@ -817,6 +818,50 @@
       "selectProvider": "제공자 선택",
       "configureProvider": "제공자 설정",
       "languageAuto": "자동"
+    },
+    "grafana": {
+      "subtitle": "챗 어시스턴트용 읽기 전용 Grafana 연결을 관리합니다.",
+      "readOnlyNote": "1단계는 읽기 전용입니다. 각 연결은 --disable-write와 함께 {{package}}를 실행하고 선별된 도구 목록({{count}}개)을 사용합니다.",
+      "loading": "Grafana 연결 불러오는 중",
+      "loadFailed": "Grafana 연결을 불러오지 못했습니다",
+      "actionApplied": "nanobot 재시작 없이 변경 사항이 적용되었습니다.",
+      "actionFailed": "Grafana 연결 작업에 실패했습니다",
+      "add": "연결 추가",
+      "uvxMissing": "uvx가 nanobot PATH에 없습니다. 연결을 테스트하기 전에 게이트웨이 호스트에 uv(https://docs.astral.sh/uv/)를 설치하세요.",
+      "connectionsTitle": "연결 목록",
+      "empty": "아직 Grafana 연결이 없습니다. 하나 추가하면 챗 어시스턴트가 읽기 전용 Grafana 도구를 사용할 수 있습니다.",
+      "deleteConfirm": "Grafana 연결 \"{{slug}}\"을(를) 삭제할까요? 챗 어시스턴트가 즉시 해당 도구를 잃습니다.",
+      "test": {
+        "noResult": "테스트가 끝났지만 결과 메시지가 없습니다."
+      },
+      "row": {
+        "enabled": "활성",
+        "disabled": "비활성",
+        "readOnly": "읽기 전용",
+        "unmanaged": "수동 편집",
+        "unmanagedTitle": "이 grafana-* 항목은 이 페이지 밖에서 수동 편집되었습니다. 관리하려면 여기서 삭제 후 다시 만드세요.",
+        "meta": "token {{hint}} · 도구 {{count}}개 · {{package}}",
+        "envMissing": "참조한 환경 변수가 설정되지 않았습니다",
+        "test": "테스트",
+        "testTitle": "연결을 실행해 토큰을 종단 간 검증",
+        "edit": "편집",
+        "toggleAria": "{{slug}} 활성 상태",
+        "deleteTitle": "{{slug}} 삭제"
+      },
+      "editor": {
+        "createTitle": "Grafana 연결 추가",
+        "editTitle": "{{slug}} 편집",
+        "slug": "연결 ID",
+        "slugHelp": "소문자, 숫자, '-', '_'. 챗 도구는 mcp_grafana-<id>_… 형태로 나타납니다.",
+        "baseUrl": "Grafana URL",
+        "token": "서비스 계정 토큰",
+        "tokenHelp": "Viewer 역할의 서비스 계정 토큰. 로컬 config.json에 저장되며 이후에는 힌트만 표시됩니다.",
+        "tokenKeep": "비워 두면 현재 토큰을 유지합니다({{hint}}).",
+        "orgId": "조직 ID(선택)",
+        "test": "저장 전 테스트",
+        "save": "연결 저장",
+        "cancel": "취소"
+      }
     },
     "reports": {
       "loading": "보고서 플랫폼 로딩 중",

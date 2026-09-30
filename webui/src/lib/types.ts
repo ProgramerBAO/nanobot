@@ -1115,6 +1115,46 @@ export interface ReportingSettingsPayload {
   };
 }
 
+/** One Grafana platform managed by the dedicated Grafana settings page.
+ * Rows are derived from the ``grafana-<slug>`` MCP server entry; ``managed``
+ * is false for hand-edited entries that bypassed the facade invariants. */
+export interface GrafanaConnection {
+  slug: string;
+  server_name: string;
+  base_url: string;
+  org_id: string;
+  enabled: boolean;
+  managed: boolean;
+  package: string;
+  token_hint: string | null;
+  token_source: "value" | "env" | "none";
+  token_env_available: boolean | null;
+  token_configured: boolean;
+  tools: string[];
+  tool_count: number;
+}
+
+/** Result of the end-to-end connection test (spawn + user_info probe). */
+export interface GrafanaTestResult {
+  ok: boolean;
+  slug?: string;
+  message?: string;
+  error?: string;
+  tool_count?: number;
+  checked_at?: string;
+}
+
+export interface GrafanaSettingsPayload {
+  connections: GrafanaConnection[];
+  read_only_tools: string[];
+  package: string;
+  read_only: boolean;
+  uvx_available: boolean;
+  last_action?: GrafanaTestResult & { action?: string };
+  hot_reload?: { ok: boolean; message?: string };
+  requires_restart?: boolean;
+}
+
 export type ChannelConnectStatus = "pending" | "succeeded" | "expired" | "cancelled" | "failed";
 
 export interface ChannelConnectPayload {
