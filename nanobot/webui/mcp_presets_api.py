@@ -841,6 +841,13 @@ def mcp_presets_payload(
     last_action: dict[str, Any] | None = None,
     tool_preview: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
+    # grafana-* entries are managed exclusively by the Grafana connections
+    # page (facade invariants: pinned package, --disable-write, read-only tool
+    # allowlist), so they stay out of the generic custom-server list.
+    from nanobot.webui.grafana_api import (
+        GRAFANA_SERVER_PREFIX,  # noqa: PLC0415 — function-level keeps the module-level import direction single
+    )
+
     config = load_config()
     known = _known_preset_names()
     preset_rows = [
@@ -851,11 +858,14 @@ def mcp_presets_payload(
     custom_rows = [
         _custom_payload(name, cfg, tool_names=(tool_preview or {}).get(name))
         for name, cfg in sorted(config.tools.mcp_servers.items())
-        if name not in known
+        if name not in known and not name.startswith(GRAFANA_SERVER_PREFIX)
     ]
+    installed_count = sum(
+        1 for name in config.tools.mcp_servers if not name.startswith(GRAFANA_SERVER_PREFIX)
+    )
     payload: dict[str, Any] = {
         "presets": [*preset_rows, *custom_rows],
-        "installed_count": len(config.tools.mcp_servers),
+        "installed_count": installed_count,
     }
     if last_action is not None:
         payload["last_action"] = last_action

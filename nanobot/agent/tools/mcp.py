@@ -1102,6 +1102,9 @@ async def connect_mcp_servers(
     server_stacks: dict[str, MCPConnection] = {}
 
     for name, cfg in mcp_servers.items():
+        if not _server_enabled(cfg):
+            logger.info("MCP server '{}' is disabled; skipping connection", name)
+            continue
         try:
             result = await connect_single_server(name, cfg)
         except Exception as e:
@@ -1125,7 +1128,9 @@ async def connect_missing_servers(state: Any, registry: ToolRegistry) -> None:
         if getattr(state, "_mcp_closing", False):
             return
         missing_servers = {
-            name: cfg for name, cfg in state._mcp_servers.items() if name not in state._mcp_stacks
+            name: cfg
+            for name, cfg in state._mcp_servers.items()
+            if name not in state._mcp_stacks and _server_enabled(cfg)
         }
         if state._mcp_connecting or not missing_servers:
             return
@@ -1185,9 +1190,17 @@ async def reload_servers(state: Any, registry: ToolRegistry) -> dict[str, Any]:
             for name in current_names & next_names
             if _server_signature(current_servers[name]) != _server_signature(next_servers[name])
         )
+        # A live server whose next config is disabled must be torn down even
+        # when the rest of its signature is unchanged; disabled servers never
+        # (re)connect while disabled.
+        disabled_live = sorted(
+            name
+            for name in current_names & next_names
+            if not _server_enabled(next_servers[name]) and name in state._mcp_stacks
+        )
 
         tools_removed = 0
-        for name in [*removed, *changed]:
+        for name in dict.fromkeys([*removed, *changed, *disabled_live]):
             tools_removed += _unregister_server_tools(state, registry, name)
             await _close_server(state, name)
 
@@ -1195,9 +1208,15 @@ async def reload_servers(state: Any, registry: ToolRegistry) -> dict[str, Any]:
         retry_missing = sorted(
             name
             for name in next_names
-            if name not in state._mcp_stacks and name not in set(added) | set(changed)
+            if _server_enabled(next_servers[name])
+            and name not in state._mcp_stacks
+            and name not in set(added) | set(changed)
         )
-        to_connect_names = sorted(set(added) | set(changed) | set(retry_missing))
+        to_connect_names = sorted(
+            name
+            for name in set(added) | set(changed) | set(retry_missing)
+            if _server_enabled(next_servers[name])
+        )
         to_connect = {name: next_servers[name] for name in to_connect_names}
         connected: dict[str, MCPConnection] = {}
         if to_connect:
@@ -1382,6 +1401,12 @@ def _server_signature(cfg: Any) -> Any:
     if hasattr(cfg, "model_dump"):
         return cfg.model_dump(mode="json")
     return cfg
+
+
+def _server_enabled(cfg: Any) -> bool:
+    # getattr default keeps this robust for test doubles and configs written
+    # before the `enabled` field existed (absent = enabled).
+    return bool(getattr(cfg, "enabled", True))
 
 
 def _tool_prefix(server_name: str) -> str:

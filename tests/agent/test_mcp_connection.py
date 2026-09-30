@@ -407,6 +407,149 @@ async def test_reload_mcp_servers_retries_configured_server_without_live_stack(
 
 
 @pytest.mark.asyncio
+async def test_reload_mcp_servers_disable_and_reenable_without_restart(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    config = load_config()
+    config.tools.mcp_servers["browserbase"] = MCPServerConfig(
+        type="stdio",
+        command="browserbase-mcp",
+    )
+    save_config(config)
+
+    closed: list[str] = []
+    attempted: list[str] = []
+
+    async def _mark_closed(name: str) -> None:
+        closed.append(name)
+
+    async def _fake_connect(servers, registry):
+        stacks = {}
+        for name in servers:
+            attempted.append(name)
+            registry.register(_FakeMcpTool(f"mcp_{name}_navigate"))
+            stack = AsyncExitStack()
+            await stack.__aenter__()
+            stack.push_async_callback(_mark_closed, name)
+            stacks[name] = stack
+        return stacks
+
+    monkeypatch.setattr("nanobot.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+    loop = _make_loop(tmp_path, mcp_servers={})
+
+    added = await mcp_runtime.reload_servers(loop, loop.tools)
+
+    assert added["ok"] is True
+    assert added["added"] == ["browserbase"]
+    assert loop.tools.has("mcp_browserbase_navigate")
+
+    # Disable: config entry stays, live connection and tools go away, and the
+    # server must not be retried while disabled.
+    config = load_config()
+    config.tools.mcp_servers["browserbase"].enabled = False
+    save_config(config)
+
+    disabled = await mcp_runtime.reload_servers(loop, loop.tools)
+
+    assert disabled["ok"] is True
+    assert disabled["changed"] == ["browserbase"]  # `enabled` participates in the signature
+    assert "browserbase" in loop._mcp_servers
+    assert "browserbase" not in loop._mcp_stacks
+    assert not loop.tools.has("mcp_browserbase_navigate")
+    assert closed == ["browserbase"]
+    assert attempted == ["browserbase"]
+
+    # Re-enable: reconnects without a restart.
+    config = load_config()
+    config.tools.mcp_servers["browserbase"].enabled = True
+    save_config(config)
+
+    reenabled = await mcp_runtime.reload_servers(loop, loop.tools)
+
+    assert reenabled["ok"] is True
+    assert reenabled["changed"] == ["browserbase"]
+    assert "browserbase" in loop._mcp_stacks
+    assert loop.tools.has("mcp_browserbase_navigate")
+    assert attempted == ["browserbase", "browserbase"]
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
+async def test_reload_mcp_servers_skips_newly_added_disabled_server(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    config = load_config()
+    config.tools.mcp_servers["paused"] = MCPServerConfig(
+        type="stdio",
+        command="browserbase-mcp",
+        enabled=False,
+    )
+    save_config(config)
+
+    async def _fake_connect(servers, _registry):
+        raise AssertionError(f"disabled server must not connect: {sorted(servers)}")
+
+    monkeypatch.setattr("nanobot.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+    loop = _make_loop(tmp_path, mcp_servers={})
+
+    result = await mcp_runtime.reload_servers(loop, loop.tools)
+
+    assert result["ok"] is True
+    assert result["added"] == ["paused"]
+    assert result["failed"] == []
+    assert "paused" not in loop._mcp_stacks
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
+async def test_connect_missing_servers_skips_disabled_servers(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    paused = MCPServerConfig(type="stdio", command="browserbase-mcp", enabled=False)
+    loop = _make_loop(tmp_path, mcp_servers={"paused": paused})
+
+    async def _fake_connect(_servers, _registry):
+        raise AssertionError("disabled server must not be connected")
+
+    monkeypatch.setattr("nanobot.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+
+    await mcp_runtime.connect_missing_servers(loop, loop.tools)
+
+    assert "paused" in loop._mcp_servers
+    assert "paused" not in loop._mcp_stacks
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
+async def test_connect_mcp_servers_never_spawns_disabled_entries(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Defense-in-depth chokepoint: even a caller that hands a disabled config
+    # straight to the connector must never reach a transport spawn.
+    def _forbidden(*_args: Any, **_kwargs: Any):
+        raise AssertionError("disabled server must not spawn a transport")
+
+    monkeypatch.setattr("mcp.client.stdio.stdio_client", _forbidden)
+
+    loop = _make_loop(tmp_path)
+    stacks = await mcp_runtime.connect_mcp_servers(
+        {"paused": MCPServerConfig(type="stdio", command="whatever", enabled=False)},
+        loop.tools,
+    )
+
+    assert stacks == {}
+    await loop.close_mcp()
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_reconnects_after_session_terminated(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

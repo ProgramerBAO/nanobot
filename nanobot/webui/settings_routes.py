@@ -40,6 +40,7 @@ from nanobot.optional_features import (
 )
 from nanobot.pairing import approve_code, deny_code, list_pending
 from nanobot.webui.cli_apps_api import cli_apps_action, cli_apps_payload
+from nanobot.webui.grafana_api import GrafanaConnectionError, grafana_settings_action
 from nanobot.webui.http_utils import case_insensitive_header
 from nanobot.webui.http_utils import is_local_browser_request as _is_local_browser_request
 from nanobot.webui.http_utils import query_first as _query_first
@@ -90,6 +91,8 @@ _API_SERVICE_VALUES_HEADER = "X-Nanobot-API-Service-Values"
 _API_SERVICE_VALUES_HEADER_MAX_BYTES = 8 * 1024
 _REPORTING_VALUES_HEADER = "X-Nanobot-Reporting-Values"
 _REPORTING_VALUES_HEADER_MAX_BYTES = 64 * 1024
+_GRAFANA_VALUES_HEADER = "X-Nanobot-Grafana-Values"
+_GRAFANA_VALUES_HEADER_MAX_BYTES = 64 * 1024
 _OAUTH_CODE_HEADER = "X-Nanobot-OAuth-Code"
 _OAUTH_CODE_HEADER_MAX_BYTES = 8 * 1024
 
@@ -115,6 +118,13 @@ _MCP_PRESET_ACTIONS_BY_PATH = {
     "/api/settings/mcp-presets/import": "import",
     "/api/settings/mcp-presets/import-cursor": "import-cursor",
     "/api/settings/mcp-presets/tools": "tools",
+}
+
+_GRAFANA_ACTIONS_BY_PATH = {
+    "/api/settings/grafana/create": "create",
+    "/api/settings/grafana/update": "update",
+    "/api/settings/grafana/delete": "delete",
+    "/api/settings/grafana/test": "test",
 }
 
 
@@ -247,6 +257,11 @@ class WebUISettingsRouter:
             return self._handle_settings_pairing_action(request, "deny")
         if path == "/api/settings/mcp-presets":
             return await self._handle_settings_mcp_presets(request)
+        if path == "/api/settings/grafana":
+            return await self._handle_settings_grafana(request)
+        grafana_action = _GRAFANA_ACTIONS_BY_PATH.get(path)
+        if grafana_action is not None:
+            return await self._handle_settings_grafana(request, grafana_action)
         if path == "/api/settings/version-check":
             return await self._handle_settings_version_check(request)
         mcp_action = _MCP_PRESET_ACTIONS_BY_PATH.get(path)
@@ -1239,6 +1254,65 @@ class WebUISettingsRouter:
             if status >= 500:
                 self.logger.exception("MCP preset action '{}' failed", action or "list")
             return self._error_response(status, message)
+        if action is None:
+            return self._json_response(payload)
+        return self._json_response(self._with_restart_state(payload, section="runtime"))
+
+    def _parse_grafana_settings_query(self, request: WsRequest) -> QueryParams:
+        """Merge the Grafana structured header into the query context.
+
+        Unlike the MCP header parser, an explicit empty string is kept (null or
+        "" stays present) so the editor can clear optional fields such as the
+        org ID; the facade treats empty as "clear" for org_id and "keep" for
+        secrets, matching the provider-values convention.
+        """
+
+        query = self._query(request)
+        raw = case_insensitive_header(request.headers, _GRAFANA_VALUES_HEADER)
+        if not raw:
+            return query
+        if len(raw.encode("utf-8")) > _GRAFANA_VALUES_HEADER_MAX_BYTES:
+            raise WebUISettingsError("Grafana settings payload is too large")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise WebUISettingsError("invalid Grafana settings payload") from exc
+        if not isinstance(payload, dict):
+            raise WebUISettingsError("Grafana settings payload must be a JSON object")
+
+        merged = {key: list(values) for key, values in query.items()}
+        for key, value in payload.items():
+            if not isinstance(key, str) or not key:
+                raise WebUISettingsError("Grafana settings payload contains an invalid key")
+            if isinstance(value, str):
+                text = value
+            elif value is None:
+                text = ""
+            else:
+                text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            merged[key] = [text]
+        return merged
+
+    async def _handle_settings_grafana(
+        self,
+        request: WsRequest,
+        action: str | None = None,
+    ) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = await grafana_settings_action(
+                action,
+                self._parse_grafana_settings_query(request),
+                reload_mcp=lambda: request_mcp_reload(self.bus),
+            )
+        except GrafanaConnectionError as e:
+            return self._error_response(e.status, e.message)
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        except Exception:
+            self.logger.exception("Grafana connection action '{}' failed", action or "list")
+            return self._error_response(500, "grafana connection action failed")
         if action is None:
             return self._json_response(payload)
         return self._json_response(self._with_restart_state(payload, section="runtime"))
