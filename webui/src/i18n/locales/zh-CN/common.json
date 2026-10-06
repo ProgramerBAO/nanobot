@@ -831,6 +831,11 @@
       "connectionsTitle": "连接列表",
       "empty": "还没有 Grafana 连接。添加一个，即可让聊天助手获得只读的 Grafana 工具。",
       "deleteConfirm": "确认删除 Grafana 连接“{{slug}}”？聊天助手会立即失去对应工具。",
+      "write": {
+          "writeTools": "写操作（可选）",
+          "writeToolsHelp": "全部不勾选即为只读连接。勾选的工具将在无 --disable-write 下运行；每次调用都需要聊天确认卡并记录审计，且 token 必须具备 Editor 及以上权限。",
+          "warning": "写模式已开启：将注册 {{count}} 个写工具。token 需要 Editor 及以上权限；每个写操作都会在聊天中请求确认并记录审计。"
+        },
       "test": {
         "noResult": "测试结束，但没有返回结果信息。"
       },
@@ -838,6 +843,8 @@
         "enabled": "启用",
         "disabled": "停用",
         "readOnly": "只读",
+        "writeBadge": "可写 {{count}} 项",
+        "writeBadgeTitle": "写操作需要 Editor 及以上权限的 token；每次调用都会在聊天中要求确认并记录审计。",
         "unmanaged": "手工编辑",
         "unmanagedTitle": "该 grafana-* 条目在本页之外被手工修改；请在此删除并重新创建后再管理。",
         "meta": "token {{hint}} · {{count}} 个工具 · {{package}}",

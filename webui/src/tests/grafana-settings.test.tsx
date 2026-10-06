@@ -23,6 +23,9 @@ function connectionRow(overrides: Partial<GrafanaSettingsPayload["connections"][
     org_id: "",
     enabled: true,
     managed: true,
+    mode: "read",
+    write_tools: [],
+    write_enabled: false,
     package: "mcp-grafana@1.6.2",
     token_hint: "glsa_ab••••3f2d",
     token_source: "value",
@@ -37,7 +40,8 @@ function connectionRow(overrides: Partial<GrafanaSettingsPayload["connections"][
 function payloadWith(rows: GrafanaSettingsPayload["connections"] = []): GrafanaSettingsPayload {
   return {
     connections: rows,
-    read_only_tools: Array.from({ length: 11 }, (_, index) => `tool_${index}`),
+    read_only_tools: Array.from({ length: 30 }, (_, index) => `read_tool_${index}`),
+    write_tools_catalog: ["update_dashboard", "alerting_manage_silences"],
     package: "mcp-grafana@1.6.2",
     read_only: true,
     uvx_available: true,
@@ -136,6 +140,7 @@ describe("GrafanaSettings", () => {
         base_url: "https://grafana.example.com",
         token: "glsa-typed-token",
         org_id: "1",
+        write_tools: [],
       }),
     );
     // Editor closed after a successful save; the row now renders.
@@ -211,6 +216,98 @@ describe("GrafanaSettings", () => {
         base_url: "https://grafana.example.com",
         token: "",
         org_id: "",
+        write_tools: [],
+      }),
+    );
+  });
+
+  it("badges write-mode rows and keeps read-only rows clean", async () => {
+    vi.mocked(fetchGrafanaSettings).mockResolvedValue(
+      payloadWith([
+        connectionRow(),
+        connectionRow({
+          slug: "ops",
+          mode: "write",
+          write_tools: ["update_dashboard", "alerting_manage_silences"],
+          write_enabled: true,
+        }),
+      ]),
+    );
+
+    render(<GrafanaSettings token="token" />);
+
+    expect(await screen.findByText("Write × 2")).toBeInTheDocument();
+    expect(screen.getByTitle(/Editor-or-higher token/)).toBeInTheDocument();
+    // The read-only row shows no write badge.
+    const prod = screen.getByText("prod").closest("div");
+    expect(prod?.textContent ?? "").not.toContain("Write ×");
+  });
+
+  it("enables write mode from the editor with a warning", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGrafanaSettings).mockResolvedValue(payloadWith());
+    vi.mocked(runGrafanaSettingsAction).mockResolvedValue(
+      payloadWith([connectionRow({
+        mode: "write",
+        write_tools: ["update_dashboard"],
+        write_enabled: true,
+      })]),
+    );
+
+    render(<GrafanaSettings token="token" />);
+    await user.click(await screen.findByRole("button", { name: /Add connection/ }));
+    await user.type(screen.getByLabelText(/Connection ID/), "prod");
+    await user.type(screen.getByLabelText(/Grafana URL/), "https://grafana.example.com");
+    await user.type(
+      screen.getByLabelText(/Service account token/),
+      "glsa-typed-token",
+    );
+
+    // No warning before any write tool is selected.
+    expect(screen.queryByText(/Write mode enabled/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /update_dashboard/ }));
+    expect(await screen.findByText(/Write mode enabled/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Save connection/ }));
+    await waitFor(() =>
+      expect(runGrafanaSettingsAction).toHaveBeenCalledWith("token", "create", {
+        slug: "prod",
+        base_url: "https://grafana.example.com",
+        token: "glsa-typed-token",
+        org_id: "",
+        write_tools: ["update_dashboard"],
+      }),
+    );
+  });
+
+  it("unchecking every write tool returns the connection to read-only", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGrafanaSettings).mockResolvedValue(
+      payloadWith([connectionRow({
+        mode: "write",
+        write_tools: ["update_dashboard"],
+        write_enabled: true,
+      })]),
+    );
+    vi.mocked(runGrafanaSettingsAction).mockResolvedValue(
+      payloadWith([connectionRow()]),
+    );
+
+    render(<GrafanaSettings token="token" />);
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+
+    const checkbox = screen.getByRole("checkbox", { name: /update_dashboard/ });
+    expect(checkbox).toBeChecked();
+    await user.click(checkbox);
+    await user.click(screen.getByRole("button", { name: /Save connection/ }));
+
+    await waitFor(() =>
+      expect(runGrafanaSettingsAction).toHaveBeenCalledWith("token", "update", {
+        slug: "prod",
+        base_url: "https://grafana.example.com",
+        token: "",
+        org_id: "",
+        write_tools: [],
       }),
     );
   });

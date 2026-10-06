@@ -831,6 +831,11 @@
       "connectionsTitle": "Danh sách kết nối",
       "empty": "Chưa có kết nối Grafana nào. Thêm một kết nối để trợ lý có các công cụ Grafana chỉ đọc.",
       "deleteConfirm": "Xóa kết nối Grafana \"{{slug}}\"? Trợ lý trò chuyện sẽ mất công cụ ngay lập tức.",
+      "write": {
+          "writeTools": "Thao tác ghi (tùy chọn)",
+          "writeToolsHelp": "Bỏ chọn tất cả để giữ kết nối chỉ đọc. Công cụ được chọn chạy không có --disable-write; mỗi lần gọi cần thẻ xác nhận trong chat và bản ghi audit, token phải có vai trò Editor hoặc cao hơn.",
+          "warning": "Đã bật chế độ ghi: sẽ đăng ký {{count}} công cụ ghi. Token cần vai trò Editor trở lên; mỗi thao tác ghi đều yêu cầu xác nhận trong chat và được ghi audit."
+        },
       "test": {
         "noResult": "Kiểm tra đã kết thúc nhưng không có thông điệp kết quả."
       },
@@ -838,6 +843,8 @@
         "enabled": "Đang bật",
         "disabled": "Đã tắt",
         "readOnly": "Chỉ đọc",
+        "writeBadge": "Ghi × {{count}}",
+        "writeBadgeTitle": "Thao tác ghi yêu cầu token vai trò Editor trở lên; mỗi lần gọi đều yêu cầu xác nhận trong chat và được ghi audit.",
         "unmanaged": "Sửa tay",
         "unmanagedTitle": "Mục grafana-* này trong config.json đã bị sửa tay ngoài trang này; hãy xóa và tạo lại tại đây để quản lý.",
         "meta": "token {{hint}} · {{count}} công cụ · {{package}}",

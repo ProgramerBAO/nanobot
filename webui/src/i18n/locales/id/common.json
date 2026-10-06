@@ -831,6 +831,11 @@
       "connectionsTitle": "Daftar koneksi",
       "empty": "Belum ada koneksi Grafana. Tambahkan satu agar asisten memperoleh alat Grafana baca-saja.",
       "deleteConfirm": "Hapus koneksi Grafana \"{{slug}}\"? Asisten obrolan langsung kehilangan alatnya.",
+      "write": {
+          "writeTools": "Operasi tulis (opsional)",
+          "writeToolsHelp": "Biarkan semua tidak dicentang untuk koneksi baca-saja. Alat yang dicentang berjalan tanpa --disable-write; setiap panggilan memerlukan kartu konfirmasi di chat dan catatan audit, serta token harus berperan Editor ke atas.",
+          "warning": "Mode tulis aktif: {{count}} alat tulis akan didaftarkan. Token memerlukan peran Editor ke atas; setiap operasi tulis meminta konfirmasi di chat dan diaudit."
+        },
       "test": {
         "noResult": "Pengujian selesai tanpa pesan hasil."
       },
@@ -838,6 +843,8 @@
         "enabled": "Aktif",
         "disabled": "Nonaktif",
         "readOnly": "Baca-saja",
+        "writeBadge": "Tulis × {{count}}",
+        "writeBadgeTitle": "Operasi tulis memerlukan token dengan peran Editor ke atas; setiap panggilan meminta konfirmasi di chat dan dicatat dalam audit.",
         "unmanaged": "Sunting manual",
         "unmanagedTitle": "Entri grafana-* ini di config.json disunting manual di luar halaman ini; hapus dan buat ulang di sini untuk mengelolanya.",
         "meta": "token {{hint}} · {{count}} alat · {{package}}",

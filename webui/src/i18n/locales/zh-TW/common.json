@@ -831,6 +831,11 @@
       "connectionsTitle": "連線列表",
       "empty": "還沒有 Grafana 連線。新增一個，即可讓聊天助理取得唯讀的 Grafana 工具。",
       "deleteConfirm": "確認刪除 Grafana 連線「{{slug}}」？聊天助理會立即失去對應工具。",
+      "write": {
+          "writeTools": "寫入操作（選填）",
+          "writeToolsHelp": "全部不勾選即為唯讀連線。勾選的工具將在無 --disable-write 下執行；每次呼叫都需要聊天確認卡並記錄稽核，且 token 必須具備 Editor 及以上權限。",
+          "warning": "寫入模式已開啟：將註冊 {{count}} 個寫入工具。token 需要 Editor 及以上權限；每個寫入操作都會在聊天中請求確認並記錄稽核。"
+        },
       "test": {
         "noResult": "測試結束，但沒有回傳結果訊息。"
       },
@@ -838,6 +843,8 @@
         "enabled": "啟用",
         "disabled": "停用",
         "readOnly": "唯讀",
+        "writeBadge": "可寫 {{count}} 項",
+        "writeBadgeTitle": "寫入操作需要 Editor 及以上權限的 token；每次呼叫都會在聊天中要求確認並記錄稽核。",
         "unmanaged": "手動編輯",
         "unmanagedTitle": "該 grafana-* 條目在本頁之外被手動修改；請在此刪除並重新建立後再管理。",
         "meta": "token {{hint}} · {{count}} 個工具 · {{package}}",

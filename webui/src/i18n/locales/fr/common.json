@@ -831,6 +831,11 @@
       "connectionsTitle": "Connexions",
       "empty": "Aucune connexion Grafana pour l'instant. Ajoutez-en une pour donner à l'assistant des outils Grafana en lecture seule.",
       "deleteConfirm": "Supprimer la connexion Grafana « {{slug}} » ? L'assistant de chat perd immédiatement ses outils.",
+      "write": {
+          "writeTools": "Opérations d'écriture (facultatif)",
+          "writeToolsHelp": "Laissez tout décoché pour une connexion en lecture seule. Les outils cochés s'exécutent sans --disable-write ; chaque appel exige alors une carte de confirmation dans le chat et une entrée d'audit, et le jeton doit avoir un rôle Editor ou supérieur.",
+          "warning": "Mode écriture activé : {{count}} outils d'écriture seront enregistrés. Le jeton doit avoir un rôle Editor ou supérieur ; chaque opération d'écriture demande une confirmation dans le chat et est auditée."
+        },
       "test": {
         "noResult": "Le test s'est terminé sans message de résultat."
       },
@@ -838,6 +843,8 @@
         "enabled": "Activée",
         "disabled": "Désactivée",
         "readOnly": "Lecture seule",
+        "writeBadge": "Écriture × {{count}}",
+        "writeBadgeTitle": "Les opérations d'écriture exigent un jeton avec un rôle Editor ou supérieur ; chaque appel demande une confirmation dans le chat et est audité.",
         "unmanaged": "Modifiée à la main",
         "unmanagedTitle": "Cette entrée grafana-* de config.json a été modifiée hors de cette page ; supprimez-la et recréez-la ici pour la gérer.",
         "meta": "token {{hint}} · {{count}} outils · {{package}}",

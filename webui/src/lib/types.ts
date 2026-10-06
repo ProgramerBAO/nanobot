@@ -1117,7 +1117,8 @@ export interface ReportingSettingsPayload {
 
 /** One Grafana platform managed by the dedicated Grafana settings page.
  * Rows are derived from the ``grafana-<slug>`` MCP server entry; ``managed``
- * is false for hand-edited entries that bypassed the facade invariants. */
+ * is false for hand-edited entries that bypassed the facade invariants, and
+ * ``mode``/``write_tools`` describe the phase-2 write surface. */
 export interface GrafanaConnection {
   slug: string;
   server_name: string;
@@ -1125,6 +1126,9 @@ export interface GrafanaConnection {
   org_id: string;
   enabled: boolean;
   managed: boolean;
+  mode: "read" | "write" | null;
+  write_tools: string[];
+  write_enabled: boolean;
   package: string;
   token_hint: string | null;
   token_source: "value" | "env" | "none";
@@ -1147,6 +1151,7 @@ export interface GrafanaTestResult {
 export interface GrafanaSettingsPayload {
   connections: GrafanaConnection[];
   read_only_tools: string[];
+  write_tools_catalog: string[];
   package: string;
   read_only: boolean;
   uvx_available: boolean;

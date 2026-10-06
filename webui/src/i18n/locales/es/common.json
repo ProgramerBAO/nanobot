@@ -831,6 +831,11 @@
       "connectionsTitle": "Conexiones",
       "empty": "Aún no hay conexiones de Grafana. Añade una para dar al asistente herramientas de Grafana de solo lectura.",
       "deleteConfirm": "¿Eliminar la conexión de Grafana «{{slug}}»? El asistente de chat perderá sus herramientas de inmediato.",
+      "write": {
+          "writeTools": "Operaciones de escritura (opcional)",
+          "writeToolsHelp": "Deja todo desmarcado para una conexión de solo lectura. Las herramientas marcadas se ejecutan sin --disable-write; cada llamada requiere una tarjeta de confirmación en el chat y un registro de auditoría, y el token debe tener rol Editor o superior.",
+          "warning": "Modo escritura activado: se registrarán {{count}} herramientas de escritura. El token necesita rol Editor o superior; cada operación de escritura pide confirmación en el chat y queda auditada."
+        },
       "test": {
         "noResult": "La prueba terminó sin mensaje de resultado."
       },
@@ -838,6 +843,8 @@
         "enabled": "Activada",
         "disabled": "Desactivada",
         "readOnly": "Solo lectura",
+        "writeBadge": "Escritura × {{count}}",
+        "writeBadgeTitle": "Las operaciones de escritura requieren un token con rol Editor o superior; cada llamada pide confirmación en el chat y queda auditada.",
         "unmanaged": "Editada a mano",
         "unmanagedTitle": "Esta entrada grafana-* de config.json se editó a mano fuera de esta página; elimínala y vuelve a crearla aquí para gestionarla.",
         "meta": "token {{hint}} · {{count}} herramientas · {{package}}",

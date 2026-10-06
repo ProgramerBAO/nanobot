@@ -24,10 +24,11 @@ type EditorState = {
   baseUrl: string;
   token: string;
   orgId: string;
+  writeTools: string[];
 };
 
 function emptyEditor(): EditorState {
-  return { mode: "create", slug: "", baseUrl: "", token: "", orgId: "" };
+  return { mode: "create", slug: "", baseUrl: "", token: "", orgId: "", writeTools: [] };
 }
 
 function editorFromConnection(item: GrafanaConnection): EditorState {
@@ -38,6 +39,7 @@ function editorFromConnection(item: GrafanaConnection): EditorState {
     // Never prefill the stored token; the placeholder shows its redacted hint.
     token: "",
     orgId: item.org_id,
+    writeTools: item.write_enabled ? [...item.write_tools] : [],
   };
 }
 
@@ -77,6 +79,14 @@ function ConnectionRow({
           <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-700 dark:text-sky-300">
             {t("settings.grafana.row.readOnly", { defaultValue: "Read-only" })}
           </span>
+          {item.write_enabled ? (
+            <span
+              className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-300"
+              title={t("settings.grafana.row.writeBadgeTitle", { defaultValue: "Write operations require an Editor-or-higher token; every call asks for confirmation in chat and is audited." })}
+            >
+              {t("settings.grafana.row.writeBadge", { defaultValue: "Write × {{count}}", count: item.write_tools.length })}
+            </span>
+          ) : null}
           {!item.managed ? (
             <span
               className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-300"
@@ -239,6 +249,8 @@ export function GrafanaSettings({ token }: { token: string }) {
       base_url: editor.baseUrl.trim(),
       token: editor.token.trim(),
       org_id: editor.orgId.trim(),
+      // Always present: an empty array returns the connection to read-only.
+      write_tools: [...editor.writeTools].sort(),
     };
     const finish = () => {
       setEditor(null);
@@ -272,6 +284,7 @@ export function GrafanaSettings({ token }: { token: string }) {
 
   const connections = payload?.connections ?? [];
   const readOnlyTools = payload?.read_only_tools ?? [];
+  const writeCatalog = payload?.write_tools_catalog ?? [];
   const editingItem = editor?.mode === "edit"
     ? connections.find((item) => item.slug === editor.slug)
     : undefined;
@@ -401,7 +414,47 @@ export function GrafanaSettings({ token }: { token: string }) {
                 autoComplete="off"
               />
             </label>
+            <div className={FIELD_LABEL_CLASS + " md:col-span-2"}>
+              {t("settings.grafana.write.writeTools", { defaultValue: "Write operations (optional)" })}
+              <span className="text-[11px] font-normal text-muted-foreground">
+                {t("settings.grafana.write.writeToolsHelp", { defaultValue: "Leave everything unchecked for a read-only connection. Checked tools run without --disable-write; every call then requires a confirmation card in chat plus an audit record, and the token must carry Editor-or-higher permissions." })}
+              </span>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {writeCatalog.map((tool) => {
+                  const checked = editor.writeTools.includes(tool);
+                  return (
+                    <label
+                      key={tool}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2 rounded-[10px] border px-2.5 py-1.5 text-xs transition-colors",
+                        checked
+                          ? "border-amber-500/50 bg-amber-500/10 text-foreground"
+                          : "border-border text-muted-foreground hover:bg-muted/50",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={editorBusy}
+                        onChange={() => setEditor({
+                          ...editor,
+                          writeTools: checked
+                            ? editor.writeTools.filter((item) => item !== tool)
+                            : [...editor.writeTools, tool],
+                        })}
+                      />
+                      <code className="break-all">{tool}</code>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
           </div>
+          {editor.writeTools.length > 0 ? (
+            <div className="mt-3 rounded-[14px] border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+              {t("settings.grafana.write.warning", { defaultValue: "Write mode enabled: {{count}} write tools will be registered. The token needs Editor-or-higher permissions; every write operation asks for confirmation in chat and is audited.", count: editor.writeTools.length })}
+            </div>
+          ) : null}
           {editorTest ? (
             <div className={cn(
               "mt-3 rounded-[14px] border px-3 py-2 text-xs",

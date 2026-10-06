@@ -201,21 +201,35 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   connectors (Grafana/WeCom/DingTalk/cost TokenAPI) stay config-level. New user-
   facing configuration must ship with a page-level control in the Report platform
   settings; do not add config.json-only switches for report features.
-- Grafana connections (2026-09-30, read-only phase 1): the WebUI Settings
-  "Grafana" section is the single management surface for
-  `tools.mcpServers["grafana-<slug>"]` entries, and the generic MCP page filters
-  them out. The facade (`nanobot/webui/grafana_api.py`) owns the invariants:
-  uvx + pinned `mcp-grafana@<version>` + `--disable-write`, `enabled_tools`
-  limited to the curated 11-tool read-only allowlist, absolute http(s) URL
-  without userinfo; update normalizes an older pin, refuses hand-edited
-  (unmanaged) entries with 409, and never returns a raw token (hint in API
-  responses, token-free audit summaries, scrubbed test errors). The test action
-  spawns the child process and calls `user_info` end-to-end — Grafana requests
-  are made by mcp-grafana, not by nanobot's HTTP stack.
-  `MCPServerConfig.enabled: false` keeps any MCP server configured but never
-  connects it (spawn, retry, and hot reload all skip it). Do not hand-edit
-  grafana-* entries or bypass the facade; bump the pinned package only after
-  re-verifying the read-only tool list against the new release.
+- Grafana connections (2026-09-30 read-only phase 1; 2026-10-01 write phase 2):
+  the WebUI Settings "Grafana" section is the single management surface for
+  `tools.mcpServers["grafana-<slug>"]` entries, and the generic MCP page
+  filters them out. The facade (`nanobot/webui/grafana_api.py`) owns the
+  invariants: uvx + pinned `mcp-grafana@<version>`, absolute http(s) URL
+  without userinfo, enabled_tools within the curated read (30 tools incl.
+  Loki + get_panel_image) ∪ write (10 tools) catalogs; update normalizes an
+  older pin, refuses hand-edited (unmanaged) entries with 409, and never
+  returns a raw token. The test action spawns the child process and calls
+  `user_info` end-to-end — Grafana requests are made by mcp-grafana, not by
+  nanobot's HTTP stack. `MCPServerConfig.enabled: false` keeps any MCP
+  server configured but never connects it (spawn, retry, and hot reload all
+  skip it).
+  Write mode (2026-10-01): a connection with selected write tools drops
+  `--disable-write` because mcp-grafana 1.6.2 gates whole tool categories
+  and `--enable-write-tools` cannot restore them (verified in the v1.6.2
+  source; only sift/raw-SQL route through the per-name override). The write
+  boundary is therefore entirely nanobot-side: enabled_tools is pinned to
+  read ∪ chosen-write (no "*"), and every chosen write tool must be listed
+  in `confirm_tools`, which wraps it in the interactive confirmation gate
+  (`nanobot/agent/tools/mcp_confirm.py`): first call issues a chat
+  confirmation card carrying a server-side single-use nonce (600s TTL,
+  SHA-256 params fingerprint, chat-bound); execution happens only through
+  the channel-callback direct-tool resume, and both card issuance and
+  execution are audited. Do not add a write tool to the catalogs without
+  the gate, and do not bypass the facade by hand-editing grafana-* entries.
+  Bump the pinned package only after re-verifying both catalogs against the
+  new release — the 2.x alerting split renames `alerting_manage_*` into
+  `alerting_rules_read/write` and will require catalog updates.
 
 ## Common File Locations
 

@@ -831,6 +831,11 @@
       "connectionsTitle": "Connections",
       "empty": "No Grafana connections yet. Add one to give the chat assistant read-only Grafana tools.",
       "deleteConfirm": "Delete Grafana connection \"{{slug}}\"? The chat assistant immediately loses its tools.",
+      "write": {
+          "writeTools": "Write operations (optional)",
+          "writeToolsHelp": "Leave everything unchecked for a read-only connection. Checked tools run without --disable-write; every call then requires a confirmation card in chat plus an audit record, and the token must carry Editor-or-higher permissions.",
+          "warning": "Write mode enabled: {{count}} write tools will be registered. The token needs Editor-or-higher permissions; every write operation asks for confirmation in chat and is audited."
+        },
       "test": {
         "noResult": "Test finished without a result message."
       },
@@ -838,6 +843,8 @@
         "enabled": "Enabled",
         "disabled": "Disabled",
         "readOnly": "Read-only",
+        "writeBadge": "Write × {{count}}",
+        "writeBadgeTitle": "Write operations require an Editor-or-higher token; every call asks for confirmation in chat and is audited.",
         "unmanaged": "Hand-edited",
         "unmanagedTitle": "This grafana-* config.json entry was hand-edited outside this page; delete and re-create it here to manage it.",
         "meta": "token {{hint}} · {{count}} tools · {{package}}",
