@@ -85,3 +85,7 @@ BB_LIVE_SECRET = placeholder("NANOBOT_TEST_BB_LIVE_SECRET", "bb_live_secret")
 GRAFANA_SA_FAKE = placeholder("NANOBOT_TEST_GRAFANA_SA", "glsa-fixture-token")
 GRAFANA_SA_ROTATED = placeholder("NANOBOT_TEST_GRAFANA_SA_ROTATED", "glsa-rotated-token")
 GRAFANA_SA_UNDERSCORE = placeholder("NANOBOT_TEST_GRAFANA_SA_UNDERSCORE", "glsa_fixturetoken1")
+# Long enough (>= 24 chars) to exercise the shaped token hint.
+GRAFANA_SA_LONG = placeholder(
+    "NANOBOT_TEST_GRAFANA_SA_LONG", "glsa-fixture-token-long-enough"
+)

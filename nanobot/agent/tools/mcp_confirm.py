@@ -67,6 +67,11 @@ _CONFIRM_TTL_SECONDS = 600.0
 _MAX_PENDING = 128
 _MAX_CARD_PARAMS = 12
 _MAX_PARAM_CHARS = 160
+# A pending confirmation retains the full payload for execution replay, and
+# the channel interaction state stores another copy; bound both so repeated
+# large writes cannot amplify gateway memory (the tool-input side has no
+# upstream cap — max_tool_result_chars limits output only).
+_MAX_PENDING_PARAM_CHARS = 256 * 1024
 _SECRET_KEY_RE = re.compile(
     r"(?:token|secret|password|passwd|authorization|api[_-]?key)", re.IGNORECASE
 )
@@ -147,8 +152,13 @@ class _ConfirmationStore:
         chat_id: str,
         sender_id: str,
         now: float | None = None,
-    ) -> _PendingConfirmation:
-        """Register a pending confirmation, reusing an identical live one."""
+    ) -> tuple[_PendingConfirmation, bool]:
+        """Register a pending confirmation and report whether it is new.
+
+        Returns ``(pending, created)``; an identical live confirmation is
+        reused with ``created=False`` so callers avoid re-sending a duplicate
+        card for a retried call.
+        """
         now = time.monotonic() if now is None else now
         digest = _params_digest(params)
         with self._lock:
@@ -162,7 +172,7 @@ class _ConfirmationStore:
                     and item.chat_id == chat_id
                     and item.expires_at > now
                 ):
-                    return item
+                    return item, False
             while len(self._pending) >= self._max_pending:
                 # Evict the oldest entry; outside the card window an old
                 # confirmation is worthless anyway.
@@ -180,7 +190,7 @@ class _ConfirmationStore:
                 expires_at=now + self._ttl,
             )
             self._pending[pending.nonce] = pending
-            return pending
+            return pending, True
 
     def resolve(
         self,
@@ -432,13 +442,35 @@ class ConfirmGateWrapper(Tool):
                 self._raw_tool_name,
             )
 
-        pending = _CONFIRMATIONS.issue(
+        # Bound the retained payload (see _MAX_PENDING_PARAM_CHARS); the
+        # params must also be JSON-serializable because the card action
+        # round-trips them through the channel interaction state.
+        try:
+            serialized = json.dumps(params, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return ToolResult.error(
+                "Error: parameters must be JSON-serializable to be confirmed in chat."
+            )
+        if len(serialized) > _MAX_PENDING_PARAM_CHARS:
+            return ToolResult.error(
+                f"Error: parameters too large for chat confirmation "
+                f"({len(serialized)} chars > {_MAX_PENDING_PARAM_CHARS}); "
+                "split the operation or shrink the payload."
+            )
+        pending, created = _CONFIRMATIONS.issue(
             server_name=self._server_name,
             raw_tool_name=self._raw_tool_name,
             params=params,
             chat_id=ctx.chat_id if ctx else "",
             sender_id=ctx.sender_id if ctx else "",
         )
+        if not created:
+            # An identical live confirmation already exists: re-sending the
+            # card would only duplicate it; nonce and TTL are unchanged.
+            return ToolResult(
+                "该写操作的确认卡已发送且仍在有效期（10 分钟内），"
+                "请等待用户在卡片中点击确认；无需重复调用该工具。"
+            )
         _record_audit(
             "mcp_confirm_card",
             f"{self._server_name}:{self._raw_tool_name}",
@@ -459,9 +491,17 @@ class ConfirmGateWrapper(Tool):
         )
         if not on_direct_path and await self._deliver_card(document, ctx):
             return ToolResult(fallback)
-        return ToolResult(fallback, metadata={
-            OUTBOUND_META_AGENT_UI: document.to_agent_ui(),
-        })
+        if on_direct_path:
+            return ToolResult(fallback, metadata={
+                OUTBOUND_META_AGENT_UI: document.to_agent_ui(),
+            })
+        # LLM path with no delivery channel: keep the document as best-effort
+        # metadata, but the text must not claim a card that was never sent.
+        return ToolResult(
+            "该写操作需要用户确认，但当前环境无法投递确认卡片"
+            "（未配置 message 工具或发送通道）。请在支持卡片的渠道（如飞书）中发起该操作。",
+            metadata={OUTBOUND_META_AGENT_UI: document.to_agent_ui()},
+        )
 
     async def _deliver_card(self, document: Any, ctx: Any) -> bool:
         if ctx is None or not ctx.channel or not ctx.chat_id or self._registry is None:

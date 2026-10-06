@@ -307,7 +307,9 @@ def _token_hint(token: str) -> dict[str, Any]:
             "source": "env",
             "env_available": None,
         }
-    if len(token) < 16:
+    if len(token) < 24:
+        # Short values would leak a disproportionate share (11 of 16-23
+        # chars); real glsa_ tokens are far longer and get the shaped hint.
         return {"hint": "••••", "source": "value", "env_available": None}
     return {
         "hint": f"{token[:7]}••••{token[-4:]}",

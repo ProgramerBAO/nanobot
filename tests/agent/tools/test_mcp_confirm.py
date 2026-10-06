@@ -9,13 +9,17 @@ wrap helper. The base tool is a local fake; no MCP transport is involved.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 
 from nanobot.agent.tools import mcp_confirm
 from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.context import RequestContext, request_context
+from nanobot.agent.tools.mcp import MCPToolWrapper, _attach_reconnect_handlers
 from nanobot.agent.tools.mcp_confirm import (
     CONFIRM_PARAM,
     ConfirmGateWrapper,
@@ -251,15 +255,35 @@ async def test_nonce_bound_to_chat():
     assert OUTBOUND_META_AGENT_UI in result.metadata
 
 
-async def test_identical_retry_reuses_pending_confirmation():
-    gate = _gate()
+async def test_identical_retry_reuses_pending_without_duplicate_card(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    delivered: list[OutboundMessage] = []
+
+    class _FakeMessageTool(MessageTool):
+        async def deliver_outbound(self, msg: OutboundMessage) -> bool:
+            delivered.append(msg)
+            return True
+
+    registry = ToolRegistry()
+    registry.register(_FakeMessageTool())
+    audits = _audit_calls(monkeypatch)
+    gate = _gate(registry=registry)
 
     with request_context(_ctx()):
         first = await _call(gate, dashboard="D-1")
         second = await _call(gate, dashboard="D-1")
 
-    assert _nonce_of(first) == _nonce_of(second)
+    # The first call delivered the card (plain-text result, no metadata —
+    # the delivered copy is the card); the retry reuses the live
+    # confirmation instead of re-sending another one.
+    assert "已发送确认卡片" in str(first)
+    assert OUTBOUND_META_AGENT_UI not in first.metadata
+    assert OUTBOUND_META_AGENT_UI not in second.metadata
+    assert "已发送且仍在有效期" in str(second)
+    assert len(delivered) == 1
     assert mcp_confirm._CONFIRMATIONS.pending_count() == 1
+    assert [call["action"] for call in audits] == ["mcp_confirm_card"]
 
 
 async def test_llm_path_delivers_card_via_message_tool(monkeypatch: pytest.MonkeyPatch):
@@ -318,6 +342,106 @@ async def test_delivery_falls_back_to_result_metadata_without_message_tool():
         result = await _call(gate, dashboard="D-1")
 
     assert OUTBOUND_META_AGENT_UI in result.metadata
+
+
+async def test_no_delivery_environment_reports_honestly():
+    """Without a delivery channel the text must not claim a card was sent."""
+    gate = _gate(registry=ToolRegistry())  # no message tool registered
+
+    with request_context(_ctx(direct_tool=False)):
+        result = await _call(gate, dashboard="D-1")
+
+    assert "无法投递确认卡片" in str(result)
+    assert "已发送确认卡片" not in str(result)
+    # The document still rides the metadata as a best-effort payload.
+    assert OUTBOUND_META_AGENT_UI in result.metadata
+
+
+async def test_oversized_params_are_rejected_without_issuing_a_card(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    audits = _audit_calls(monkeypatch)
+    gate = _gate()
+    base = gate._base
+    huge = "x" * (mcp_confirm._MAX_PENDING_PARAM_CHARS + 1)
+
+    with request_context(_ctx()):
+        result = await _call(gate, dashboard=huge)
+
+    assert base.calls == []
+    assert mcp_confirm._CONFIRMATIONS.pending_count() == 0
+    assert audits == []
+    assert "too large for chat confirmation" in str(result)
+    assert getattr(result, "is_error", False) is True
+
+
+async def test_non_serializable_params_are_rejected():
+    gate = _gate()
+    base = gate._base
+    cyclic: dict[str, Any] = {}
+    cyclic["self"] = cyclic
+
+    with request_context(_ctx()):
+        result = await _call(gate, dashboard=cyclic)
+
+    assert base.calls == []
+    assert mcp_confirm._CONFIRMATIONS.pending_count() == 0
+    assert "JSON-serializable" in str(result)
+
+
+def _tool_def() -> SimpleNamespace:
+    return SimpleNamespace(
+        name="update_dashboard",
+        description="fake write tool",
+        inputSchema={"type": "object", "properties": {}},
+    )
+
+
+def test_reconnect_handler_reaches_gated_base():
+    """The gate sits in the registry; the handler must attach to its base.
+
+    Regression (review R01): _attach_reconnect_handlers used to skip anything
+    that is not an _MCPWrapperBase, leaving gated write tools without the
+    session self-heal that ungated tools have.
+    """
+    registry = ToolRegistry()
+    base = MCPToolWrapper(object(), "grafana-prod", _tool_def(), tool_timeout=5)
+    gate = ConfirmGateWrapper(
+        base, server_name="grafana-prod", raw_tool_name="update_dashboard",
+        registry=registry,
+    )
+    registry.register(gate)
+
+    _attach_reconnect_handlers(SimpleNamespace(), registry, ["grafana-prod"])
+
+    assert base._reconnect is not None
+
+
+async def test_refresh_session_extracts_session_from_gated_tool():
+    """A reconnect returns the re-registered gate; the session lives inside.
+
+    Regression (review R01): the session lookup used to read ``_session``
+    off the gate itself and always failed, so even a handler-attached gated
+    tool could not self-heal after a terminated session.
+    """
+    stale = MCPToolWrapper(object(), "grafana-prod", _tool_def(), tool_timeout=5)
+    fresh_session = object()
+    inner = MCPToolWrapper(fresh_session, "grafana-prod", _tool_def(), tool_timeout=5)
+    gate = ConfirmGateWrapper(
+        inner, server_name="grafana-prod", raw_tool_name="update_dashboard",
+    )
+
+    async def _reconnect(_server_name: str, _tool_name: str, _stale_tool: Any) -> Any:
+        # registry.get() after a refresh returns the gate, not a bare wrapper.
+        return gate
+
+    stale.set_reconnect_handler(_reconnect)
+    exc = McpError(ErrorData(code=-32000, message="Session terminated"))
+
+    refreshed = await stale._refresh_session_after_termination(exc, False, "tool")
+
+    assert refreshed is True
+    assert stale._session is fresh_session
 
 
 async def test_scrub_params_redacts_secrets_and_bounds_size():

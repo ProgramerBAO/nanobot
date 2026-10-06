@@ -23,6 +23,7 @@ from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import MCPServerConfig
 from nanobot.testing.credentials import (
     GRAFANA_SA_FAKE,
+    GRAFANA_SA_LONG,
     GRAFANA_SA_ROTATED,
     GRAFANA_SA_UNDERSCORE,
 )
@@ -222,7 +223,7 @@ def test_payload_redacts_tokens_and_marks_unmanaged_entries(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _use_config(tmp_path, monkeypatch)
-    grafana_api._create_connection(_create_query())
+    grafana_api._create_connection(_create_query(token=GRAFANA_SA_LONG))
 
     # Hand-edited entry: same prefix but missing --disable-write → unmanaged.
     config = load_config()
@@ -253,12 +254,25 @@ def test_payload_redacts_tokens_and_marks_unmanaged_entries(
     assert prod["managed"] is True
     assert prod["token_configured"] is True
     assert prod["token_source"] == "value"
-    # 19-char fake → first 7 + bullets + last 4; never the raw value.
-    assert prod["token_hint"] == "glsa-fi••••oken"
-    assert GRAFANA_SA_FAKE not in json.dumps(payload)
+    # 30-char fake → first 7 + bullets + last 4; never the raw value.
+    assert prod["token_hint"] == "glsa-fi••••ough"
+    assert GRAFANA_SA_LONG not in json.dumps(payload)
 
     legacy = rows["legacy"]
     assert legacy["managed"] is False
+
+
+def test_token_hint_masks_short_values_fully(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Below 24 chars the shaped hint would reveal a disproportionate share
+    # (11 of 16-23 chars), so short tokens are fully masked (review R05).
+    _use_config(tmp_path, monkeypatch)
+    _capture_audit(monkeypatch)
+    grafana_api._create_connection(_create_query(slug="short"))
+
+    payload = grafana_connections_payload()
+    row = next(item for item in payload["connections"] if item["slug"] == "short")
+    assert row["token_hint"] == "••••"
+    assert GRAFANA_SA_FAKE not in json.dumps(payload)
 
 
 def test_payload_env_reference_token_marks_source_env(

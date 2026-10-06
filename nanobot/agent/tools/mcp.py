@@ -385,7 +385,13 @@ class _MCPWrapperBase(Tool):
             self._server_name,
         )
         refreshed_tool = await self._reconnect(self._server_name, self._name, self)
-        refreshed_session = getattr(refreshed_tool, "_session", None)
+        # The re-registered tool may be a wrapper around an MCP wrapper (e.g.
+        # the confirmation gate holds the live MCPToolWrapper); the session
+        # lives on the inner _MCPWrapperBase, so unwrap before reading it.
+        session_source = refreshed_tool
+        if not isinstance(session_source, _MCPWrapperBase):
+            session_source = getattr(session_source, "_base", None)
+        refreshed_session = getattr(session_source, "_session", None)
         if refreshed_session is None:
             logger.warning(
                 "MCP {} '{}' could not refresh session for server '{}'",
@@ -1374,8 +1380,15 @@ def _attach_reconnect_handlers(
             tool = registry.get(tool_name)
             if not _tool_belongs_to_server(tool, tool_name, server_name):
                 continue
-            if isinstance(tool, _MCPWrapperBase):
-                tool.set_reconnect_handler(reconnect)
+            # A registered tool may be a wrapper around an MCP wrapper (the
+            # confirmation gate is one); the reconnect handler must live on
+            # the inner _MCPWrapperBase so a terminated session self-heals on
+            # the next gated call, exactly like ungated tools.
+            target = tool
+            if not isinstance(target, _MCPWrapperBase):
+                target = getattr(target, "_base", None)
+            if isinstance(target, _MCPWrapperBase):
+                target.set_reconnect_handler(reconnect)
 
 
 async def _refresh_terminated_server(
