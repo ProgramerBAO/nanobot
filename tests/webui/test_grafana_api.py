@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -34,6 +35,7 @@ from nanobot.webui.grafana_api import (
     GRAFANA_SERVER_PREFIX,
     GRAFANA_TOKEN_ENV,
     GRAFANA_URL_ENV,
+    GRAFANA_WRITE_TOOLS,
     GrafanaConnectionError,
     grafana_connections_payload,
     grafana_settings_action,
@@ -53,12 +55,16 @@ def _create_query(
     token: str = GRAFANA_SA_FAKE,
     org_id: str | None = None,
     enabled: str | None = None,
+    write_tools: str | None = None,
 ) -> dict[str, list[str]]:
     query: dict[str, list[str]] = {"slug": [slug], "base_url": [base_url], "token": [token]}
     if org_id is not None:
         query["org_id"] = [org_id]
     if enabled is not None:
         query["enabled"] = [enabled]
+    if write_tools is not None:
+        # Mirrors the structured header's JSON encoding of arrays.
+        query["write_tools"] = [write_tools]
     return query
 
 
@@ -409,6 +415,211 @@ def test_delete_removes_entry(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None
     with pytest.raises(GrafanaConnectionError) as exc:
         grafana_api._delete_connection({"slug": ["prod"]})
     assert exc.value.status == 404
+
+
+# ---------------------------------------------------------------------------
+# write mode (phase 2)
+# ---------------------------------------------------------------------------
+
+
+def test_create_write_mode_builds_gated_template(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_config(tmp_path, monkeypatch)
+    audits = _capture_audit(monkeypatch)
+
+    payload = grafana_api._create_connection(_create_query(
+        write_tools='["update_dashboard", "alerting_manage_silences"]',
+    ))
+
+    assert payload["last_action"]["ok"] is True
+    cfg = load_config().tools.mcp_servers["grafana-prod"]
+    # Write mode drops --disable-write (1.6.2 gates whole categories and the
+    # per-name override cannot restore them) and pins the registration
+    # allowlist to exactly read ∪ chosen-write, every write tool gated.
+    assert cfg.args == [GRAFANA_MCP_ARG]
+    assert cfg.enabled_tools == list(GRAFANA_READ_ONLY_TOOLS) + [
+        "alerting_manage_silences",
+        "update_dashboard",
+    ]
+    assert cfg.confirm_tools == ["alerting_manage_silences", "update_dashboard"]
+    assert audits[-1]["after"]["write_tools"] == [
+        "alerting_manage_silences",
+        "update_dashboard",
+    ]
+
+    row = next(item for item in payload["connections"] if item["slug"] == "prod")
+    assert row["mode"] == "write"
+    assert row["write_enabled"] is True
+    assert row["write_tools"] == ["alerting_manage_silences", "update_dashboard"]
+
+
+def test_create_rejects_unknown_and_malformed_write_tools(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_config(tmp_path, monkeypatch)
+    _capture_audit(monkeypatch)
+
+    with pytest.raises(GrafanaConnectionError) as exc:
+        grafana_api._create_connection(_create_query(write_tools='["drop_database"]'))
+    assert exc.value.status == 400
+    assert "drop_database" in exc.value.message
+    assert "update_dashboard" in exc.value.message  # allowlist is in the error
+
+    with pytest.raises(GrafanaConnectionError) as exc:
+        grafana_api._create_connection(_create_query(write_tools='[42]'))
+    assert exc.value.status == 400
+
+    with pytest.raises(GrafanaConnectionError) as exc:
+        grafana_api._create_connection(_create_query(write_tools='["update_dashboard"'))
+    assert exc.value.status == 400
+
+
+def test_write_tools_accepts_plain_csv_string(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_config(tmp_path, monkeypatch)
+    _capture_audit(monkeypatch)
+
+    grafana_api._create_connection(_create_query(write_tools="update_dashboard"))
+
+    cfg = load_config().tools.mcp_servers["grafana-prod"]
+    assert cfg.confirm_tools == ["update_dashboard"]
+
+
+def test_update_toggles_write_mode_both_ways(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_config(tmp_path, monkeypatch)
+    _capture_audit(monkeypatch)
+    grafana_api._create_connection(_create_query())
+
+    # Enter write mode.
+    grafana_api._update_connection({
+        "slug": ["prod"],
+        "write_tools": ['["update_dashboard"]'],
+    })
+    cfg = load_config().tools.mcp_servers["grafana-prod"]
+    assert cfg.args == [GRAFANA_MCP_ARG]
+    assert cfg.confirm_tools == ["update_dashboard"]
+
+    # An explicitly empty array returns the connection to read-only mode.
+    grafana_api._update_connection({"slug": ["prod"], "write_tools": ["[]"]})
+    cfg = load_config().tools.mcp_servers["grafana-prod"]
+    assert cfg.args == [GRAFANA_MCP_ARG, GRAFANA_DISABLE_WRITE_ARG]
+    assert cfg.confirm_tools == []
+    assert cfg.enabled_tools == list(GRAFANA_READ_ONLY_TOOLS)
+
+    # Absent write_tools keeps the current mode (a bare toggle must not
+    # silently strip the write surface).
+    grafana_api._update_connection({
+        "slug": ["prod"],
+        "write_tools": ['["update_dashboard"]'],
+    })
+    grafana_api._update_connection({"slug": ["prod"], "enabled": ["false"]})
+    cfg = load_config().tools.mcp_servers["grafana-prod"]
+    assert cfg.args == [GRAFANA_MCP_ARG]
+    assert cfg.confirm_tools == ["update_dashboard"]
+    assert cfg.enabled is False
+
+
+def test_write_mode_managed_classification_matrix(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_config(tmp_path, monkeypatch)
+
+    def _write_entry(**overrides: Any) -> MCPServerConfig:
+        cfg = grafana_api._managed_server_config(
+            base_url="https://grafana.example.com",
+            token=GRAFANA_SA_FAKE,
+            org_id="",
+            enabled=True,
+            write_tools=["update_dashboard"],
+        )
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+        return cfg
+
+    # Proper write shape is managed.
+    assert grafana_api._managed_mode("grafana-prod", _write_entry()) == "write"
+
+    # A write tool without the confirmation gate is unmanaged (refused).
+    assert grafana_api._managed_mode(
+        "grafana-prod", _write_entry(confirm_tools=[])
+    ) is None
+
+    # A wildcard or an out-of-catalog tool in the registration allowlist is
+    # unmanaged — without --disable-write there is no child-side backstop.
+    wild = _write_entry(enabled_tools=["*"])
+    assert grafana_api._managed_mode("grafana-prod", wild) is None
+    drifted = _write_entry(enabled_tools=list(GRAFANA_READ_ONLY_TOOLS) + ["create_incident"])
+    assert grafana_api._managed_mode("grafana-prod", drifted) is None
+
+    # Read-mode shape with --disable-write stays managed and read-only.
+    read_cfg = grafana_api._managed_server_config(
+        base_url="https://grafana.example.com",
+        token=GRAFANA_SA_FAKE,
+        org_id="",
+        enabled=True,
+    )
+    assert grafana_api._managed_mode("grafana-prod", read_cfg) == "read"
+
+    # A read-mode arg list that also carries a write tool in enabled_tools is
+    # drift: unmanaged (the facade refuses to manage the mixed shape).
+    mixed = MCPServerConfig(
+        type="stdio",
+        command="uvx",
+        args=[GRAFANA_MCP_ARG, GRAFANA_DISABLE_WRITE_ARG],
+        env={GRAFANA_URL_ENV: "https://grafana.example.com", GRAFANA_TOKEN_ENV: GRAFANA_SA_FAKE},
+        enabled_tools=["user_info", "update_dashboard"],
+        confirm_tools=["update_dashboard"],
+    )
+    assert grafana_api._managed_mode("grafana-prod", mixed) is None
+
+
+def test_payload_exposes_write_catalog(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_config(tmp_path, monkeypatch)
+
+    payload = grafana_connections_payload()
+
+    assert payload["write_tools_catalog"] == list(GRAFANA_WRITE_TOOLS)
+    assert payload["connections"] == []
+
+
+async def test_test_action_override_uses_saved_write_mode(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, uvx_available: None,
+) -> None:
+    _use_config(tmp_path, monkeypatch)
+    grafana_api._create_connection(_create_query(
+        write_tools='["update_dashboard"]',
+    ))
+    captured: dict[str, object] = {}
+    identity = _FakeTool(
+        "mcp_grafana-prod_user_info",
+        json.dumps({"login": "svc-bot", "orgId": 1}),
+    )
+
+    async def _capture_connect(servers, registry: ToolRegistry):
+        captured.update(servers)
+        registry.register(identity)
+        return {name: SimpleNamespace(aclose=lambda: None) for name in servers}
+
+    monkeypatch.setattr("nanobot.agent.tools.mcp.connect_mcp_servers", _capture_connect)
+
+    payload = await grafana_api.grafana_test_action({
+        "slug": ["prod"],
+        "base_url": ["https://grafana2.example.com"],
+    })
+
+    assert payload["last_action"]["ok"] is True
+    cfg = captured["grafana-prod"]
+    # The pre-save probe spawns the saved write-mode shape (no --disable-write).
+    assert cfg.args == [GRAFANA_MCP_ARG]
+    assert cfg.confirm_tools == ["update_dashboard"]
+    # A pre-save test still never writes config.json.
+    assert load_config().tools.mcp_servers["grafana-prod"].env[GRAFANA_URL_ENV] == (
+        "https://grafana.example.com"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import httpx
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool, ToolResult
+from nanobot.agent.tools.mcp_confirm import ConfirmGateWrapper, wrap_if_confirmed
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import (
     INBOUND_META_RUNTIME_CONTROL,
@@ -945,8 +946,10 @@ async def connect_mcp_servers(
             tools = await session.list_tools()
             enabled_tools = set(cfg.enabled_tools)
             allow_all_tools = "*" in enabled_tools
+            confirm_tools = set(getattr(cfg, "confirm_tools", None) or [])
             registered_count = 0
             matched_enabled_tools: set[str] = set()
+            matched_confirm_tools: set[str] = set()
             available_raw_names = [tool_def.name for tool_def in tools.tools]
             available_wrapped_names = [_sanitize_mcp_tool_name(f"mcp_{name}_{tool_def.name}") for tool_def in tools.tools]
             for tool_def in tools.tools:
@@ -963,6 +966,18 @@ async def connect_mcp_servers(
                     )
                     continue
                 wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
+                # Side-effecting tools listed in confirmTools are wrapped
+                # behind the interactive human-confirmation gate.
+                wrapper = wrap_if_confirmed(
+                    wrapper,
+                    confirm_tools=confirm_tools,
+                    server_name=name,
+                    raw_tool_name=tool_def.name,
+                    registry=registry,
+                )
+                if isinstance(wrapper, ConfirmGateWrapper):
+                    matched_confirm_tools.add(tool_def.name)
+                    matched_confirm_tools.add(wrapped_name)
                 registry.register(wrapper)
                 logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)
                 registered_count += 1
@@ -983,6 +998,15 @@ async def connect_mcp_servers(
                         ", ".join(available_raw_names) or "(none)",
                         ", ".join(available_wrapped_names) or "(none)",
                     )
+            unmatched_confirm_tools = sorted(confirm_tools - matched_confirm_tools)
+            if unmatched_confirm_tools:
+                logger.warning(
+                    "MCP server '{}': confirmTools entries not registered (not offered by the "
+                    "server or filtered out by enabledTools): {}. Available raw names: {}",
+                    name,
+                    ", ".join(unmatched_confirm_tools),
+                    ", ".join(available_raw_names) or "(none)",
+                )
 
             # Only register resources and prompts when no tool restriction is
             # active.  enabledTools is a per-*tool* allowlist; resources and

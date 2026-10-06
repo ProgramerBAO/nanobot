@@ -364,6 +364,7 @@ class MCPServerConfig(Base):
     tool_timeout: int = 30  # seconds before a tool call is cancelled
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all capabilities (tools, resources, prompts); any restriction = only listed tools, no resources/prompts
     enabled: bool = True  # False keeps the entry configured but never connects it (no spawn, no tools); used by the Grafana connections page to pause a platform without deleting it
+    confirm_tools: list[str] = Field(default_factory=list)  # Tools (raw MCP names) whose execution first requires a human confirmation card in chat; every gated call — confirmed or not — is audited. Used by the Grafana connections page for write operations
 
 
 def _lazy_default(module_path: str, class_name: str) -> Any:

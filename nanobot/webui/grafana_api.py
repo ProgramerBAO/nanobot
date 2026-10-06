@@ -30,7 +30,7 @@ import urllib.parse
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -66,10 +66,12 @@ GRAFANA_TOKEN_ENV = "GRAFANA_SERVICE_ACCOUNT_TOKEN"
 GRAFANA_ORG_ID_ENV = "GRAFANA_ORG_ID"
 _GRAFANA_KNOWN_ENV_KEYS = frozenset({GRAFANA_URL_ENV, GRAFANA_TOKEN_ENV, GRAFANA_ORG_ID_ENV})
 
-# Curated read-only tool surface (verified against the pinned release; the
-# --disable-write flag removes every write tool on the child-process side, and
-# this allowlist is the nanobot-side second gate — a write tool can never be
-# registered even if the flag were bypassed by hand-editing config.json).
+# Curated tool surface (verified against the pinned release). Read tools
+# below survive --disable-write inside the child process; the write list is
+# the phase-2 management surface. The --disable-write flag removes every
+# write tool on the child-process side, and the nanobot-side enabled_tools
+# allowlist is the second gate — a write tool can never be registered unless
+# the facade explicitly opts the connection into write mode.
 GRAFANA_READ_ONLY_TOOLS: tuple[str, ...] = (
     "user_info",
     "search_dashboards",
@@ -82,6 +84,52 @@ GRAFANA_READ_ONLY_TOOLS: tuple[str, ...] = (
     "list_prometheus_label_names",
     "list_prometheus_label_values",
     "generate_deeplink",
+    # Phase-3 additions (all read-only under --disable-write at 1.6.2):
+    "query_prometheus_histogram",
+    "list_prometheus_metric_names",
+    "list_prometheus_metric_metadata",
+    "check_datasources_health",
+    "get_annotations",
+    "get_annotation_tags",
+    "list_dashboard_versions",
+    "get_dashboard_property",
+    "search_folders",
+    "get_folder",
+    "get_doc",
+    "search_docs",
+    # Panel PNG rendering; the image content block flows through the existing
+    # MCP image-artifact pipeline into chat images. Requires the Grafana
+    # image renderer (plugin or Cloud) on the platform side.
+    "get_panel_image",
+    # Loki (LogQL queries cannot write; the child caps log volume by default).
+    "query_loki_logs",
+    "list_loki_label_names",
+    "list_loki_label_values",
+    "query_loki_stats",
+    "query_loki_patterns",
+    "analyze_loki_labels",
+)
+
+# Curated write surface (phase 2). At mcp-grafana 1.6.2 the --disable-write
+# flag gates whole tool categories and --enable-write-tools CANNOT restore
+# them (verified in the v1.6.2 source: only sift/raw-SQL route through the
+# per-name override), so a write-mode connection necessarily drops
+# --disable-write. The write boundary is therefore carried entirely by the
+# nanobot side: enabled_tools is pinned to exactly read ∪ chosen-write, and
+# every chosen write tool is wrapped in the mandatory chat confirmation
+# gate (confirm_tools) with per-operation audit. Incidents, OnCall, Sift and
+# raw-SQL tools are deliberately excluded from the curated surface.
+GRAFANA_WRITE_TOOLS: tuple[str, ...] = (
+    "update_dashboard",
+    "create_folder",
+    "alerting_manage_rules",
+    "alerting_manage_silences",
+    "alerting_manage_routing",
+    "create_annotation",
+    "update_annotation",
+    "delete_annotation",
+    "create_snapshot",
+    "delete_snapshot",
 )
 GRAFANA_IDENTITY_TOOL = "user_info"
 
@@ -202,31 +250,50 @@ def _package_from_args(cfg: MCPServerConfig) -> str:
     return ""
 
 
-def _is_managed_server(name: str, cfg: MCPServerConfig) -> bool:
-    """True when the entry matches the facade's managed template.
+def _managed_mode(name: str, cfg: MCPServerConfig) -> Literal["read", "write"] | None:
+    """Classify an entry against the facade's managed templates.
 
-    The package version may drift from the current pin (older connections stay
-    managed and are normalized on the next update); everything else — uvx
-    command, two-arg shape with ``--disable-write``, required env, read-only
-    tool subset — must match.  Extra env keys are tolerated (and preserved on
-    update) because the Windows subprocess env is whitelisted, so entries like
-    an HTTP proxy for the child process are legitimate.
+    Returns "read" (phase-1 read-only shape), "write" (phase-2 write-mode
+    shape), or None for entries the facade refuses to manage.  The package
+    version may drift from the current pin (older connections stay managed
+    and are normalized on the next update); everything else must match
+    exactly.  Extra env keys are tolerated (and preserved on update) because
+    the Windows subprocess env is whitelisted, so entries like an HTTP proxy
+    for the child process are legitimate.
+
+    Write mode has no --disable-write backstop inside the child (see
+    GRAFANA_WRITE_TOOLS), so the managed check is strict there: enabled_tools
+    must stay within read ∪ curated-write, and every enabled write tool must
+    carry the confirmation gate.
     """
 
     if not name.startswith(GRAFANA_SERVER_PREFIX):
-        return False
+        return None
     if cfg.type not in (None, "stdio") or cfg.command != GRAFANA_MCP_COMMAND:
-        return False
-    if len(cfg.args) != 2 or cfg.args[1] != GRAFANA_DISABLE_WRITE_ARG:
-        return False
+        return None
     if not _package_from_args(cfg):
-        return False
+        return None
     if not cfg.env.get(GRAFANA_URL_ENV) or not cfg.env.get(GRAFANA_TOKEN_ENV):
-        return False
+        return None
     tools = set(cfg.enabled_tools)
-    if not tools or not tools <= set(GRAFANA_READ_ONLY_TOOLS):
-        return False
-    return True
+    allowed = set(GRAFANA_READ_ONLY_TOOLS) | set(GRAFANA_WRITE_TOOLS)
+    if not tools or "*" in tools or not tools <= allowed:
+        return None
+    write_enabled = tools & set(GRAFANA_WRITE_TOOLS)
+    confirms = set(getattr(cfg, "confirm_tools", None) or [])
+    if write_enabled:
+        if len(cfg.args) != 1:
+            return None
+        if confirms != write_enabled:
+            return None
+        return "write"
+    if len(cfg.args) != 2 or cfg.args[1] != GRAFANA_DISABLE_WRITE_ARG:
+        return None
+    return "read"
+
+
+def _is_managed_server(name: str, cfg: MCPServerConfig) -> bool:
+    return _managed_mode(name, cfg) is not None
 
 
 def _token_hint(token: str) -> dict[str, Any]:
@@ -257,13 +324,18 @@ def _connection_row(name: str, cfg: MCPServerConfig) -> dict[str, Any]:
         resolved = resolve_env_refs(token)
         hint["env_available"] = bool(resolved) and resolved != token
     tools = list(cfg.enabled_tools)
+    mode = _managed_mode(name, cfg)
+    write_tools = sorted(set(tools) & set(GRAFANA_WRITE_TOOLS))
     return {
         "slug": slug,
         "server_name": name,
         "base_url": cfg.env.get(GRAFANA_URL_ENV, ""),
         "org_id": cfg.env.get(GRAFANA_ORG_ID_ENV, ""),
         "enabled": bool(getattr(cfg, "enabled", True)),
-        "managed": _is_managed_server(name, cfg),
+        "managed": mode is not None,
+        "mode": mode,
+        "write_tools": write_tools,
+        "write_enabled": bool(write_tools) and mode == "write",
         "package": _package_from_args(cfg),
         "token_hint": hint["hint"],
         "token_source": hint["source"],
@@ -284,13 +356,44 @@ def grafana_connections_payload(*, last_action: dict[str, Any] | None = None) ->
     payload: dict[str, Any] = {
         "connections": rows,
         "read_only_tools": list(GRAFANA_READ_ONLY_TOOLS),
+        "write_tools_catalog": list(GRAFANA_WRITE_TOOLS),
         "package": GRAFANA_MCP_ARG,
-        "read_only": True,
+        "read_only": True,  # phase-level statement: the default mode stays read-only
         "uvx_available": shutil.which(GRAFANA_MCP_COMMAND) is not None,
     }
     if last_action is not None:
         payload["last_action"] = last_action
     return payload
+
+
+def _validated_write_tools(raw: Any) -> list[str]:
+    """Parse and bound the write-tool selection (empty = read-only mode)."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("["):
+            # The structured header JSON-encodes arrays before they land in
+            # the query; parse that back instead of comma-splitting.
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise GrafanaConnectionError(
+                    "write_tools must be a JSON array of tool names"
+                ) from exc
+        else:
+            raw = [item.strip() for item in text.split(",") if item.strip()]
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise GrafanaConnectionError("write_tools must be a JSON array of tool names")
+    selected = {item.strip() for item in raw if item.strip()}
+    unknown = sorted(selected - set(GRAFANA_WRITE_TOOLS))
+    if unknown:
+        raise GrafanaConnectionError(
+            "unknown Grafana write tools: "
+            + ", ".join(unknown)
+            + f"; allowed: {', '.join(GRAFANA_WRITE_TOOLS)}"
+        )
+    return sorted(selected)
 
 
 def _managed_server_config(
@@ -299,6 +402,7 @@ def _managed_server_config(
     token: str,
     org_id: str,
     enabled: bool,
+    write_tools: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> MCPServerConfig:
     env: dict[str, str] = {GRAFANA_URL_ENV: base_url, GRAFANA_TOKEN_ENV: token}
@@ -307,13 +411,27 @@ def _managed_server_config(
     for key, value in (extra_env or {}).items():
         if key not in _GRAFANA_KNOWN_ENV_KEYS:
             env[key] = value
+    writes = sorted(set(write_tools or []))
+    if writes:
+        # Write mode (phase 2): --disable-write must be dropped because it
+        # removes whole tool categories at 1.6.2 (see GRAFANA_WRITE_TOOLS).
+        # The nanobot-side allowlist + mandatory confirmation gate carry the
+        # write boundary instead.
+        args = [GRAFANA_MCP_ARG]
+        enabled_tools = list(GRAFANA_READ_ONLY_TOOLS) + writes
+        confirm_tools = list(writes)
+    else:
+        args = [GRAFANA_MCP_ARG, GRAFANA_DISABLE_WRITE_ARG]
+        enabled_tools = list(GRAFANA_READ_ONLY_TOOLS)
+        confirm_tools = []
     return MCPServerConfig(
         type="stdio",
         command=GRAFANA_MCP_COMMAND,
-        args=[GRAFANA_MCP_ARG, GRAFANA_DISABLE_WRITE_ARG],
+        args=args,
         env=env,
         tool_timeout=GRAFANA_TOOL_TIMEOUT,
-        enabled_tools=list(GRAFANA_READ_ONLY_TOOLS),
+        enabled_tools=enabled_tools,
+        confirm_tools=confirm_tools,
         enabled=enabled,
     )
 
@@ -329,6 +447,7 @@ def _audit_summary(cfg: MCPServerConfig | None) -> dict[str, Any]:
         "enabled": bool(getattr(cfg, "enabled", True)),
         "package": _package_from_args(cfg),
         "tool_count": len(cfg.enabled_tools),
+        "write_tools": sorted(set(cfg.enabled_tools) & set(GRAFANA_WRITE_TOOLS)),
     }
 
 
@@ -385,6 +504,7 @@ def _create_connection(query: QueryParams) -> dict[str, Any]:
     base_url = _validated_base_url(query_first(query, "base_url"))
     token = _validated_token(query_first(query, "token"))
     org_id = _validated_org_id(query_first(query, "org_id"))
+    write_tools = _validated_write_tools(query_first(query, "write_tools"))
     enabled = _optional_bool(query, "enabled")
     name = _server_name(slug)
 
@@ -395,6 +515,7 @@ def _create_connection(query: QueryParams) -> dict[str, Any]:
         base_url=base_url,
         token=token,
         org_id=org_id,
+        write_tools=write_tools,
         enabled=enabled if enabled is not None else True,
     )
     config.tools.mcp_servers[name] = cfg
@@ -426,7 +547,8 @@ def _update_connection(query: QueryParams) -> dict[str, Any]:
     # Field semantics: base_url/token are "absent or empty = keep" (the
     # editor omits the token unless the user typed a new one); org_id is
     # "present (even empty) = overwrite" so the field can be cleared;
-    # enabled is absent = keep.
+    # write_tools likewise overwrites when present (an empty array returns
+    # the connection to read-only mode); enabled is absent = keep.
     base_url_raw = (query_first(query, "base_url") or "").strip()
     base_url = _validated_base_url(base_url_raw) if base_url_raw else cfg.env.get(GRAFANA_URL_ENV, "")
 
@@ -445,12 +567,20 @@ def _update_connection(query: QueryParams) -> dict[str, Any]:
     else:
         org_id = cfg.env.get(GRAFANA_ORG_ID_ENV, "")
 
+    if "write_tools" in query:
+        write_tools = _validated_write_tools(query_first(query, "write_tools"))
+    else:
+        write_tools = sorted(
+            set(cfg.enabled_tools) & set(GRAFANA_WRITE_TOOLS)
+        )
+
     enabled = _optional_bool(query, "enabled")
     extra_env = {k: v for k, v in cfg.env.items() if k not in _GRAFANA_KNOWN_ENV_KEYS}
     new_cfg = _managed_server_config(
         base_url=base_url,
         token=token,
         org_id=org_id,
+        write_tools=write_tools,
         enabled=enabled if enabled is not None else bool(getattr(cfg, "enabled", True)),
         extra_env=extra_env,
     )
@@ -584,8 +714,20 @@ async def grafana_test_action(query: QueryParams) -> dict[str, Any]:
             org_id = _validated_org_id(query_first(query, "org_id"))
         else:
             org_id = saved_env.get(GRAFANA_ORG_ID_ENV, "")
+        # The saved write-mode selection only affects spawn args (no
+        # --disable-write); connectivity is identical either way, so the
+        # probe always uses the saved mode to mirror the eventual save.
+        saved_write_tools = (
+            sorted(set(saved.enabled_tools) & set(GRAFANA_WRITE_TOOLS))
+            if saved is not None and _is_managed_server(name, saved)
+            else []
+        )
         cfg = _managed_server_config(
-            base_url=base_url, token=token, org_id=org_id, enabled=True
+            base_url=base_url,
+            token=token,
+            org_id=org_id,
+            write_tools=saved_write_tools,
+            enabled=True,
         )
     else:
         if saved is None:

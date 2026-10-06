@@ -93,6 +93,20 @@ class MessageTool(Tool):
         """Set the callback for sending messages."""
         self._send_callback = callback
 
+    async def deliver_outbound(self, msg: OutboundMessage) -> bool:
+        """Deliver one structured message without LLM involvement.
+
+        Tool-internal delivery path for wrappers that must surface a
+        channel-neutral document card mid-turn (e.g. the MCP confirmation
+        gate) instead of relying on the model to relay it. Returns False when
+        no delivery callback is wired (unit tests, channel-less hosts) so the
+        caller can fall back to its tool-result metadata.
+        """
+        if not self._send_callback:
+            return False
+        await self._send_callback(msg)
+        return True
+
     def start_turn(self) -> None:
         """Reset per-turn send tracking."""
         self._sent_in_turn = False
