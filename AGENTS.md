@@ -206,7 +206,7 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   `tools.mcpServers["grafana-<slug>"]` entries, and the generic MCP page
   filters them out. The facade (`nanobot/webui/grafana_api.py`) owns the
   invariants: uvx + pinned `mcp-grafana@<version>`, absolute http(s) URL
-  without userinfo, enabled_tools within the curated read (30 tools incl.
+  without userinfo, enabled_tools within the curated read (29 tools incl.
   Loki + get_panel_image) ∪ write (10 tools) catalogs; update normalizes an
   older pin, refuses hand-edited (unmanaged) entries with 409, and never
   returns a raw token. The test action spawns the child process and calls

@@ -94,7 +94,6 @@ GRAFANA_READ_ONLY_TOOLS: tuple[str, ...] = (
     "list_dashboard_versions",
     "get_dashboard_property",
     "search_folders",
-    "get_folder",
     "get_doc",
     "search_docs",
     # Panel PNG rendering; the image content block flows through the existing
@@ -137,6 +136,14 @@ GRAFANA_WRITE_TOOLS: tuple[str, ...] = (
     "delete_snapshot",
 )
 GRAFANA_IDENTITY_TOOL = "user_info"
+
+# Tools that were shipped in an earlier curated read list but turned out to be
+# absent from the pinned release (verified live: `get_folder` is not offered by
+# mcp-grafana 1.6.2 — only `search_folders` exists). Entries saved with a
+# retired name stay managed: the name simply never registers (the connector
+# warns and skips it) and the next update normalizes the entry to the current
+# catalog.
+_RETIRED_READ_TOOLS: frozenset[str] = frozenset({"get_folder"})
 
 GRAFANA_TOOL_TIMEOUT = 30  # per-call timeout for tools of a managed connection
 GRAFANA_TEST_TIMEOUT = 30  # whole test budget; a cold uvx cache downloads the package first
@@ -281,7 +288,14 @@ def _managed_mode(name: str, cfg: MCPServerConfig) -> Literal["read", "write"] |
     if not cfg.env.get(GRAFANA_URL_ENV) or not cfg.env.get(GRAFANA_TOKEN_ENV):
         return None
     tools = set(cfg.enabled_tools)
-    allowed = set(GRAFANA_READ_ONLY_TOOLS) | set(GRAFANA_WRITE_TOOLS)
+    # Retired read tools are tolerated so entries saved before a catalog
+    # shrink do not flip to unmanaged; they never register and the next
+    # update rebuilds the entry from the current catalog.
+    allowed = (
+        set(GRAFANA_READ_ONLY_TOOLS)
+        | set(GRAFANA_WRITE_TOOLS)
+        | _RETIRED_READ_TOOLS
+    )
     if not tools or "*" in tools or not tools <= allowed:
         return None
     write_enabled = tools & set(GRAFANA_WRITE_TOOLS)
@@ -330,7 +344,8 @@ def _connection_row(name: str, cfg: MCPServerConfig) -> dict[str, Any]:
     if hint["source"] == "env":
         resolved = resolve_env_refs(token)
         hint["env_available"] = bool(resolved) and resolved != token
-    tools = list(cfg.enabled_tools)
+    # Retired names never register, so the row reflects the live tool count.
+    tools = [tool for tool in cfg.enabled_tools if tool not in _RETIRED_READ_TOOLS]
     mode = _managed_mode(name, cfg)
     write_tools = sorted(set(tools) & set(GRAFANA_WRITE_TOOLS))
     return {

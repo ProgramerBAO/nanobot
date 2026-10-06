@@ -600,6 +600,45 @@ def test_payload_exposes_write_catalog(tmp_path, monkeypatch: pytest.MonkeyPatch
     assert payload["connections"] == []
 
 
+def test_retired_read_tool_keeps_entry_managed_and_normalizes_on_update(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catalog-shrink tolerance (live 2026-10-06: get_folder absent from 1.6.2).
+
+    An entry saved by an older facade with a since-retired read name must not
+    flip to unmanaged (that would strand a live connection behind a 409); the
+    dead name never registers, the row shows the live count, and the next
+    update rebuilds from the current catalog.
+    """
+    _use_config(tmp_path, monkeypatch)
+    _capture_audit(monkeypatch)
+    config = load_config()
+    config.tools.mcp_servers["grafana-prod"] = grafana_api._managed_server_config(
+        base_url="https://grafana.example.com",
+        token=GRAFANA_SA_LONG,
+        org_id="",
+        enabled=True,
+    )
+    # Simulate the pre-shrink save: the old 30-name list included get_folder.
+    stored = config.tools.mcp_servers["grafana-prod"]
+    stored.enabled_tools = [*stored.enabled_tools, "get_folder"]
+    save_config(config)
+
+    payload = grafana_connections_payload()
+    row = next(item for item in payload["connections"] if item["slug"] == "prod")
+    assert row["managed"] is True
+    assert row["mode"] == "read"
+    assert row["tool_count"] == len(GRAFANA_READ_ONLY_TOOLS)
+    assert "get_folder" not in row["tools"]
+
+    # Any update (e.g. a bare enable toggle) rebuilds from the current catalog.
+    grafana_api._update_connection({"slug": ["prod"], "enabled": ["false"]})
+    cfg = load_config().tools.mcp_servers["grafana-prod"]
+    assert cfg.enabled_tools == list(GRAFANA_READ_ONLY_TOOLS)
+    assert "get_folder" not in cfg.enabled_tools
+    assert cfg.enabled is False
+
+
 async def test_test_action_override_uses_saved_write_mode(
     tmp_path, monkeypatch: pytest.MonkeyPatch, uvx_available: None,
 ) -> None:
