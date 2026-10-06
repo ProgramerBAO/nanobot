@@ -112,13 +112,18 @@ GRAFANA_READ_ONLY_TOOLS: tuple[str, ...] = (
 
 # Curated write surface (phase 2). At mcp-grafana 1.6.2 the --disable-write
 # flag gates whole tool categories and --enable-write-tools CANNOT restore
-# them (verified in the v1.6.2 source: only sift/raw-SQL route through the
-# per-name override), so a write-mode connection necessarily drops
-# --disable-write. The write boundary is therefore carried entirely by the
-# nanobot side: enabled_tools is pinned to exactly read ∪ chosen-write, and
-# every chosen write tool is wrapped in the mandatory chat confirmation
-# gate (confirm_tools) with per-operation audit. Incidents, OnCall, Sift and
-# raw-SQL tools are deliberately excluded from the curated surface.
+# them (verified in the v1.6.2 source — main.go routes only sift/raw-SQL
+# through the per-name override; tools/alerting.go registers rule/silence
+# mutations behind a single category bool), so a write-mode connection
+# necessarily drops --disable-write. The write boundary is therefore carried
+# entirely by the nanobot side: enabled_tools is pinned to exactly
+# read ∪ chosen-write, and every chosen write tool is wrapped in the
+# mandatory chat confirmation gate (confirm_tools) with per-operation audit.
+# Note: alerting_manage_routing registers unconditionally at 1.6.2 (its
+# mutations are not flag-removed) — the nanobot allowlist never exposes it
+# in read-only mode, and it is gated like any other write tool in write
+# mode. Incidents, OnCall, Sift and raw-SQL tools are deliberately excluded
+# from the curated surface.
 GRAFANA_WRITE_TOOLS: tuple[str, ...] = (
     "update_dashboard",
     "create_folder",

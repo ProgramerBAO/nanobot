@@ -21,6 +21,8 @@ interface ReportDocumentViewProps {
   document: AgentUIBlob;
   onAction?: (request: ReportActionRequest) => void;
   onCommand?: (command: string) => void;
+  /** Click of a server-registered card action (opaque one-time token). */
+  onCardToken?: (token: string) => void;
 }
 
 type RecordValue = Record<string, unknown>;
@@ -42,9 +44,11 @@ function blockData(block: unknown): RecordValue {
 function ReportActions({
   data,
   onCommand,
+  onCardToken,
 }: {
   data: RecordValue;
   onCommand?: (command: string) => void;
+  onCardToken?: (token: string) => void;
 }) {
   const actions = (data.actions as unknown[] ?? []).map(recordValue);
   if (!actions.length) return null;
@@ -53,25 +57,28 @@ function ReportActions({
       {actions.map((action, index) => {
         const id = stringValue(action.action_id);
         const command = stringValue(action.command);
+        const cardToken = stringValue(action.webui_token);
         const isDisable = id.includes(":disable:");
+        const isDanger = stringValue(action.style) === "danger";
         const ActionIcon = isDisable ? PauseCircle : Play;
         return (
           <button
             key={`${id}-${index}`}
             type="button"
             onClick={() => {
-              if (command) onCommand?.(command);
+              if (cardToken) onCardToken?.(cardToken);
+              else if (command) onCommand?.(command);
               else if (id === "provider_quality_report") onCommand?.("供应商质量报告");
               else if (id === "provider_quality_show_empty") onCommand?.("查看近15分钟供应商无用量");
             }}
             className={cn(
               "inline-flex h-9 items-center gap-2 border px-3 text-sm font-medium transition-colors",
-              isDisable
+              isDisable || isDanger
                 ? "border-amber-600/40 text-amber-800 hover:bg-amber-500/10 dark:text-amber-200"
                 : "border-border text-foreground hover:bg-muted/60",
             )}
           >
-            <ActionIcon className="h-4 w-4" aria-hidden />
+            <ActionIcon className="h-4 w-4 shrink-0" aria-hidden />
             {stringValue(action.label, "打开")}
           </button>
         );
@@ -426,7 +433,7 @@ function ProviderSelector({ data, onAction }: { data: RecordValue; onAction?: (r
   );
 }
 
-export function ReportDocumentView({ document, onAction, onCommand }: ReportDocumentViewProps) {
+export function ReportDocumentView({ document, onAction, onCommand, onCardToken }: ReportDocumentViewProps) {
   const status = reportStatus(document);
   const context = contextLines(document);
   const notes: string[] = [];
@@ -497,7 +504,7 @@ export function ReportDocumentView({ document, onAction, onCommand }: ReportDocu
         if (block.kind === "markdown") return <section key={index} className="whitespace-pre-wrap border-b border-border/70 px-4 py-4 text-sm leading-6 text-foreground/85">{stringValue(data.content)}</section>;
         if (block.kind === "note" && data.collapsed === true) return null;
         if (block.kind === "note") return <section key={index} className={cn("border-b border-border/70 px-4 py-3 text-xs leading-5 whitespace-pre-wrap", stringValue(data.severity) === "warning" ? "bg-amber-500/8 text-amber-800 dark:text-amber-200" : "text-muted-foreground")}><div className="flex gap-2"><CircleHelp className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><div className="min-w-0 break-words">{stringValue(data.content)}</div></div></section>;
-        if (block.kind === "actions") return <ReportActions key={index} data={data} onCommand={onCommand} />;
+        if (block.kind === "actions") return <ReportActions key={index} data={data} onCommand={onCommand} onCardToken={onCardToken} />;
         return null;
       })}
       {!collapseWarnings && document.warnings?.length ? <div className="border-b border-border/70 bg-amber-500/8 px-4 py-3 text-xs leading-5 text-amber-800 dark:text-amber-200"><div className="flex gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span className="break-words">{document.warnings.join("；")}</span></div></div> : null}

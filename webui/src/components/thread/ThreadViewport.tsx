@@ -51,6 +51,7 @@ interface ThreadViewportProps {
   onQuoteSelection?: (text: string) => void;
   onReportAction?: (request: ReportActionRequest) => void;
   onReportCommand?: (command: string) => void;
+  onReportCardToken?: (token: string) => void;
 }
 
 const NEAR_BOTTOM_PX = 48;
@@ -126,6 +127,7 @@ export const ThreadViewport = forwardRef<ThreadViewportHandle, ThreadViewportPro
   onQuoteSelection,
   onReportAction,
   onReportCommand,
+  onReportCardToken,
 }, ref) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -566,6 +568,7 @@ export const ThreadViewport = forwardRef<ThreadViewportHandle, ThreadViewportPro
         onQuoteSelection={onQuoteSelection}
         onReportAction={onReportAction}
         onReportCommand={onReportCommand}
+        onReportCardToken={onReportCardToken}
       />
               </div>
             </div>

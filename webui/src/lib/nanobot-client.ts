@@ -432,6 +432,17 @@ export class NanobotClient {
     });
   }
 
+  sendCardAction(chatId: string, token: string): void {
+    // Opaque single-use token issued by the gateway when the card was sent;
+    // the server holds the real direct-tool payload behind it.
+    this.knownChats.add(chatId);
+    this.queueSend({
+      type: "card_action",
+      chat_id: chatId,
+      token,
+    });
+  }
+
   sendSystemCommand(chatId: string, command: string, timeoutMs = 5_000): Promise<void> {
     const normalized = command.trim();
     const turnId = `${SYSTEM_COMMAND_TURN_PREFIX}${crypto.randomUUID()}`;

@@ -40,7 +40,7 @@ describe("ThreadMessages", () => {
       top: 100,
       bottom: 120,
       width: 140,
-      height: 20,
+      height: 40,
       x: 100,
       y: 100,
       toJSON: () => ({}),
@@ -60,6 +60,55 @@ describe("ThreadMessages", () => {
 
     await waitFor(() => expect(onQuoteSelection).toHaveBeenCalledWith("selected answer"));
     expect(removeAllRanges).toHaveBeenCalled();
+  });
+
+  it("sends the opaque token when a server-registered card action is clicked", () => {
+    // The gateway rewrites direct-tool card actions (e.g. the Grafana write
+    // confirmation) to a single-use webui_token before the wire; the button
+    // must forward exactly that token, never client-side params.
+    const onReportCardToken = vi.fn();
+    render(
+      <ThreadMessages
+        messages={[{
+          id: "a1",
+          role: "assistant",
+          content: "需要用户确认",
+          createdAt: 1,
+          agentUi: {
+            kind: "report_document",
+            version: 1,
+            title: "确认 MCP 写操作",
+            blocks: [
+              {
+                kind: "actions",
+                data: {
+                  actions: [
+                    {
+                      action_id: "mcp_write_confirm",
+                      label: "确认执行",
+                      style: "danger",
+                      webui_token: "tok-123",
+                    },
+                    {
+                      action_id: "open_center",
+                      label: "打开",
+                      command: "/订阅",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        }]}
+        isStreaming={false}
+        onReportCardToken={onReportCardToken}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /确认执行/ }));
+
+    expect(onReportCardToken).toHaveBeenCalledTimes(1);
+    expect(onReportCardToken).toHaveBeenCalledWith("tok-123");
   });
 
   it("groups consecutive reasoning and tool rows into one timeline before the answer", () => {

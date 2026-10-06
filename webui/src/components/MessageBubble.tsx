@@ -59,6 +59,7 @@ interface MessageBubbleProps {
   onForkFromHere?: () => void;
   onReportAction?: (request: ReportActionRequest) => void;
   onReportCommand?: (command: string) => void;
+  onReportCardToken?: (token: string) => void;
 }
 
 function ForkArrowIcon({ className }: { className?: string }) {
@@ -145,6 +146,7 @@ export function MessageBubble({
   onForkFromHere,
   onReportAction,
   onReportCommand,
+  onReportCardToken,
 }: MessageBubbleProps) {
   const { t } = useTranslation();
   const baseAnim = "animate-in fade-in-0 slide-in-from-bottom-1 duration-300";
@@ -276,6 +278,7 @@ export function MessageBubble({
               document={message.agentUi}
               onAction={onReportAction}
               onCommand={onReportCommand}
+              onCardToken={onReportCardToken}
             />
           ) : (
             <div data-assistant-selectable={message.isStreaming ? undefined : "true"}>

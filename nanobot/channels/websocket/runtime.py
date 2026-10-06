@@ -7,9 +7,12 @@ import hmac
 import json
 import re
 import ssl
+import threading
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
@@ -63,6 +66,25 @@ from nanobot.webui.websocket_logging import websockets_server_logger
 
 # Plain HTTP WebUI routes also run through websockets.process_request.
 _WEBUI_HTTP_OPEN_TIMEOUT_S = 360.0
+
+# Card-action interactions: report-document action buttons that name a tool
+# plus exact params (the MCP confirmation gate, subscription confirm cards)
+# are rewritten to an opaque single-use token before reaching the client;
+# the server retains the real payload for the validated direct-tool resume.
+_CARD_ACTION_TTL_SECONDS = 600.0
+_MAX_CARD_INTERACTIONS = 256
+
+
+@dataclass
+class _WebCardInteraction:
+    """Server-side state for one report-document card action button."""
+
+    chat_id: str
+    tool_name: str
+    params: dict[str, Any]
+    content: str
+    expires_at: float
+    consumed: bool = False
 
 
 class WebSocketConfig(Base):
@@ -272,6 +294,10 @@ class WebSocketChannel(BaseChannel):
 
         self._stream_text_buffers: dict[tuple[str, str], list[str]] = {}
 
+        # Opaque single-use tokens for report-document card action buttons.
+        self._card_interactions: dict[str, _WebCardInteraction] = {}
+        self._card_interaction_lock = threading.Lock()
+
     # -- Subscription bookkeeping -------------------------------------------
 
     def _workspace_controls_available(self, connection: Any) -> bool:
@@ -281,6 +307,113 @@ class WebSocketChannel(BaseChannel):
         """Idempotently subscribe *connection* to *chat_id*."""
         self._subs.setdefault(chat_id, set()).add(connection)
         self._conn_chats.setdefault(connection, set()).add(chat_id)
+
+    def _register_card_action(
+        self,
+        *,
+        chat_id: str,
+        tool_name: str,
+        params: dict[str, Any],
+        content: str,
+    ) -> str:
+        """Store one card action payload behind a fresh opaque token."""
+        token = uuid.uuid4().hex
+        now = time.monotonic()
+        with self._card_interaction_lock:
+            expired = [
+                key for key, item in self._card_interactions.items()
+                if item.expires_at <= now
+            ]
+            for key in expired:
+                self._card_interactions.pop(key, None)
+            while len(self._card_interactions) >= _MAX_CARD_INTERACTIONS:
+                oldest_token, _ = min(
+                    self._card_interactions.items(),
+                    key=lambda entry: entry[1].expires_at,
+                )
+                self._card_interactions.pop(oldest_token, None)
+            self._card_interactions[token] = _WebCardInteraction(
+                chat_id=chat_id,
+                tool_name=tool_name,
+                params=dict(params),
+                content=content,
+                expires_at=now + _CARD_ACTION_TTL_SECONDS,
+            )
+        return token
+
+    def _resolve_card_action(
+        self, token: str, *, chat_id: str
+    ) -> _WebCardInteraction | None:
+        """Consume one token; only a live, unused, chat-matching entry resolves."""
+        if not token:
+            return None
+        now = time.monotonic()
+        with self._card_interaction_lock:
+            item = self._card_interactions.get(token)
+            if (
+                item is None
+                or item.consumed
+                or item.expires_at <= now
+                or item.chat_id != chat_id
+            ):
+                return None
+            item.consumed = True
+            return item
+
+    def _rewrite_agent_ui_actions(self, agent_ui: Any, chat_id: str) -> Any:
+        """Replace direct-tool card actions with opaque tokens before the wire.
+
+        Report-document action buttons may name a tool plus exact params (the
+        MCP confirmation gate and the subscription confirm card both do).
+        Those params must never reach the client as executable input: the
+        wire copy carries only an opaque token, and the server keeps the real
+        payload for the validated direct-tool resume — mirroring the Feishu
+        interaction registry. Actions without ``tool_name`` (command-style
+        buttons) and non-report_document blobs pass through unchanged.
+        """
+        if not isinstance(agent_ui, dict) or agent_ui.get("kind") != "report_document":
+            return agent_ui
+        blocks = agent_ui.get("blocks")
+        if not isinstance(blocks, list):
+            return agent_ui
+        changed = False
+        out_blocks: list[Any] = []
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("kind") != "actions":
+                out_blocks.append(block)
+                continue
+            data = block.get("data") if isinstance(block.get("data"), dict) else {}
+            actions = data.get("actions")
+            if not isinstance(actions, list):
+                out_blocks.append(block)
+                continue
+            out_actions: list[Any] = []
+            for action in actions:
+                if not isinstance(action, dict):
+                    out_actions.append(action)
+                    continue
+                tool_name = str(action.get("tool_name") or "")
+                params = action.get("params")
+                if not tool_name or not isinstance(params, dict):
+                    out_actions.append(action)
+                    continue
+                token = self._register_card_action(
+                    chat_id=chat_id,
+                    tool_name=tool_name,
+                    params=params,
+                    content=str(action.get("content") or "继续执行卡片操作"),
+                )
+                rewritten = {
+                    key: value for key, value in action.items()
+                    if key not in {"tool_name", "params"}
+                }
+                rewritten["webui_token"] = token
+                out_actions.append(rewritten)
+                changed = True
+            out_blocks.append({**block, "data": {**data, "actions": out_actions}})
+        if not changed:
+            return agent_ui
+        return {**agent_ui, "blocks": out_blocks}
 
     def _cleanup_connection(self, connection: Any) -> None:
         """Remove *connection* from every subscription set; safe to call multiple times."""
@@ -631,6 +764,9 @@ class WebSocketChannel(BaseChannel):
         if t == "report_action":
             await self._dispatch_report_action(connection, client_id, envelope)
             return
+        if t == "card_action":
+            await self._dispatch_card_action(connection, client_id, envelope)
+            return
         if t == "message":
             cid = envelope.get("chat_id")
             content = envelope.get("content")
@@ -800,6 +936,61 @@ class WebSocketChannel(BaseChannel):
             is_dm=False,
         )
 
+    async def _dispatch_card_action(
+        self,
+        connection: Any,
+        client_id: str,
+        envelope: dict[str, Any],
+    ) -> None:
+        """Resume a server-registered card action without LLM routing.
+
+        The WebUI is a single administrative principal (one gateway bearer
+        token), so the boundary here is the chat-scoped single-use token;
+        the confirmation gate additionally binds its nonce to the issuing
+        chat, and the direct-tool path re-runs the target tool's own
+        authorization checks with the clicking client as the user.
+        """
+        chat_id = envelope.get("chat_id")
+        token = envelope.get("token")
+        if not _is_valid_chat_id(chat_id):
+            await self._send_event(connection, "error", detail="invalid chat_id")
+            return
+        if not isinstance(token, str) or not token:
+            await self._send_event(
+                connection, "error", chat_id=chat_id, detail="invalid card action"
+            )
+            return
+        item = self._resolve_card_action(token, chat_id=chat_id)
+        if item is None:
+            await self._send_event(
+                connection,
+                "error",
+                chat_id=chat_id,
+                detail="invalid_or_expired_card_action",
+            )
+            return
+        self._attach(connection, chat_id)
+        await self._hydrate_after_subscribe(chat_id)
+        content = item.content
+        metadata: dict[str, Any] = {
+            "remote": getattr(connection, "remote_address", None),
+            "webui": True,
+            # Reuses the websocket direct-tool gate flag consumed by
+            # AgentLoop (read_only/trusted_direct tools only).
+            "report_action_validated": True,
+            INBOUND_META_DIRECT_TOOL: {"name": item.tool_name, "params": item.params},
+            "direct_request_text": content,
+            **self._transcripts.client_turn_metadata(None),
+        }
+        self._transcripts.append_user_message(chat_id, content, metadata=metadata)
+        await self._handle_message(
+            sender_id=client_id,
+            chat_id=chat_id,
+            content=content,
+            metadata=metadata,
+            is_dm=False,
+        )
+
     async def _workspace_scope_or_error(
         self,
         connection: Any,
@@ -947,7 +1138,9 @@ class WebSocketChannel(BaseChannel):
             payload["tool_events"] = progress_event.tool_events
         agent_ui = msg.metadata.get(OUTBOUND_META_AGENT_UI)
         if agent_ui is not None:
-            payload["agent_ui"] = agent_ui
+            # Direct-tool card actions must not reach the wire as executable
+            # params; swap them for opaque single-use tokens (server-held).
+            payload["agent_ui"] = self._rewrite_agent_ui_actions(agent_ui, msg.chat_id)
         # Mark intermediate agent breadcrumbs (tool-call hints, generic
         # progress strings) so WS clients can render them as subordinate
         # trace rows rather than conversational replies.

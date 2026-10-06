@@ -1489,6 +1489,12 @@ export type Outbound =
       end_date?: string;
     }
   | {
+      /** Click of a server-registered card action button (opaque one-time token). */
+      type: "card_action";
+      chat_id: string;
+      token: string;
+    }
+  | {
       type: "message";
       chat_id: string;
       content: string;

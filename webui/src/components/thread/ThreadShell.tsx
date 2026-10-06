@@ -506,6 +506,10 @@ export function ThreadShell({
     if (!chatId || !command.trim()) return;
     send(command);
   }, [chatId, send]);
+  const handleReportCardToken = useCallback((token: string) => {
+    if (!chatId || !token) return;
+    client.sendCardAction(chatId, token);
+  }, [chatId, client]);
 
   useEffect(() => {
     if (chatId && historyKey) sessionKeyByChatIdRef.current.set(chatId, historyKey);
@@ -1087,6 +1091,7 @@ export function ThreadShell({
             onQuoteSelection={session ? handleQuoteSelection : undefined}
             onReportAction={handleReportAction}
             onReportCommand={handleReportCommand}
+            onReportCardToken={handleReportCardToken}
           />
         </FilePreviewAvailabilityProvider>
       </div>

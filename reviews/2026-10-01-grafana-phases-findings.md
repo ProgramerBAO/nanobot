@@ -135,4 +135,27 @@ enabled、checkbox 状态、canSave 条件）；i18n 形状对齐（13/13 测试
 - `pytest -q` 全量 → **5668 passed / 45 skipped / 3 failed**：其中 2 个为已实证既有基线（feishu instances payload、channel locale 契约，非本弧）；`test_mcp_reconnect_after_session_timeout` 为已记录满载抖动——**修复后隔离复跑 2/2 通过、与门套件交叉 23/23 通过**，非 R01 回归
 - 前端零改动（git status 确认无 webui 源文件变更；R05 的 hint 为服务端计算）
 
-**V1 / V2 维持待验证**（需 uvx/token 运维前提，见 §3）。
+**V1 / V2 处置（2026-10-06 第二批，同日随"继续"完成）：**
+
+- **V1 已实现闭环（原为待验证 → 查证为确认缺口 → 实现）**：查证结论——WebUI 的
+  `ReportActions` 只认 `command` 字段与两个硬编码 id，websocket 渠道的直呼注入
+  仅 `report_center` 硬编码——确认卡按钮（及订阅确认卡按钮）在 WebUI 是死按钮。
+  实现（加法式，双端）：websocket runtime 在出站 agent_ui 唯一 choke point
+  （原 :948）把带 `tool_name`+`params` 的 actions 改写为**不透明单次 token**
+  （服务端 `_WebCardInteraction` 状态，600s TTL、256 上限、chat 绑定、单次消费），
+  参数永不作为可执行输入上线；新增 `card_action` 入站事件 → 解析 token → 复用
+  `report_action_validated` 直呼通道重入（镜像既有 `_dispatch_report_action`
+  范式）。前端：`sendCardAction` + `webui_token` 按钮分支（danger 样式）经
+  ThreadShell→Viewport→Messages→Bubble→ReportDocumentView 全链穿线。副作用收益：
+  WebUI 里订阅确认卡的死按钮同时被激活（与飞书语义一致，直接经 report_center
+  的 trusted_direct + RBAC）。测试：后端 6 用例（改写剥离参数/透传非目标
+  blob/单次+chat 绑定/直呼重入/重放与畸形拒绝/跨 chat 拒绝）+ 前端 1 用例
+  （点击只回传 token）。
+- **V2 静态加固完成**：v1.6.2 `tools/alerting.go` 直接确认
+  `AddAlertingTools(mcp, enableWriteTools bool)` 类目布尔门（rules/silences 按
+  布尔注册读版或读写版）——与 main.go toolEntries 的证据互相印证，结论从
+  "fetch 摘要" 升级为**双重源码确认**。新精确化注记：`ManageRouting` 在 1.6.2
+  **无条件注册**（routing 写操作不受旗标移除）——nanobot 白名单在只读模式从不
+  注册该工具（无暴露），写模式下照常受确认门；已同步 grafana_api 注释。二进制
+  运行时核验（`uvx --enable-write-tools=...` 实测）仍待 uv 前提，但架构决策的
+  源码依据已双重成立。

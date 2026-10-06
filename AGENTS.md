@@ -217,15 +217,24 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   Write mode (2026-10-01): a connection with selected write tools drops
   `--disable-write` because mcp-grafana 1.6.2 gates whole tool categories
   and `--enable-write-tools` cannot restore them (verified in the v1.6.2
-  source; only sift/raw-SQL route through the per-name override). The write
-  boundary is therefore entirely nanobot-side: enabled_tools is pinned to
+  source — main.go routes only sift/raw-SQL through the per-name override;
+  tools/alerting.go registers rule/silence mutations behind one category
+  bool; note `alerting_manage_routing` registers unconditionally at 1.6.2,
+  so the nanobot allowlist — never the child flag — is what keeps it out of
+  read-only connections). The write boundary is therefore entirely
+  nanobot-side: enabled_tools is pinned to
   read ∪ chosen-write (no "*"), and every chosen write tool must be listed
   in `confirm_tools`, which wraps it in the interactive confirmation gate
   (`nanobot/agent/tools/mcp_confirm.py`): first call issues a chat
   confirmation card carrying a server-side single-use nonce (600s TTL,
   SHA-256 params fingerprint, chat-bound); execution happens only through
   the channel-callback direct-tool resume, and both card issuance and
-  execution are audited. Do not add a write tool to the catalogs without
+  execution are audited. Card actions work on both chat surfaces: Feishu
+  resolves its interaction registry; the WebUI websocket runtime rewrites
+  direct-tool actions to opaque single-use tokens at the outbound agent_ui
+  choke point and dispatches them through the `card_action` event — never
+  trust client-supplied tool_name/params on any channel. Do not add a write
+  tool to the catalogs without
   the gate, and do not bypass the facade by hand-editing grafana-* entries.
   Bump the pinned package only after re-verifying both catalogs against the
   new release — the 2.x alerting split renames `alerting_manage_*` into

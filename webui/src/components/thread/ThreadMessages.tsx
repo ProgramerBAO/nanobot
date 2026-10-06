@@ -20,6 +20,7 @@ interface ThreadMessagesProps {
   onQuoteSelection?: (text: string) => void;
   onReportAction?: (request: ReportActionRequest) => void;
   onReportCommand?: (command: string) => void;
+  onReportCardToken?: (token: string) => void;
 }
 
 export type DisplayUnit = TurnUnit;
@@ -63,6 +64,7 @@ export function ThreadMessages({
   onQuoteSelection,
   onReportAction,
   onReportCommand,
+  onReportCardToken,
 }: ThreadMessagesProps) {
   const { t } = useTranslation();
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -125,6 +127,7 @@ export function ThreadMessages({
             onForkFromMessage={onForkFromMessage}
             onReportAction={onReportAction}
             onReportCommand={onReportCommand}
+            onReportCardToken={onReportCardToken}
           />
         );
       })}
@@ -148,6 +151,7 @@ interface ThreadDisplayUnitProps {
   onForkFromMessage?: (beforeUserIndex: number) => void;
   onReportAction?: (request: ReportActionRequest) => void;
   onReportCommand?: (command: string) => void;
+  onReportCardToken?: (token: string) => void;
 }
 
 const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
@@ -166,6 +170,7 @@ const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
   onForkFromMessage,
   onReportAction,
   onReportCommand,
+  onReportCardToken,
 }: ThreadDisplayUnitProps) {
   const onForkFromHere = useCallback(() => {
     if (forkIndex !== undefined) onForkFromMessage?.(forkIndex);
@@ -201,6 +206,7 @@ const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
             onForkFromHere={forkIndex !== undefined ? onForkFromHere : undefined}
             onReportAction={onReportAction}
             onReportCommand={onReportCommand}
+            onReportCardToken={onReportCardToken}
           />
         )}
       </div>
@@ -229,6 +235,7 @@ function threadDisplayUnitPropsEqual(
     && previous.onForkFromMessage === next.onForkFromMessage
     && previous.onReportAction === next.onReportAction
     && previous.onReportCommand === next.onReportCommand
+    && previous.onReportCardToken === next.onReportCardToken
   );
 }
 
