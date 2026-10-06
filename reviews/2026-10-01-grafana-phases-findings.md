@@ -151,11 +151,13 @@ enabled、checkbox 状态、canSave 条件）；i18n 形状对齐（13/13 测试
   的 trusted_direct + RBAC）。测试：后端 6 用例（改写剥离参数/透传非目标
   blob/单次+chat 绑定/直呼重入/重放与畸形拒绝/跨 chat 拒绝）+ 前端 1 用例
   （点击只回传 token）。
-- **V2 静态加固完成**：v1.6.2 `tools/alerting.go` 直接确认
+- **V2 静态加固完成（后补：二进制实证）**：v1.6.2 `tools/alerting.go` 直接确认
   `AddAlertingTools(mcp, enableWriteTools bool)` 类目布尔门（rules/silences 按
   布尔注册读版或读写版）——与 main.go toolEntries 的证据互相印证，结论从
-  "fetch 摘要" 升级为**双重源码确认**。新精确化注记：`ManageRouting` 在 1.6.2
-  **无条件注册**（routing 写操作不受旗标移除）——nanobot 白名单在只读模式从不
-  注册该工具（无暴露），写模式下照常受确认门；已同步 grafana_api 注释。二进制
-  运行时核验（`uvx --enable-write-tools=...` 实测）仍待 uv 前提，但架构决策的
-  源码依据已双重成立。
+  "fetch 摘要" 升级为**双重源码确认**。**2026-10-06 装 uv 后以真实二进制
+  `uvx mcp-grafana@1.6.2 --help`（exit 0）三重实证**：`--enable-write-tools`
+  自述"仅恢复写行为受控可独立放行的工具（例举 sift 两件），对整类目被禁用
+  的工具无效"——写模式去掉 `--disable-write` 的架构决策闭合。新精确化注记：
+  `ManageRouting` 在 1.6.2 **无条件注册**（routing 写操作不受旗标移除）——
+  nanobot 白名单在只读模式从不注册该工具（无暴露），写模式下照常受确认门；
+  已同步 grafana_api 注释。
