@@ -27,3 +27,15 @@ HTTP/SSE MCP transports are part of this boundary: validate configured MCP URLs 
 `tools/sandbox.py` provides optional command wrapping. The only backend currently shipped is `bwrap` (bubblewrap), intended for containerized deployments. On Windows and bare-metal Linux without `bwrap`, commands run in the native shell with workspace restriction as an application-level guard only.
 
 **Rule**: If adding a new sandbox backend, implement `_wrap_<name>(command, workspace, cwd) -> str` and register it in `_BACKENDS`.
+
+## MCP Confirmation Gate
+
+MCP server configs may list tools in `confirmTools` (`agent/tools/mcp_confirm.py`); those tools are wrapped at registration behind an interactive human-confirmation gate. The gate issues a chat confirmation card carrying a server-side single-use nonce (600s TTL, SHA-256 params fingerprint, chat-bound) and executes only through the channel-callback direct-tool resume after the nonce resolves. Both card issuance and execution are audited with scrubbed parameters.
+
+Card actions run through channel-owned state on every surface: Feishu resolves its interaction registry; the WebUI websocket runtime rewrites direct-tool actions to opaque single-use tokens at the outbound agent_ui choke point and dispatches them via the `card_action` event.
+
+**Rules**:
+- Never trust client-supplied `tool_name`/`params` in a card callback on any channel; resolve them from server-side state only.
+- Never let the confirmation nonce appear in model-visible text (tool results, card markdown, logs) — only inside the card action value held server-side.
+- A gated tool must set `trusted_direct` only with server-side validation of every state-changing action (the base `Tool.trusted_direct` contract).
+- The Grafana write-mode catalogs (read ∪ write, `--disable-write` dropped) rely on this gate plus the registration allowlist as the whole write boundary; do not add a write tool to those catalogs without the gate.

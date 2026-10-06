@@ -84,6 +84,7 @@ The Agency Release turns nanobot from a durable workbench into an agent runtime 
 
 ## Recent Updates
 
+- **2026-10-06** Grafana assistant: manage multiple platforms from the WebUI, chat with 30 curated read-only tools (dashboards, Loki, Prometheus, panel PNG), and opt into write operations behind per-call chat confirmation cards.
 - **2026-07-24** Guided first-run setup, inline subagents, and model switching from the composer.
 - **2026-07-23** Grok OAuth with hosted X Search, live image settings, and clearer fallback models.
 - **2026-07-22** Parallel Search, live configuration reloads, richer app discovery, and a smoother mobile WebUI.

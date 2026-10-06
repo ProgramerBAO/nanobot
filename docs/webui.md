@@ -253,7 +253,8 @@ with the content that should be delivered.
 Settings is the control surface for the browser session and gateway-backed
 runtime configuration. Use it to review or adjust model presets, providers,
 image generation, voice transcription, web tools, chat channels, Apps,
-Automations, Skills, runtime identity, and advanced safety controls.
+Automations, Skills, runtime identity, Grafana connections, and advanced
+safety controls.
 
 Some settings take effect immediately. Runtime settings that affect the gateway
 or agent process may require a restart; the WebUI shows that requirement next to
@@ -261,6 +262,46 @@ the relevant control.
 
 Browser-only display preferences, such as file edit display mode, take effect
 immediately for the current browser and do not change gateway configuration.
+
+### Grafana connections
+
+The Settings → Grafana section manages read-only (and optionally gated write)
+access to your Grafana platforms. Each connection becomes one MCP server entry
+and gives the chat assistant curated Grafana tools (dashboards, folders,
+datasources, Prometheus and Loki queries, panel PNG rendering, deep links) —
+one tool prefix per connection, hot-reloaded without a restart.
+
+Requirements and behavior:
+
+- **uv**: the gateway host needs `uvx` on `PATH` (install [uv](https://docs.astral.sh/uv/);
+  after installing, restart the gateway from a **new** terminal so it sees the
+  updated `PATH`). The page shows a banner when `uvx` is missing.
+- **Token**: create a Grafana service account per platform. A **Viewer**-role
+  token is enough for read-only; write mode requires **Editor** or higher.
+- **Test connection** spawns the real mcp-grafana child process and calls
+  `user_info` end to end, so it validates the URL and the token against the
+  actual Grafana API.
+- Tokens are stored in `config.json` on the gateway host (machine-local,
+  gitignored) and are only ever displayed as a redacted hint (`glsa_ab••••3f2d`).
+  Changing or disabling a connection takes effect immediately via MCP hot
+  reload; no gateway restart is needed.
+
+**Write mode (optional).** Leave every write tool unchecked for a read-only
+connection (the default; the child runs with `--disable-write`). Checking write
+tools (dashboard updates, folders, alerting rules/silences/routing,
+annotations, snapshots) enables management operations under strict gating:
+
+- Every write call first sends a **confirmation card** to the chat. Nothing
+  executes until the person who triggered it clicks confirm — the model cannot
+  forge or bypass the confirmation, and confirmed cards are single-use and
+  expire after 10 minutes.
+- Every gated call — card issuance and execution — is written to the admin
+  audit log with scrubbed parameters.
+- Confirmation cards work in Feishu and in the WebUI chat.
+
+Entries named `grafana-*` are managed only through this page (the generic MCP
+list hides them). A hand-edited `config.json` entry shows up as "hand-edited"
+and is refused for page updates — delete and re-create it instead.
 
 ## LAN Access
 

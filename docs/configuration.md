@@ -1964,6 +1964,28 @@ Use `enabledTools` to register only a subset of tools from an MCP server:
 - Set `enabledTools` to `[]` to register no tools from that server. Resources and prompts are also skipped, since they have no per-name filter.
 - Set `enabledTools` to a non-empty list of names to register only those tools — resources and prompts are not registered.
 
+Two more per-server switches exist:
+
+- **`enabled`** (default `true`): set to `false` to keep the server configured but
+  never connected — no process is spawned and no tools are registered, on startup
+  or after a hot reload. Deleting the entry is no longer the only way to pause a
+  server.
+- **`confirmTools`** (default `[]`): list tool names (raw or wrapped, same
+  convention as `enabledTools`) whose execution must first be confirmed by a
+  human through a chat confirmation card. The first call only sends the card;
+  the tool runs after the user clicks confirm, and every gated call — confirmed
+  or not — is audited. This is how the WebUI's Grafana connections page gates
+  write operations (see the [WebUI docs](./webui.md)); it works for any MCP
+  server.
+
+> [!NOTE]
+> Entries whose name starts with `grafana-` are managed exclusively by the
+> WebUI Settings → Grafana page and are hidden from the generic MCP list.
+> The page enforces the entry shape (pinned `uvx mcp-grafana@<version>`, a
+> curated tool allowlist, confirmation gating for write tools); hand-editing
+> those entries makes them show up as "hand-edited" and refused for further
+> page updates. Configure them through the page, not through `config.json`.
+
 MCP tools are automatically discovered and registered on startup. The LLM can use them alongside built-in tools — no extra configuration needed.
 
 

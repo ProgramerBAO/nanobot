@@ -292,6 +292,12 @@ See [`chat-apps.md`](./chat-apps.md) for channel-specific setup.
 | Shell commands fail in Docker | Sandbox settings may need Linux capabilities; see [`deployment.md`](./deployment.md). |
 | Web fetch blocked | SSRF protection blocks unsafe targets; use `tools.ssrfWhitelist` only for trusted private networks. |
 | MCP tools missing | Check `tools.mcpServers`, server startup command, environment variables, and tool allow list. |
+| MCP server paused but still configured | `enabled: false` keeps the entry but never connects it (no spawn, no tools). Set it back to `true` or re-enable from the management page. |
+| Grafana page says uvx is missing | Install [uv](https://docs.astral.sh/uv/) on the gateway host, then restart the gateway from a **new** terminal (running processes keep the old `PATH`). The first `uvx mcp-grafana@<version>` run downloads the package, so give the first connection test up to ~30s. |
+| Grafana test connection fails with an identity error | The URL or service-account token is wrong, or the token's role cannot access the org — check the exact message (it comes from Grafana itself), then retest from the page editor. |
+| A write operation only produced a "确认 MCP 写操作" card | By design: the operation runs after the person who triggered it clicks confirm on the card (10-minute validity, single use). If the card expired, ask again. |
+| Write confirmation card never arrives | The channel must support interactive cards (Feishu and WebUI chat do). On other channels the tool reports that it cannot deliver the card. |
+| Grafana connection shows "Hand-edited" | Its `grafana-*` config entry was modified outside the Settings → Grafana page. Delete and re-create the connection there. |
 | Generated artifacts are missing | Check the active workspace and channel media directory. |
 
 ## Memory and Session Problems

@@ -4,6 +4,29 @@
 禁止无记录的隐性负债。每条含位置、类型、借债原因、风险与持续伤害（利息）、
 偿还触发条件、预计偿还成本。
 
+## TD-20261006-001 · 既有 pytest 失败与目录顺序依赖（4 项日志断言 + 2 项渠道基线）
+
+- **位置**：`tests/agent/test_cursor_recovery.py`、`test_loop_save_turn.py`、
+  `test_memory_store.py`、`test_runner_fallback.py`（顺序依赖）；
+  `tests/channels/test_channel_plugins.py::test_optional_features_payload_lists_feishu_instances`、
+  `tests/channels/test_channel_setup.py::test_channel_locales_cover_authoritative_setup_contracts`（基线失败）
+- **类型**：测试
+- **借债原因**：Grafana 三阶段验证期间发现（2026-10-06），非本弧引入——
+  stash 干净 HEAD 复现同样失败，标准全序下 4 项顺序依赖不复现。
+- **症状**：①以 `pytest tests/channels tests/webui tests/agent`（非字母序）
+  运行时，4 个 agent 日志断言失败（channels 先跑疑似污染 loguru sink / 全局
+  日志捕获状态）；②字母序全量恒定失败 2 项：feishu instances payload 断言
+  与 channel locale 契约（`quoteGroupReplies` 等 feishu 新字段缺 locale 覆盖）。
+- **风险与持续伤害**：**利息 = 验证可信度**——任何非标准顺序的定向运行可能
+  出现与改动无关的红灯，浪费时间排查（本次实证花费一轮 stash 对照）；
+  2 项基线失败持续出现在全量结果里，掩盖新问题。
+- **偿还触发条件**：下次测试治理专项；或任何需要频繁定向跑 channels+agent
+  组合的工作开始前。
+- **预计偿还成本**：顺序依赖半天（定位共享日志状态、加隔离 fixture）；
+  feishu locale 契约 1-2 小时（补 `quoteGroupReplies`/`topicIsolation`/
+  `followBotThreads` 等新字段的 10 locale 文案与契约用例）；
+  instances payload 断言 1 小时（核对测试期望与当前 payload 形状）。
+
 ## TD-20260919-001 · Mimosa 非凭据存量 findings（31 条）——已甄别，残留为登记基线
 
 **状态更新（2026-09-19 晚，commit `3fb99b8`）**：31/31 已逐条甄别完毕，全部为误报或非安全用途；每处已落位带具体理由的行内 `mimosa-ignore` 注释（空格分隔格式）。**关键实测：deep audit / git-gate 口径不尊重行内 ignore**（空 commit 探针 + 4 种 policy exclusion 形状均复现全量 31 条），行内注释仅对编辑门禁/单文件扫描口径生效并充当行级文档。因此本条债务的"偿还"至此为止：**deep-gate 残留为已甄别、已注释的永久已知基线**，升级 `MIMOSA_GIT_GATE_MODE=graded/deny` 不可行（会永久阻断全部提交）——需上游提供 deep 口径豁免机制后再评估。门禁策略维持现状：编辑门禁 graded（写入时强制拦截，2026-09-19 当天实证拦截 5 次）+ git gate warn（报告增量）。
