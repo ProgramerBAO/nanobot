@@ -1,95 +1,122 @@
 #!/usr/bin/env bash
-# nanobot 服务器一键更新（常规同步 + Grafana 全部前置）
+# nanobot 服务器一键更新（幂等；按需构建、按需重启）
 #
-# 用法（服务器 root）：
-#   bash scripts/update-server.sh            # 自动探测 supervisor 服务名
-#   bash scripts/update-server.sh <服务名>   # 指定 supervisor 程序名
+# 用法：
+#   bash scripts/update-server.sh                  # 默认服务名 nanobot-gateway
+#   bash scripts/update-server.sh <supervisor服务名>
 #
-# 做什么：git pull → 新代码导入自检 → WebUI 构建 → 报表状态库备份 +
-#         flag 迁移（幂等）→ 装 uv（已装跳过）→ 预热 mcp-grafana →
-#         supervisorctl 重启 → 健康检查
-# 前提：本地仓库已 git push；服务器已装 git / node(npm) / python venv。
+# 行为要点：
+#   - 只有 webui 有改动才构建；package-lock 变了才 npm ci，否则 npm run build
+#   - 只有 Python 代码变化（或新装 uv）才重启——前端是静态文件，
+#     构建落盘即生效，不必为它重启网关
+#   - 代码无更新时跳过构建/迁移/重启，只做环境自检 + 健康检查
+#   - 非 root 运行时自动加 sudo（supervisorctl / 软链 / venv 安装），
+#     状态库与 uv 缓存固定按网关运行身份（root）处理
 set -euo pipefail
 
 APP_DIR="/root/nanobot-ai/nanobot-new"
+SERVICE="${1:-nanobot-gateway}"
 GATEWAY_HEALTH="http://127.0.0.1:18790/health"
 GRAFANA_PACKAGE="mcp-grafana@1.6.2"
+# 网关以 root 运行：状态库与 uv 缓存都在 /root 下，与本脚本执行者无关。
+STATE_DB="/root/.nanobot/reports/state.db"
 
 cd "$APP_DIR"
 
 step() { printf '\n==> %s\n' "$*"; }
 die()  { printf '!! %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "请以 root 运行（supervisorctl 与 /usr/bin 软链需要）"
+SUDO=""
+[ "$(id -u)" -eq 0 ] || SUDO="sudo"
 
-step "1/7 拉取代码"
+step "1/6 拉取代码"
+HEAD_BEFORE="$(git rev-parse HEAD)"
 git pull --ff-only
+HEAD_AFTER="$(git rev-parse HEAD)"
 [ -f nanobot/webui/grafana_api.py ] \
-  || die "拉取后仍没有 grafana_api.py：本地还没 push？push 后重跑本脚本"
-git log --oneline -1
+  || die "没有 grafana_api.py：本地 push 了吗？push 后重跑本脚本"
+if [ "$HEAD_BEFORE" = "$HEAD_AFTER" ]; then
+  echo "   代码无更新（$(git log --oneline -1)）"
+else
+  git log --oneline "$HEAD_BEFORE..$HEAD_AFTER"
+fi
+PY_CHANGED="$(git diff --name-only "$HEAD_BEFORE" "$HEAD_AFTER" -- nanobot/)"
+WEBUI_CHANGED="$(git diff --name-only "$HEAD_BEFORE" "$HEAD_AFTER" \
+  -- webui/src webui/public webui/index.html webui/vite.config.ts webui/package.json)"
+LOCK_CHANGED="$(git diff --name-only "$HEAD_BEFORE" "$HEAD_AFTER" -- webui/package-lock.json)"
+DEPS_CHANGED="$(git diff --name-only "$HEAD_BEFORE" "$HEAD_AFTER" -- pyproject.toml requirements.txt)"
+# 首次部署或 dist 缺失时强制构建。
+[ -d nanobot/web/dist ] || WEBUI_CHANGED="dist-missing"
 
-step "2/7 新代码导入自检"
+step "2/6 构建 WebUI（有改动才构建）"
+if [ -n "$WEBUI_CHANGED$LOCK_CHANGED" ]; then
+  if [ -n "$LOCK_CHANGED" ]; then
+    npm --prefix webui ci
+  fi
+  npm --prefix webui run build
+  echo "   构建完成（前端静态文件即时生效，无需为此重启）"
+else
+  echo "   webui 无改动，跳过"
+fi
+if [ -n "$DEPS_CHANGED" ]; then
+  echo "⚠ 依赖清单变更（$DEPS_CHANGED）——本脚本不自动安装，请按需执行："
+  echo "   $SUDO .venv/bin/python -m pip install -e ."
+fi
+
+step "3/6 导入自检 + flag 迁移（代码有更新时）"
 PY=".venv/bin/python"
 [ -x "$PY" ] || PY="$(command -v python3)" || die "找不到 python（.venv/bin/python 或 python3）"
 "$PY" -c "import nanobot.webui.grafana_api, nanobot.agent.tools.mcp_confirm" \
-  || die "新模块导入失败——若为非 editable 安装请先执行: $PY -m pip install -e ."
-
-step "3/7 构建 WebUI"
-npm --prefix webui run build
-
-step "4/7 报表状态库备份 + flag 迁移（幂等）"
-STATE_DB="$HOME/.nanobot/reports/state.db"
-if [ -f "$STATE_DB" ]; then
-  cp "$STATE_DB" "${STATE_DB}.bak-$(date +%Y%m%d-%H%M%S)"
-  echo "   已备份 ${STATE_DB}.bak-*"
+  || die "新模块导入失败——若是非 editable 安装: $SUDO $PY -m pip install -e ."
+if [ "$HEAD_BEFORE" != "$HEAD_AFTER" ]; then
+  if [ -f "$STATE_DB" ]; then
+    $SUDO cp "$STATE_DB" "${STATE_DB}.bak-$(date +%Y%m%d-%H%M%S)"
+    echo "   已备份 state.db.bak-*"
+  fi
+  # env HOME=/root：无论是否经 sudo，都按网关运行身份解析配置与状态库。
+  $SUDO env HOME=/root "$PY" -m nanobot reports policy migrate-flags
+else
+  echo "   代码无更新，跳过迁移"
 fi
-"$PY" -m nanobot reports policy migrate-flags
 
-step "5/7 安装 uv（Grafana 前置；已装则跳过）"
+step "4/6 安装 uv（Grafana 前置；已装则跳过）"
+UV_INSTALLED=0
 if ! command -v uvx >/dev/null 2>&1; then
-  # 经 pip 从 PyPI 安装 uv（与项目依赖同源同信任级别），
-  # 装进网关的 venv，再软链到系统 PATH 供网关子进程解析。
-  "$PY" -m pip install --quiet uv
+  # 经 pip 从 PyPI 装（与项目依赖同源同信任级），装进网关 venv 后软链到系统 PATH。
+  $SUDO "$PY" -m pip install --quiet uv
   VENV_BIN="$(cd "$(dirname "$PY")" && pwd)"
   # supervisor 服务进程的 PATH 通常极简（常不含 /usr/local/bin）——
   # 双保险：常规位置 + /usr/bin 软链，保证网关子进程总能找到 uvx。
-  ln -sf "$VENV_BIN/uvx" /usr/local/bin/uvx
-  ln -sf "$VENV_BIN/uv"  /usr/local/bin/uv
-  ln -sf "$VENV_BIN/uvx" /usr/bin/uvx
-  ln -sf "$VENV_BIN/uv"  /usr/bin/uv
+  $SUDO ln -sf "$VENV_BIN/uvx" /usr/local/bin/uvx
+  $SUDO ln -sf "$VENV_BIN/uv"  /usr/local/bin/uv
+  $SUDO ln -sf "$VENV_BIN/uvx" /usr/bin/uvx
+  $SUDO ln -sf "$VENV_BIN/uv"  /usr/bin/uv
+  UV_INSTALLED=1
 fi
 UVX="$(command -v uvx || true)"
 [ -n "$UVX" ] || UVX=/usr/bin/uvx
 echo "   $UVX ($("$UVX" --version))"
 
-step "6/7 预热 ${GRAFANA_PACKAGE}（下载进缓存，首次约几十秒）"
-"$UVX" "${GRAFANA_PACKAGE}" --help >/dev/null
+step "5/6 预热 ${GRAFANA_PACKAGE}（写入 root 的 uv 缓存，首次约几十秒）"
+$SUDO env HOME=/root "$UVX" "${GRAFANA_PACKAGE}" --help >/dev/null
 echo "   预热完成"
 
-step "7/7 重启服务 + 健康检查"
-SERVICE="${1:-}"
-if [ -z "$SERVICE" ]; then
-  SERVICE="$(supervisorctl status | awk '$1 ~ /nanobot/ {print $1; exit}')"
-fi
-if [ -z "$SERVICE" ]; then
-  supervisorctl status || true
-  die "无法自动探测服务名：bash scripts/update-server.sh <服务名>"
-fi
-echo "   服务：$SERVICE"
-supervisorctl restart "$SERVICE"
-sleep 5
-supervisorctl status "$SERVICE"
-if curl -fsS --max-time 5 "$GATEWAY_HEALTH"; then
-  echo "   /health OK"
+step "6/6 重启（仅必要时）+ 健康检查"
+if [ -n "$PY_CHANGED" ] || [ "$UV_INSTALLED" = 1 ]; then
+  $SUDO supervisorctl restart "$SERVICE"
+  sleep 5
+  $SUDO supervisorctl status "$SERVICE"
+  if curl -fsS -o /dev/null --max-time 5 "$GATEWAY_HEALTH"; then
+    echo "   /health OK"
+  else
+    echo "⚠ /health 未就绪（可能仍在启动）：稍后手动 curl $GATEWAY_HEALTH"
+  fi
 else
-  echo "⚠ /health 未就绪（可能仍在启动）：稍后手动 curl $GATEWAY_HEALTH"
+  echo "   Python 无改动且 uv 已就位，跳过重启"
+  curl -fsS -o /dev/null --max-time 5 "$GATEWAY_HEALTH" \
+    && echo "   /health OK" \
+    || echo "⚠ /health 无响应（网关可能没在跑）：supervisorctl status $SERVICE 看看"
 fi
 
-cat <<'EOF'
-
-✅ 更新完成。Grafana 下一步：
-  1. 打开服务器 WebUI → Settings → Grafana → Add connection
-     （token 用服务器侧新建的 Service Account：读=Viewer 角色，写=Editor 及以上）
-  2. Test before saving 应返回身份/org → Save（热重载生效，无需再重启）
-  3. 写模式：编辑连接勾选写工具；聊天触发写操作后，需在确认卡上点"确认执行"
-EOF
+echo
+echo "✅ 完成。Grafana 连接管理在：WebUI → Settings → Grafana（token 需服务器侧新建：读=Viewer，写=Editor 及以上）"
