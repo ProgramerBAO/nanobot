@@ -12,6 +12,9 @@ docs/superpowers/
 docs/plans/
 .mimosa/
 .zcode/
+# ZCode's project ignore file is regenerated per machine from this file
+# (its top section mirrors .gitignore), so it stays untracked tool state.
+.zcodeignore
 
 # webui (monorepo frontend)
 webui/node_modules/
