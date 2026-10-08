@@ -2512,6 +2512,17 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         subtitle = f"{hour_text} · {tenant_count} 客户 / {len(displayed_models)} 模型"
         if idle_total >= 1:
             subtitle += f" · {idle_total} 机器空闲"
+        # Scope-aware title (2026-10-09): the fixed “多客户多模型…” label made
+        # a single customer/model question look like a routing failure. The
+        # counts above drive the label; multi-tenant runs keep the template
+        # name. The subtitle still carries the authoritative window + counts.
+        title = self.manifest.display_name
+        if table_rows and tenant_count == 1:
+            only_tenant_label = str(table_rows[0]["tenant"])
+            if len(displayed_models) == 1:
+                title = f"小时 TPM · {only_tenant_label} {next(iter(displayed_models))}"
+            else:
+                title = f"小时 TPM · {only_tenant_label}"
         context = ReportContext(
             timezone=self.timezone_name,
             current_window=ReportWindow(
@@ -2732,12 +2743,12 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         if cluster_idle_parts:
             fallback_lines.append("集群空闲机器：" + "、".join(cluster_idle_parts))
         return ReportDocument(
-            title=self.manifest.display_name,
+            title=title,
             subtitle=subtitle,
             document_id=self.manifest.template_id,
             blocks=tuple(blocks),
             fallback_text=(
-                f"{self.manifest.display_name}\n{subtitle}\n"
+                f"{title}\n{subtitle}\n"
                 + ("\n".join(fallback_lines) if fallback_lines else "暂无数据")
                 + f"\n数据质量：{dataset.quality}"
             ),

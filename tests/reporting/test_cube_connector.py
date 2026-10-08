@@ -1969,6 +1969,8 @@ def test_hourly_tpm_template_renders_customer_model_table() -> None:
     assert document.context.current_window.start == "2026-09-13T10:00:00+08:00"
     # Hourly snapshots intentionally have no comparison baseline.
     assert document.context.comparison_windows == ()
+    # Multi-tenant runs keep the template label as the title.
+    assert document.title == "多客户多模型小时 TPM 报告"
     # Compact subtitle: MM-DD window, counts, and the idle machine total.
     assert document.subtitle == "09-13 10:00–11:00 · 2 客户 / 1 模型 · 2 机器空闲"
 
@@ -2005,6 +2007,66 @@ def test_hourly_tpm_template_renders_customer_model_table() -> None:
     assert document.blocks[-1].data["include_context"] is True
     assert "客户 佛跳墙" in document.fallback_text
     assert "机器占用 42 · 真实使用 40（闲2）" in document.fallback_text
+
+
+def _hourly_dataset(tenant_models: dict[str, list[str]], tenant_names: dict[str, str]) -> ReportDataset:
+    """Minimal single-endpoint hourly dataset covering the given scope."""
+    rows: list[dict[str, object]] = []
+    for tenant_id, models in tenant_models.items():
+        for model in models:
+            rows.append({
+                "metric": "ai.tpm.peak",
+                "value": 800.0,
+                "model": model,
+                "endpoint": "ep-k3",
+                "tenant_id": tenant_id,
+            })
+            rows.append({
+                "metric": "ai.tpm.avg",
+                "value": 500.0,
+                "model": model,
+                "endpoint": "ep-k3",
+                "tenant_id": tenant_id,
+            })
+    return ReportDataset(
+        rows=tuple(rows),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": tenant_models,
+            "tenant_names": tenant_names,
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+
+def test_hourly_tpm_title_reflects_actual_scope() -> None:
+    """Scope-aware title (2026-10-09): the fixed “多客户多模型…” label made a
+    single customer/model question look like a routing failure even when the
+    scope was correct — the live case was “当前佛跳墙用户k3模型的TPM是多少”."""
+
+    single = CubeCustomerModelHourlyTpmTemplate().analyze((_hourly_dataset(
+        {"tenant-a": ["Kimi-K3"]}, {"tenant-a": "佛跳墙"},
+    ),))
+    assert single.title == "小时 TPM · 佛跳墙 Kimi-K3"
+    assert single.fallback_text.startswith("小时 TPM · 佛跳墙 Kimi-K3\n")
+    assert single.subtitle == "09-13 10:00–11:00 · 1 客户 / 1 模型"
+
+    one_tenant_multi_model = CubeCustomerModelHourlyTpmTemplate().analyze(
+        (_hourly_dataset(
+            {"tenant-a": ["GLM-5.2", "Kimi-K3"]}, {"tenant-a": "佛跳墙"},
+        ),)
+    )
+    assert one_tenant_multi_model.title == "小时 TPM · 佛跳墙"
+    assert one_tenant_multi_model.subtitle == "09-13 10:00–11:00 · 1 客户 / 2 模型"
+
+    multi_tenant = CubeCustomerModelHourlyTpmTemplate().analyze((_hourly_dataset(
+        {"tenant-a": ["Kimi-K3"], "tenant-b": ["Kimi-K3"]},
+        {"tenant-a": "佛跳墙", "tenant-b": "豆汁"},
+    ),))
+    assert multi_tenant.title == "多客户多模型小时 TPM 报告"
 
 
 def test_hourly_tpm_template_marks_missing_tpm_unavailable() -> None:
