@@ -141,27 +141,55 @@ _MULTI_SCOPE_NAMED_RE = re.compile(
     r"(?P<period>日报|周报)简报[？?。！!]*$",
     re.IGNORECASE,
 )
+# “当前/现在/目前/实时 … TPM” asks for the live window; the closest complete
+# window is the previous full hour, so these words route into the hourly TPM
+# family (user-confirmed 2026-10-08).  New vocabulary must land in BOTH gates:
+# the parsers + broad signal here, and the legacy deferral guard in
+# magik_cube.match_direct_request.
+_CURRENT_HOUR_WORDS = r"当前|现在|目前|实时"
+_PREV_HOUR_WORDS = r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时"
 _CUSTOMER_MODEL_HOURLY_TPM_RE = re.compile(
-    r"^(?:请)?(?:查看|查询|生成)?\s*(?P<tenants>.+?)\s*(?:的)?\s*"
+    rf"^(?:请)?(?:查看|查询|生成)?\s*(?:(?P<now>{_CURRENT_HOUR_WORDS})\s*)?"
+    r"(?P<tenants>.+?)\s*(?:的)?\s*"
     r"(?:全部|所有|全量)\s*模型\s*(?:的)?\s*"
-    r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时\s*(?:TPM|tpm)\s*"
-    r"(?:峰值和均值|均值和峰值|报告|报表)?[？?。！!]*$",
+    rf"(?:(?P<hour>{_PREV_HOUR_WORDS})|(?P<now2>{_CURRENT_HOUR_WORDS}))?\s*"
+    r"(?:TPM|tpm)\s*"
+    r"(?:峰值和均值|均值和峰值|报告|报表|是多少|多少)?\s*[？?。！!]*$",
     re.IGNORECASE,
 )
 _CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE = re.compile(
-    r"^(?:请)?(?:查看|查询|生成)?\s*(?P<tenants>.+?)\s+"
+    rf"^(?:请)?(?:查看|查询|生成)?\s*(?:(?P<now>{_CURRENT_HOUR_WORDS})\s*)?"
+    # The tenant/model boundary must be a Chinese char or whitespace: without
+    # it, a tenant-less phrase (“查看 Kimi-K3 …”) would split into a garbage
+    # tenant (“K” + “imi-K3”).
+    r"(?P<tenants>.+?)(?:用户|客户)?(?<=[\u4e00-\u9fff\s])\s*"
     r"(?P<models>[A-Za-z0-9][A-Za-z0-9._-]*(?:[、，,]\s*[A-Za-z0-9][A-Za-z0-9._-]*)*)\s*"
-    r"(?:模型)?\s*(?:的)?\s*(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时\s*"
-    r"(?:TPM|tpm)\s*(?:峰值和均值|均值和峰值|报告|报表)?[？?。！!]*$",
+    r"(?:模型)?\s*(?:的)?\s*"
+    rf"(?:(?P<hour>{_PREV_HOUR_WORDS})|(?P<now2>{_CURRENT_HOUR_WORDS}))?\s*"
+    r"(?:TPM|tpm)\s*(?:峰值和均值|均值和峰值|报告|报表|是多少|多少)?\s*[？?。！!]*$",
     re.IGNORECASE,
 )
 # This guard is intentionally broader than the deterministic parsers above.
 # Hourly TPM requests that are incomplete must fail closed in ReportCenter
 # instead of falling through to the legacy daily-usage matcher.
 _HOURLY_TPM_SIGNAL_RE = re.compile(
-    r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时.*(?:TPM|tpm)",
+    rf"(?:(?:{_PREV_HOUR_WORDS}).*|(?:{_CURRENT_HOUR_WORDS}).*?)(?:TPM|tpm)",
     re.IGNORECASE,
 )
+# The optional 查看/查询/生成 prefix can be backtracked into the tenants
+# group when a tenant-less phrase only matches that way; these words are
+# never real tenant names, so a filtered-empty list defers to the broad
+# signal (interactive selector) instead of producing a garbage tenant.
+_HOURLY_TENANT_STOPWORDS = frozenset({"请", "查看", "查询", "生成"})
+
+
+def _hourly_tenant_values(match: re.Match[str]) -> list[str]:
+    values = [
+        item.strip()
+        for item in re.split(r"[、，,；;和与及]+", match.group("tenants"))
+        if item.strip()
+    ]
+    return [value for value in values if value not in _HOURLY_TENANT_STOPWORDS]
 _MACHINE_TPM_RE = re.compile(
     r"^(?:请)?(?:查看|查询|生成)?\s*(?P<model>[A-Za-z0-9][A-Za-z0-9._-]*)"
     r"\s*(?:模型)?(?:的)?(?:单机|每台机器)\s*(?:折算)?\s*TPM"
@@ -546,39 +574,45 @@ class ReportCenterTool(  # noqa: UP046
         if _MULTI_SCOPE_WEEKLY_RE.fullmatch(raw):
             return {"action": "multi_scope_brief", "interactive": True, "period": "week"}
         hourly_tpm_match = _CUSTOMER_MODEL_HOURLY_TPM_RE.fullmatch(raw)
-        if hourly_tpm_match:
-            tenant_values = [
-                item.strip()
-                for item in re.split(r"[、，,；;和与及]+", hourly_tpm_match.group("tenants"))
-                if item.strip()
-            ]
-            return {
-                "action": "customer_model_hourly_tpm",
-                "period": "recent1h",
-                "tenants": tenant_values,
-                "model_scope": "all",
-                "interactive": False,
-            }
+        # A phrase without any hour/current word ("阳春面全部模型的TPM") must
+        # keep its legacy routing; the time word may sit either before the
+        # tenants or right before TPM, so accept either named group.  A
+        # filtered-empty tenant list (prefix backtracking) defers as well.
+        if hourly_tpm_match and (
+            hourly_tpm_match.group("now")
+            or hourly_tpm_match.group("hour")
+            or hourly_tpm_match.group("now2")
+        ):
+            tenant_values = _hourly_tenant_values(hourly_tpm_match)
+            if tenant_values:
+                return {
+                    "action": "customer_model_hourly_tpm",
+                    "period": "recent1h",
+                    "tenants": tenant_values,
+                    "model_scope": "all",
+                    "interactive": False,
+                }
         selected_hourly_match = _CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE.fullmatch(raw)
-        if selected_hourly_match:
-            tenant_values = [
-                item.strip()
-                for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("tenants"))
-                if item.strip()
-            ]
-            model_values = [
-                item.strip()
-                for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("models"))
-                if item.strip()
-            ]
-            return {
-                "action": "customer_model_hourly_tpm",
-                "period": "recent1h",
-                "tenants": tenant_values,
-                "models": model_values,
-                "model_scope": "selected",
-                "interactive": False,
-            }
+        if selected_hourly_match and (
+            selected_hourly_match.group("now")
+            or selected_hourly_match.group("hour")
+            or selected_hourly_match.group("now2")
+        ):
+            tenant_values = _hourly_tenant_values(selected_hourly_match)
+            if tenant_values:
+                model_values = [
+                    item.strip()
+                    for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("models"))
+                    if item.strip()
+                ]
+                return {
+                    "action": "customer_model_hourly_tpm",
+                    "period": "recent1h",
+                    "tenants": tenant_values,
+                    "models": model_values,
+                    "model_scope": "selected",
+                    "interactive": False,
+                }
         if _HOURLY_TPM_SIGNAL_RE.search(raw):
             return {
                 "action": "customer_model_hourly_tpm",

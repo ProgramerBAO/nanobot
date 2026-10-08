@@ -142,6 +142,68 @@ def test_hourly_tpm_phrases_preserve_all_customers_and_selected_models(
     }
 
 
+def test_current_hour_tpm_phrases_route_to_hourly_not_daily(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """“当前 … TPM” asks for the live window (user-confirmed 2026-10-08).
+
+    Regression: the user's live phrasing “当前佛跳墙用户k3模型的TPM是多少”
+    used to fall through to the legacy daily-usage matcher and answered with
+    yesterday's full-day aggregates.  The current-hour words must claim the
+    hourly TPM family in BOTH gates (parsers + broad signal here, legacy
+    deferral guard in magik_cube).
+    """
+
+    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+
+    # The exact live phrasing: leading 当前, “用户” between tenant and model,
+    # no space, lowercase model alias, “是多少” suffix.
+    assert tool.match_direct_request("当前佛跳墙用户k3模型的TPM是多少") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "tenants": ["佛跳墙"],
+        "models": ["k3"],
+        "model_scope": "selected",
+        "interactive": False,
+    }
+    # Time word right before TPM also parses.
+    assert tool.match_direct_request("佛跳墙 Kimi-K3 的当前TPM") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "tenants": ["佛跳墙"],
+        "models": ["Kimi-K3"],
+        "model_scope": "selected",
+        "interactive": False,
+    }
+    # All-models scope with a current word, question suffix tolerated.
+    assert tool.match_direct_request("当前阳春面全部模型的TPM是多少") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "tenants": ["阳春面"],
+        "model_scope": "all",
+        "interactive": False,
+    }
+    # Current-word TPM requests that cannot be parsed deterministically fail
+    # closed into the hourly family (interactive selector), never the daily
+    # legacy matcher.
+    assert tool.match_direct_request("现在TPM怎么样") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "interactive": True,
+    }
+    # Tenant-less model-only phrasing must not split into a garbage tenant
+    # (“K” + “imi-K3”); it stays in the interactive selector flow.
+    assert tool.match_direct_request("查看 Kimi-K3 上一小时 TPM") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "interactive": True,
+    }
+    # A phrase with no hour/current word keeps its existing routing (legacy
+    # daily usage query), so the relaxed regex shape cannot steal traffic.
+    assert tool.match_direct_request("佛跳墙用户k3模型的TPM") is None
+
+
 def _hourly_subscription(**param_overrides) -> ReportSubscription:
     params = {
         "tenants": ["tenant-fo", "tenant-noodle"],

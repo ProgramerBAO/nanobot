@@ -2295,6 +2295,11 @@ class MagikCubeReporter:
         previous = report_date - timedelta(days=1)
         week_ago = report_date - timedelta(days=7)
         day = report_date.isoformat()
+        # The window label is part of the report contract: this query is a
+        # full-day aggregate (default target date is yesterday), and without
+        # the label a "当前 TPM" style question silently reads as live data.
+        today = datetime.now(self._tz).date()
+        window_label = "昨日" if report_date == today - timedelta(days=1) else "指定日"
         total_tokens = sum(item.tokens.get(day, 0) for item in metrics)
         peak_tpm = max((item.max_tpm.get(day, 0) for item in metrics), default=0)
         filters = []
@@ -2303,7 +2308,7 @@ class MagikCubeReporter:
         if model:
             filters.append(f"模型={model}")
         lines = [
-            f"📈 指定用量查询 · {day}",
+            f"📈 指定用量查询 · {window_label} {day}（全天聚合）",
             f"筛选：{'，'.join(filters) if filters else '全部大客户'}",
             f"匹配 {len(tenants)} 个租户｜Token 合计 {_format_number(total_tokens)}｜最高峰值 TPM {_format_number(peak_tpm)}",
             "",
@@ -3486,9 +3491,13 @@ class MagikCubeDailyReportTool(Tool):
             return None
         # ReportCenter owns hourly TPM planning and exact-hour filtering.  The
         # legacy usage matcher is date-based; accepting this phrase here would
-        # silently turn an hourly request into a daily report.
+        # silently turn an hourly request into a daily report.  “当前/现在/
+        # 目前/实时 … TPM” asks for the live window (previous full hour) and
+        # must defer the same way — keep these words in sync with the
+        # ReportCenter parsers and broad signal (new vocabulary, BOTH gates).
         if re.search(
-            r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时.*(?:TPM|tpm)",
+            r"(?:(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时.*"
+            r"|(?:当前|现在|目前|实时).*?)(?:TPM|tpm)",
             raw,
             re.IGNORECASE,
         ):
