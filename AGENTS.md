@@ -245,11 +245,19 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   assertions (zero-regression, forever); paraphrase phrases carry the
   pre-Phase-2 xfail baseline (31.8% deterministically routed, 15/22 fell to
   the unstructured LLM turn) and flip to hard assertions as the Phase 2
-  unified intent router lands. Any new routing vocabulary or matcher change
-  must extend the corpus, not just the regexes; live routing regexes live
-  only in `report_center/__init__.py` (the stale `phrases.py` copies were
-  removed — that module now holds only the shared param allowlist, safe-ID
-  pattern, and tenant-mention dataclass). ReportCenterTool registers a
+  unified intent router lands. The negative tier also hosts the realtime
+  group (user-directed 2026-10-09, reversing the 2026-10-08 current-word
+  routing): 当前/现在/目前/实时 + TPM phrasing asks for the live window,
+  which complete-hour Cube data cannot answer — no deterministic tier may
+  claim it (report_center's hourly regexes key on explicit 上一/最近…小时
+  wording only, and the magik deferral guard keeps it out of the daily
+  matcher); those phrases must reach the LLM agent turn, where the
+  signal-gated guardrail steers the model to the connected Grafana MCP tools
+  (hourly report only as the no-Grafana fallback). Any new routing vocabulary
+  or matcher change must extend the corpus, not just the regexes; live routing
+  regexes live only in `report_center/__init__.py` (the stale `phrases.py`
+  copies were removed — that module now holds only the shared param allowlist,
+  safe-ID pattern, and tenant-mention dataclass). ReportCenterTool registers a
   signal-gated `runtime_context_provider` (broad report-signal regex) that
   injects the anti-fabrication guardrail into report-ish LLM agent turns —
   keep the signal regex wider than the routing vocabulary, since the

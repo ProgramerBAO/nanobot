@@ -242,6 +242,20 @@ async def test_report_center_runtime_context_carries_fabrication_guardrails(
     assert "report_center" in block.content
     assert "re-resolves them against the live catalog" in block.content
 
+    # Real-time wording reaches the same agent turn (deterministic tiers
+    # deliberately do not claim it, user-directed 2026-10-09); the signal
+    # gate must still inject the block, and it must steer the LLM to the
+    # Grafana MCP tools instead of a complete-window report.
+    realtime = RequestContext(
+        channel="feishu",
+        chat_id="chat-1",
+        original_user_text="当前佛跳墙用户k3模型的TPM是多少",
+    )
+    blocks = await resolve_runtime_context([provider], realtime)
+    assert len(blocks) == 1
+    assert "Grafana MCP tools" in blocks[0].content
+    assert "current live state" in blocks[0].content
+
     chitchat = RequestContext(
         channel="feishu",
         chat_id="chat-1",

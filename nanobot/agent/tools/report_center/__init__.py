@@ -158,39 +158,43 @@ _MULTI_SCOPE_NAMED_RE = re.compile(
     r"(?P<period>日报|周报)简报[？?。！!]*$",
     re.IGNORECASE,
 )
-# “当前/现在/目前/实时 … TPM” asks for the live window; the closest complete
-# window is the previous full hour, so these words route into the hourly TPM
-# family (user-confirmed 2026-10-08).  New vocabulary must land in BOTH gates:
-# the parsers + broad signal here, and the legacy deferral guard in
-# magik_cube.match_direct_request.
-_CURRENT_HOUR_WORDS = r"当前|现在|目前|实时"
+# Hourly TPM deterministic routing covers explicit complete-hour wording
+# (“上一/最近 … 小时”) only.  “当前/现在/目前/实时 … TPM” asks for the live
+# window, which complete-hour Cube data cannot answer: those phrases are
+# deliberately NOT claimed here — they fall through to the LLM agent turn,
+# where the connected Grafana MCP tools (query_prometheus 等) plus the
+# report guardrail serve real-time questions (user-directed 2026-10-09).
+# The legacy deferral guard in magik_cube.match_direct_request still
+# deflects current-word TPM phrasing so the daily matcher never claims it.
 _PREV_HOUR_WORDS = r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时"
 _CUSTOMER_MODEL_HOURLY_TPM_RE = re.compile(
-    rf"^(?:请)?(?:查看|查询|生成)?\s*(?:(?P<now>{_CURRENT_HOUR_WORDS})\s*)?"
+    r"^(?:请)?(?:查看|查询|生成)?\s*"
     r"(?P<tenants>.+?)\s*(?:的)?\s*"
     r"(?:全部|所有|全量)\s*模型\s*(?:的)?\s*"
-    rf"(?:(?P<hour>{_PREV_HOUR_WORDS})|(?P<now2>{_CURRENT_HOUR_WORDS}))?\s*"
+    rf"(?P<hour>{_PREV_HOUR_WORDS})?\s*"
     r"(?:TPM|tpm)\s*"
     r"(?:峰值和均值|均值和峰值|报告|报表|是多少|多少)?\s*[？?。！!]*$",
     re.IGNORECASE,
 )
 _CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE = re.compile(
-    rf"^(?:请)?(?:查看|查询|生成)?\s*(?:(?P<now>{_CURRENT_HOUR_WORDS})\s*)?"
+    r"^(?:请)?(?:查看|查询|生成)?\s*"
     # The tenant/model boundary must be a Chinese char or whitespace: without
     # it, a tenant-less phrase (“查看 Kimi-K3 …”) would split into a garbage
     # tenant (“K” + “imi-K3”).
     r"(?P<tenants>.+?)(?:用户|客户)?(?<=[\u4e00-\u9fff\s])\s*"
     r"(?P<models>[A-Za-z0-9][A-Za-z0-9._-]*(?:[、，,]\s*[A-Za-z0-9][A-Za-z0-9._-]*)*)\s*"
     r"(?:模型)?\s*(?:的)?\s*"
-    rf"(?:(?P<hour>{_PREV_HOUR_WORDS})|(?P<now2>{_CURRENT_HOUR_WORDS}))?\s*"
+    rf"(?P<hour>{_PREV_HOUR_WORDS})?\s*"
     r"(?:TPM|tpm)\s*(?:峰值和均值|均值和峰值|报告|报表|是多少|多少)?\s*[？?。！!]*$",
     re.IGNORECASE,
 )
-# This guard is intentionally broader than the deterministic parsers above.
-# Hourly TPM requests that are incomplete must fail closed in ReportCenter
-# instead of falling through to the legacy daily-usage matcher.
+# This guard is intentionally broader than the deterministic parsers above:
+# explicit complete-hour requests that cannot be fully parsed must fail closed
+# in ReportCenter instead of falling through to the legacy daily-usage
+# matcher.  It deliberately does NOT claim current-word phrasing — that class
+# reaches the agent turn for Grafana-backed real-time answers.
 _HOURLY_TPM_SIGNAL_RE = re.compile(
-    rf"(?:(?:{_PREV_HOUR_WORDS}).*|(?:{_CURRENT_HOUR_WORDS}).*?)(?:TPM|tpm)",
+    rf"(?:{_PREV_HOUR_WORDS}).*(?:TPM|tpm)",
     re.IGNORECASE,
 )
 # The optional 查看/查询/生成 prefix can be backtracked into the tenants
@@ -374,6 +378,7 @@ class ReportCenterTool(  # noqa: UP046
                 content=wrap_runtime_context_lines([
                     "report_center owns every deterministic usage/TPM/token/cost/health/provider-quality answer.",
                     "For any question about usage numbers, TPM, tokens, costs, error rates, or provider quality, call report_center (or magik_cube_daily_report) instead of answering from memory; never estimate, calculate, or invent such numbers.",
+                    "report_center covers complete past windows only (e.g. the previous full hour). For questions about the current live state (当前/现在/实时), prefer the connected Grafana MCP tools (query_prometheus, get_dashboard_panel_queries, query_loki_logs 等) when they are registered; fall back to report_center's hourly report when no Grafana connection exists.",
                     "If the user's phrasing does not exactly match a known example, still pick the closest action: cube_report (daily/weekly/monthly usage), multi_scope_brief (per-customer model briefs), customer_model_hourly_tpm (last complete hour TPM), machine_tpm_report, health_report, cost_report, provider_quality_report, recent, subscriptions.",
                     "Pass the user's customer/model names through exactly as written (tenant_query/tenants, model/models); the server re-resolves them against the live catalog — do not guess tenant IDs or model IDs.",
                 ]),
@@ -623,15 +628,10 @@ class ReportCenterTool(  # noqa: UP046
         if _MULTI_SCOPE_WEEKLY_RE.fullmatch(raw):
             return {"action": "multi_scope_brief", "interactive": True, "period": "week"}
         hourly_tpm_match = _CUSTOMER_MODEL_HOURLY_TPM_RE.fullmatch(raw)
-        # A phrase without any hour/current word ("阳春面全部模型的TPM") must
-        # keep its legacy routing; the time word may sit either before the
-        # tenants or right before TPM, so accept either named group.  A
-        # filtered-empty tenant list (prefix backtracking) defers as well.
-        if hourly_tpm_match and (
-            hourly_tpm_match.group("now")
-            or hourly_tpm_match.group("hour")
-            or hourly_tpm_match.group("now2")
-        ):
+        # A phrase without an explicit complete-hour word ("阳春面全部模型的
+        # TPM") must keep its legacy routing.  A filtered-empty tenant list
+        # (prefix backtracking) defers as well.
+        if hourly_tpm_match and hourly_tpm_match.group("hour"):
             tenant_values = _hourly_tenant_values(hourly_tpm_match)
             if tenant_values:
                 return {
@@ -642,11 +642,7 @@ class ReportCenterTool(  # noqa: UP046
                     "interactive": False,
                 }
         selected_hourly_match = _CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE.fullmatch(raw)
-        if selected_hourly_match and (
-            selected_hourly_match.group("now")
-            or selected_hourly_match.group("hour")
-            or selected_hourly_match.group("now2")
-        ):
+        if selected_hourly_match and selected_hourly_match.group("hour"):
             tenant_values = _hourly_tenant_values(selected_hourly_match)
             if tenant_values:
                 model_values = [

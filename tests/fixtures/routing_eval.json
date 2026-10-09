@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Report routing evaluation corpus (2026-10-09 LLM overhaul, Phase 0). tier=canonical phrases must route through report_center.match_direct_request exactly as specified, forever (zero-regression gate). tier=paraphrase phrases are natural rewordings users actually say; most MISS the regex chain today (xfail baseline) and must route once the unified intent router (Phase 2) lands. tier=negative phrases must never be claimed by the report matcher. expect uses partial matching: only the listed keys are asserted. Subscription-creation phrasings are out of scope here (they route through the subscription classifier chain and have their own corpus in test_cube_subscription_intent.py).",
+  "description": "Report routing evaluation corpus (2026-10-09 LLM overhaul, Phase 0). tier=canonical phrases must route through report_center.match_direct_request exactly as specified, forever (zero-regression gate). tier=paraphrase phrases are natural rewordings users actually say; most MISS the regex chain today (xfail baseline) and must route once the unified intent router (Phase 2) lands. tier=negative phrases must never be claimed by the report matcher; the realtime negative group (user-directed 2026-10-09) pins 当前/现在/实时 + TPM phrasing — live-window questions that no complete-window deterministic tier may claim, so they reach the LLM agent turn where the connected Grafana MCP tools (with the hourly report as fallback) answer them. expect uses partial matching: only the listed keys are asserted. Subscription-creation phrasings are out of scope here (they route through the subscription classifier chain and have their own corpus in test_cube_subscription_intent.py).",
   "cases": [
     {
       "group": "hourly_tpm",
@@ -13,12 +13,6 @@
       "tier": "canonical",
       "phrase": "佛跳墙 Kimi-K3 上一小时 TPM 峰值和均值",
       "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "selected", "models": ["Kimi-K3"], "interactive": false}
-    },
-    {
-      "group": "hourly_tpm",
-      "tier": "canonical",
-      "phrase": "当前佛跳墙用户k3模型的TPM是多少",
-      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "selected", "models": ["k3"], "interactive": false}
     },
     {
       "group": "hourly_tpm",
@@ -55,6 +49,36 @@
       "tier": "paraphrase",
       "phrase": "帮我看看豆汁上个小时各模型TPM峰值",
       "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all"}
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "当前佛跳墙用户k3模型的TPM是多少",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "佛跳墙 Kimi-K3 的当前TPM",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "当前阳春面全部模型的TPM是多少",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "现在TPM怎么样",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "佛跳墙 Kimi-K3 实时TPM",
+      "expect": null
     },
     {
       "group": "daily_brief",

@@ -3492,9 +3492,11 @@ class MagikCubeDailyReportTool(Tool):
         # ReportCenter owns hourly TPM planning and exact-hour filtering.  The
         # legacy usage matcher is date-based; accepting this phrase here would
         # silently turn an hourly request into a daily report.  “当前/现在/
-        # 目前/实时 … TPM” asks for the live window (previous full hour) and
-        # must defer the same way — keep these words in sync with the
-        # ReportCenter parsers and broad signal (new vocabulary, BOTH gates).
+        # 目前/实时 … TPM” asks for the live window: the deterministic chain
+        # deliberately does not claim it either — it falls through to the LLM
+        # agent turn, where the connected Grafana MCP tools plus the report
+        # guardrail serve real-time questions (user-directed 2026-10-09). This
+        # guard keeps both classes away from the daily matcher.
         if re.search(
             r"(?:(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时.*"
             r"|(?:当前|现在|目前|实时).*?)(?:TPM|tpm)",
