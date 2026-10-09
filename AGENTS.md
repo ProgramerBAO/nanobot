@@ -239,6 +239,23 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   Bump the pinned package only after re-verifying both catalogs against the
   new release — the 2.x alerting split renames `alerting_manage_*` into
   `alerting_rules_read/write` and will require catalog updates.
+- Routing eval corpus (2026-10-09 report-chain LLM overhaul, Phase 0):
+  `tests/fixtures/routing_eval.json` + `tests/tools/test_routing_eval.py` is
+  the phrase-routing regression gate. Canonical and negative phrases are hard
+  assertions (zero-regression, forever); paraphrase phrases carry the
+  pre-Phase-2 xfail baseline (31.8% deterministically routed, 15/22 fell to
+  the unstructured LLM turn) and flip to hard assertions as the Phase 2
+  unified intent router lands. Any new routing vocabulary or matcher change
+  must extend the corpus, not just the regexes; live routing regexes live
+  only in `report_center/__init__.py` (the stale `phrases.py` copies were
+  removed — that module now holds only the shared param allowlist, safe-ID
+  pattern, and tenant-mention dataclass). ReportCenterTool registers a
+  signal-gated `runtime_context_provider` (broad report-signal regex) that
+  injects the anti-fabrication guardrail into report-ish LLM agent turns —
+  keep the signal regex wider than the routing vocabulary, since the
+  guardrail exists precisely for paraphrases the regexes cannot route.
+  AgentLoop logs the routing outcome per message (`Direct request route …
+  source=…` / `Routing outcome: agent_turn`) — keep that telemetry intact.
 
 ## Common File Locations
 

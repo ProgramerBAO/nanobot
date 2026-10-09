@@ -27,7 +27,7 @@ from nanobot.agent.reporting.cube_subscription_intent import (
     parse_deterministic_subscription_intent,
 )
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.context import current_request_context
+from nanobot.agent.tools.context import RequestContext, current_request_context
 from nanobot.agent.tools.magik_cube import effective_tenant_mappings
 from nanobot.agent.tools.report_center.catalog import _CatalogReconciliationMixin
 from nanobot.agent.tools.report_center.execution import _ReportExecutionMixin
@@ -63,6 +63,23 @@ from nanobot.reporting.capabilities import (
 )
 from nanobot.reporting.store import get_report_state_store
 from nanobot.reporting.subscriptions import SubscriptionServiceError
+from nanobot.runtime_context import (
+    RuntimeContextBlock,
+    RuntimeContextProvider,
+    wrap_runtime_context_lines,
+)
+
+# Phase 1 guardrail gate (2026-10-09): intentionally broad so any plausibly
+# numeric/ops question catches the fabrication guardrail, while plain chit-chat
+# turns skip both the prompt cost and the history bloat. Keep wider than the
+# routing vocabulary — the guardrail must fire even for paraphrases the regex
+# chain cannot route (that is exactly the fallthrough it defends).
+_REPORT_GUARDRAIL_SIGNAL_RE = re.compile(
+    r"(?:用量|使用量|使用情况|消耗|吞吐|请求量|流量|报表|报告|日报|周报|月报|简报|订阅|"
+    r"tpm|token|成本|费用|账单|余额|金额|健康|错误率|延迟|供应商|"
+    r"客户|租户|用户|模型|集群|gpu|endpoint|小时|峰值|均值)",
+    re.IGNORECASE,
+)
 
 _HOME_RE = re.compile(
     r"^(?:请)?(?:打开|显示|查看|进入)?(?:报表中心|报表菜单|功能菜单|菜单|帮助|你能做什么|你会什么|有哪些功能)[？?。！!]*$"
@@ -329,8 +346,40 @@ class ReportCenterTool(  # noqa: UP046
     def description(self) -> str:
         return (
             "Open the deterministic report center, show recent reports or subscriptions, "
-            "generate Cube reports, and manage report subscriptions."
+            "generate Cube reports, and manage report subscriptions. Any question about "
+            "usage numbers, TPM, tokens, costs, error rates, or provider quality must go "
+            "through this tool (call it exactly once) — explain its returned summary "
+            "without recalculating or estimating any numeric value, and never answer such "
+            "questions from memory."
         )
+
+    def runtime_context_provider(self) -> RuntimeContextProvider | None:
+        """Guardrail block injected into report-ish LLM agent turns (2026-10-09, Phase 1).
+
+        The unstructured agent turn is where report questions land when the
+        deterministic chain misses (the documented fabrication incident class):
+        the generic tool contract has no report-specific numeric-integrity
+        rule, so this block carries it for turns whose text shows usage/ops
+        semantics. Signal-gated on purpose — chit-chat turns neither need the
+        guardrail nor should pay its prompt cost, and session history stays
+        clean for non-report conversations.
+        """
+
+        async def _provide(request: RequestContext) -> RuntimeContextBlock | None:
+            text = request.original_user_text or ""
+            if not _REPORT_GUARDRAIL_SIGNAL_RE.search(text):
+                return None
+            return RuntimeContextBlock(
+                source="report_center",
+                content=wrap_runtime_context_lines([
+                    "report_center owns every deterministic usage/TPM/token/cost/health/provider-quality answer.",
+                    "For any question about usage numbers, TPM, tokens, costs, error rates, or provider quality, call report_center (or magik_cube_daily_report) instead of answering from memory; never estimate, calculate, or invent such numbers.",
+                    "If the user's phrasing does not exactly match a known example, still pick the closest action: cube_report (daily/weekly/monthly usage), multi_scope_brief (per-customer model briefs), customer_model_hourly_tpm (last complete hour TPM), machine_tpm_report, health_report, cost_report, provider_quality_report, recent, subscriptions.",
+                    "Pass the user's customer/model names through exactly as written (tenant_query/tenants, model/models); the server re-resolves them against the live catalog — do not guess tenant IDs or model IDs.",
+                ]),
+            )
+
+        return _provide
 
     @property
     def trusted_direct(self) -> bool:
