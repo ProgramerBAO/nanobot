@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import AliasChoices, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from nanobot.config_base import Base
@@ -351,6 +351,52 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
+class TrailIntegrationConfig(Base):
+    """Opt-in, single-owner Trail adapter configuration (not agent-global state).
+
+    Loaded by the standalone integration entry points. Tokens never enter tool
+    results. The explicit project set also constrains publicly readable projects.
+    Receiver secrets and recipient are required only by the receiver entry point.
+    """
+
+    base_url: str
+    api_token: SecretStr
+    service_user_id: int = Field(gt=0)
+    project_ids: list[int] = Field(min_length=1, max_length=64)
+    csi_project_id: int | None = Field(default=None, gt=0)
+    allow_loopback: bool = False
+    allowed_cidrs: list[str] = Field(default_factory=list)
+    webhook_secret: SecretStr = SecretStr("")
+    feishu_open_id: str = ""
+    feishu_instance_id: str = "default"
+    state_db: str = ""
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> TrailIntegrationConfig:
+        """Reject ambiguous scope and URLs before accepting any work."""
+        import ipaddress
+        from urllib.parse import urlsplit
+
+        url = urlsplit(self.base_url)
+        if (url.scheme not in {"http", "https"} or not url.hostname or url.username
+                or url.password or url.query or url.fragment or url.path not in {"", "/"}):
+            raise ValueError("Trail base_url must be an http(s) origin without credentials")
+        if not self.api_token.get_secret_value().startswith("trk_"):
+            raise ValueError("Trail requires a dedicated API Token")
+        if any(type(pid) is not int or pid <= 0 for pid in self.project_ids):
+            raise ValueError("Trail project_ids must be positive integers")
+        if len(set(self.project_ids)) != len(self.project_ids):
+            raise ValueError("Trail project_ids must be unique")
+        if self.csi_project_id is not None and self.csi_project_id not in self.project_ids:
+            raise ValueError("CSI project must be explicitly allowed")
+        for cidr in self.allowed_cidrs:
+            network = ipaddress.ip_network(cidr, strict=True)
+            if network.prefixlen != network.max_prefixlen:
+                raise ValueError("Trail private network exceptions must be exact /32 or /128 addresses")
+        self.base_url = self.base_url.rstrip("/")
+        return self
+
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -381,6 +427,21 @@ class ToolsConfig(Base):
     at the bottom of this file so tool config classes can stay next to their
     tool implementations.
     """
+
+    # Construction-time execution boundary for dedicated least-privilege profiles.
+    # None preserves existing behavior; [] denies every tool. No wildcards.
+    allowed_tools: list[str] | None = Field(default=None, max_length=256)
+
+    @field_validator("allowed_tools")
+    @classmethod
+    def validate_allowed_tools(cls, value: list[str] | None) -> list[str] | None:
+        """Require exact registry names; restarting is required to change scope."""
+        import re
+
+        if value is not None and (len(value) != len(set(value)) or any(
+                not re.fullmatch(r"[A-Za-z0-9_]{1,128}", name) for name in value)):
+            raise ValueError("allowed_tools must contain unique exact tool names")
+        return value
 
     web: WebToolsConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.web", "WebToolsConfig"))
     exec: ExecToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.shell", "ExecToolConfig"))
