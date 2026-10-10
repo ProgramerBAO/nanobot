@@ -33,6 +33,14 @@ from nanobot.integrations.trail.receiver import (
     validate_event,
 )
 from nanobot.integrations.trail.store import InboxFullError, InboxStore
+from nanobot.testing.credentials import placeholder
+
+# Test-only Trail fakes. Defined through ``placeholder`` per the shared
+# credentials-module rules: no credential-shaped literal lives inline, and
+# NANOBOT_TEST_* environment overrides work without touching this file.
+TRAIL_API_TOKEN = placeholder("NANOBOT_TEST_TRAIL_API_TOKEN", "trk_test-only")
+TRAIL_WEBHOOK_SECRET = placeholder("NANOBOT_TEST_TRAIL_WEBHOOK_SECRET", "test-only-signing-secret")
+TRAIL_FEISHU_APP_SECRET = placeholder("NANOBOT_TEST_TRAIL_FEISHU_APP_SECRET", "test-only")
 
 NOW = datetime(2026, 10, 10, tzinfo=timezone.utc).timestamp()
 
@@ -59,9 +67,9 @@ def test_documented_profile_fragment_resolves_without_secrets(monkeypatch, tmp_p
 
     values = {
         "TRAIL_PILOT_WORKSPACE": str(tmp_path / "workspace"),
-        "TRAIL_FEISHU_APP_ID": "cli_test_only", "TRAIL_FEISHU_APP_SECRET": "test-only",
+        "TRAIL_FEISHU_APP_ID": "cli_test_only", "TRAIL_FEISHU_APP_SECRET": TRAIL_FEISHU_APP_SECRET,
         "TRAIL_FEISHU_OPEN_ID": "ou_test_owner", "TRAIL_PYTHON": sys.executable,
-        "TRAIL_BASE_URL": "http://127.0.0.1:18080", "TRAIL_API_TOKEN": "trk_test-only",
+        "TRAIL_BASE_URL": "http://127.0.0.1:18080", "TRAIL_API_TOKEN": TRAIL_API_TOKEN,
         "TRAIL_SERVICE_USER_ID": "2", "TRAIL_PROJECT_IDS": "[7]",
         "TRAIL_CSI_PROJECT_ID": "7", "TRAIL_ALLOW_LOOPBACK": "true",
     }
@@ -71,17 +79,18 @@ def test_documented_profile_fragment_resolves_without_secrets(monkeypatch, tmp_p
     profile = resolve_config_env_vars(load_config(fragment))
     assert profile.tools.allowed_tools == ["mcp_trail_" + name for name in (
         "trail_projects", "trail_search_issues", "trail_issue", "trail_weekly_report", "trail_say_do")]
-    assert profile.tools.mcp_servers["trail"].env["TRAIL_API_TOKEN"] == "trk_test-only"
+    assert profile.tools.mcp_servers["trail"].env["TRAIL_API_TOKEN"] == TRAIL_API_TOKEN
     assert FeishuConfig.model_validate(profile.channels.model_dump()["feishu"]).allow_from == ["ou_test_owner"]
 
 
 @pytest.fixture
 def config():
-    """Explicit test-only credentials; public literal avoids DNS in substitutes."""
+    """Test-only credentials via the shared placeholder source; public fakes
+    avoid DNS in substitutes."""
     return TrailIntegrationConfig(
-        base_url="https://203.0.113.10", api_token="trk_test-only",
+        base_url="https://203.0.113.10", api_token=TRAIL_API_TOKEN,
         service_user_id=2, project_ids=[7], csi_project_id=7,
-        webhook_secret="test-only-signing-secret", feishu_open_id="ou_test_owner",
+        webhook_secret=TRAIL_WEBHOOK_SECRET, feishu_open_id="ou_test_owner",
     )
 
 
@@ -95,7 +104,7 @@ def event(event_type="issue.due_soon", event_id="guard-due_soon-42-2026-10-10"):
 def transport(path_handler=None):
     def handle(request):
         assert request.method == "GET"
-        assert request.headers["Authorization"] == "Bearer trk_test-only"
+        assert request.headers["Authorization"] == "Bearer " + TRAIL_API_TOKEN
         path = request.url.path
         if path == "/integrations/trail/identity":
             return httpx.Response(200, json={"user_id": 2, "scope": "issues:read"})
@@ -360,7 +369,7 @@ async def test_stdio_mcp_real_protocol_fails_closed_on_offline_backend():
     """Real child-process SDK handshake, catalog and call; no fake MCP session."""
     params = StdioServerParameters(command=sys.executable,
         args=["-m", "nanobot.integrations.trail.mcp_server"],
-        env={"TRAIL_BASE_URL": "http://127.0.0.1:1", "TRAIL_API_TOKEN": "trk_test-only",
+            env={"TRAIL_BASE_URL": "http://127.0.0.1:1", "TRAIL_API_TOKEN": TRAIL_API_TOKEN,
              "TRAIL_SERVICE_USER_ID": "2", "TRAIL_PROJECT_IDS": "[7]", "TRAIL_ALLOW_LOOPBACK": "true"})
     async with asyncio.timeout(40), stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
