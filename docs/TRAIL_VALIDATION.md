@@ -2,6 +2,8 @@
 
 ## 与实际本地最新 main 合并补验
 
+最终落地检查：实际项目 `D:\Code\bots\nanobot` 快进至 `d39eb4c` 后，使用 `.venv\Scripts\python.exe -m pytest tests/test_trail_integration.py tests/test_trail_tool_boundary.py -q` 再次PASS/exit0，57 passed/2 warnings，日志Trail `.review/ai/nanobot-real-main-focused.log`；`.venv\Scripts\python.exe -m ruff check nanobot/ tests/test_trail_integration.py tests/test_trail_tool_boundary.py scripts/verify_trail_joint.py` PASS/exit0，All checks passed。实际import路径已确认指向 `D:\Code\bots\nanobot\nanobot`，相对07fbaed既有报表核心及pyproject无diff。未重启任何网关/更改profile，未创建新开发分支。
+
 用户确认实际路径 `D:\Code\bots\nanobot`。开始时本地/GitHub main均为 `07fbaed540c58901eaf18ae9fe737dc80cd0e83c`、工作区干净、manifest/installed均0.3.0。复用已有 `codex/trail-nanobot-integration`，未新建分支；合入最新main的合并提交 `e1f0532`。相对07fbaed，报表intent_router/cube/store/report_center/base/magik/reporting_api/pyproject文件无diff；loop只增加allowed_tools接线，registry只增加注册白名单。
 
 解释器P=`D:\Code\bots\nanobot\.venv\Scripts\python.exe`，Python3.14.6；MCP1.29.0/httpx0.28.1/aiohttp3.14.3/lark-oapi1.7.3/pytest9.1.1/ruff0.16.3。本轮未升级实际项目依赖。下表cwd除注明外为 `D:\Code\Projects\nanobot`（合并验证克隆，实际解释器；已确认import源指向此克隆）。
