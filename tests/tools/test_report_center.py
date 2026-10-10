@@ -142,6 +142,54 @@ def test_hourly_tpm_phrases_preserve_all_customers_and_selected_models(
     }
 
 
+def test_current_hour_tpm_phrases_fall_through_to_agent_turn(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """“当前/现在/实时 … TPM” reaches the LLM agent turn, not a fixed window.
+
+    User-directed 2026-10-09: complete-hour Cube data cannot answer a
+    live-window question, so the deterministic chain deliberately does not
+    claim current-word phrasing — it falls through to the agent turn where
+    the connected Grafana MCP tools plus the report guardrail serve
+    real-time questions.  The regression behind this: the same phrasing was
+    first silently claimed by the legacy daily matcher (yesterday's data),
+    then hard-routed to the previous-complete-hour report; both answered a
+    "right now" question with the wrong window.
+    """
+
+    tool, _store, _cron = _tool(monkeypatch, tmp_path)
+
+    # Current-word phrasing: unclaimed by every deterministic tier.
+    for phrase in (
+        "当前佛跳墙用户k3模型的TPM是多少",
+        "佛跳墙 Kimi-K3 的当前TPM",
+        "当前阳春面全部模型的TPM是多少",
+        "现在TPM怎么样",
+        "佛跳墙 Kimi-K3 实时TPM",
+    ):
+        assert tool.match_direct_request(phrase) is None, phrase
+
+    # Explicit complete-hour phrasing keeps its deterministic routing.
+    assert tool.match_direct_request("佛跳墙 Kimi-K3 上一小时 TPM 峰值和均值") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "tenants": ["佛跳墙"],
+        "models": ["Kimi-K3"],
+        "model_scope": "selected",
+        "interactive": False,
+    }
+    # Tenant-less model-only phrasing must not split into a garbage tenant
+    # (“K” + “imi-K3”); it stays in the interactive selector flow.
+    assert tool.match_direct_request("查看 Kimi-K3 上一小时 TPM") == {
+        "action": "customer_model_hourly_tpm",
+        "period": "recent1h",
+        "interactive": True,
+    }
+    # A phrase with no hour word at all keeps its legacy daily routing.
+    assert tool.match_direct_request("佛跳墙用户k3模型的TPM") is None
+
+
 def _hourly_subscription(**param_overrides) -> ReportSubscription:
     params = {
         "tenants": ["tenant-fo", "tenant-noodle"],

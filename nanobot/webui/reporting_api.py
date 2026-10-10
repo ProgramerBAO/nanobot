@@ -12,6 +12,11 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.agent.reporting.intent_router import (
+    ROUTER_MODES,
+    ROUTER_SETTING,
+    effective_router_mode,
+)
 from nanobot.agent.tools.magik_cube import (
     CHANGE_ALERT_THRESHOLD_SETTING_KEY,
     DEFAULT_CHANGE_ALERT_THRESHOLD_PERCENT,
@@ -607,6 +612,10 @@ def reporting_settings_payload(
             store,
             lambda key: bool(getattr(config.tools.reporting, key, False)),
         ),
+        "report_intent_router": {
+            "mode": effective_router_mode(store, config.tools.reporting.report_intent_router),
+            "default": config.tools.reporting.report_intent_router,
+        },
         "storage": {
             "backend": config.tools.reporting.state_backend,
             "retention_days": config.tools.reporting.run_retention_days,
@@ -721,6 +730,20 @@ def reporting_settings_action(
     management_enabled = flags["report_management_v1"]
     guided_enabled = flags["report_subscription_guided_ui"]
     button_policy_enabled = flags["report_subscription_button_policy"]
+    if action == "report_intent_router":
+        if not management_enabled:
+            raise ReportingSettingsError("report management is disabled", status=404)
+        mode = str(query_first(query, "mode") or "")
+        if mode not in ROUTER_MODES:
+            raise ReportingSettingsError("router mode must be off, fallback or primary", status=400)
+        before = effective_router_mode(store, config.tools.reporting.report_intent_router)
+        store.set_setting(ROUTER_SETTING, mode)
+        store.record_admin_audit(
+            action=action, target_type="report_setting", target_id=ROUTER_SETTING,
+            before_summary={"mode": before}, after_summary={"mode": mode},
+            updated_by="webui_admin",
+        )
+        return reporting_settings_payload(query, startup_config=startup_config)
     if action in {"feature_flag", "feature_flag_reset"}:
         flag_key = str(query_first(query, "flag") or "").strip()
         if flag_key not in RUNTIME_FEATURE_FLAG_KEYS:

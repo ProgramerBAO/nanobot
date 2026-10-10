@@ -7,6 +7,8 @@ import os
 import sqlite3
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -98,12 +100,27 @@ class ReportStateStore:
         self._lock = threading.RLock()
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield one configured SQLite connection, committing and closing it.
+
+        A bare ``with sqlite3.connect(...) as db:`` only commits the
+        transaction — it never closes the connection, so on Windows the db
+        file handle can outlive the store and lock the file (proven with a
+        live handle probe 2026-10-10). The inner ``with connection:`` keeps
+        the commit/rollback semantics every caller relied on; the outer
+        ``finally`` releases the handle deterministically.
+        """
+
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as db:
@@ -279,7 +296,7 @@ class ReportStateStore:
         """
         with self._lock, self._connect() as db:
             cursor = db.execute("DELETE FROM report_settings WHERE key = ?", (key,))
-        return cursor.rowcount > 0
+            return cursor.rowcount > 0
 
     def onboarding_seen(self, channel: str, user_id: str, version: int) -> bool:
         with self._lock, self._connect() as db:
@@ -473,7 +490,8 @@ class ReportStateStore:
                 revision=revision+1, updated_at=? WHERE subscription_id=? AND revision=?""",
                 (schedule, timezone_name, _utc_now(), subscription_id, int(current["revision"])),
             )
-        return self.subscription(subscription_id) if cursor.rowcount else None
+            updated = cursor.rowcount
+        return self.subscription(subscription_id) if updated else None
 
     def record_admin_audit(
         self,
@@ -601,7 +619,7 @@ class ReportStateStore:
                 WHERE channel=? AND user_id=? AND resource_type=? AND resource_id=?""",
                 (channel, user_id, resource_type, resource_id),
             )
-        return cursor.rowcount > 0
+            return cursor.rowcount > 0
 
     def grants(self, channel: str, user_id: str) -> list[dict[str, str]]:
         with self._lock, self._connect() as db:
@@ -821,7 +839,8 @@ class ReportStateStore:
                     int(current["revision"]),
                 ),
             )
-        return self.subscription(subscription_id) if cursor.rowcount else None
+            updated = cursor.rowcount
+        return self.subscription(subscription_id) if updated else None
 
     def remove_subscription(
         self,
@@ -841,7 +860,7 @@ class ReportStateStore:
                 f"DELETE FROM report_subscriptions WHERE {predicate}",
                 tuple(values),
             )
-        return cursor.rowcount > 0
+            return cursor.rowcount > 0
 
     def update_subscription(
         self,
@@ -900,13 +919,14 @@ class ReportStateStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError("an identical report subscription already exists") from exc
-        return self.subscription(subscription_id) if cursor.rowcount else None
+            updated = cursor.rowcount
+        return self.subscription(subscription_id) if updated else None
 
     def prune_runs(self, retention_days: int = 30) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=max(1, retention_days))).isoformat()
         with self._lock, self._connect() as db:
             cursor = db.execute("DELETE FROM report_runs WHERE created_at < ?", (cutoff,))
-        return cursor.rowcount
+            return cursor.rowcount
 
     def claim_delivery(self, idempotency_key: str) -> bool:
         if not idempotency_key or len(idempotency_key) > 512:
@@ -927,7 +947,7 @@ class ReportStateStore:
                 WHERE idempotency_key=? AND (status='error' OR (status='running' AND claimed_at < ?))""",
                 (now, idempotency_key, stale_before),
             )
-        return reclaimed.rowcount > 0
+            return reclaimed.rowcount > 0
 
     def complete_delivery(self, idempotency_key: str, *, status: str) -> None:
         if status not in {"ok", "error"}:

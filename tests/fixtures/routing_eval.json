@@ -1,0 +1,325 @@
+{
+  "version": 1,
+  "description": "Report routing evaluation corpus (2026-10-09 LLM overhaul, Phase 0). tier=canonical phrases must route through report_center.match_direct_request exactly as specified, forever (zero-regression gate). tier=paraphrase phrases are natural rewordings users actually say; most MISS the regex chain today (xfail baseline) and must route once the unified intent router (Phase 2) lands. tier=negative phrases must never be claimed by the report matcher; the realtime negative group (user-directed 2026-10-09) pins 当前/现在/实时 + TPM phrasing — live-window questions that no complete-window deterministic tier may claim, so they reach the LLM agent turn where the connected Grafana MCP tools (with the hourly report as fallback) answer them. expect uses partial matching: only the listed keys are asserted. Subscription-creation phrasings are out of scope here (they route through the subscription classifier chain and have their own corpus in test_cube_subscription_intent.py).",
+  "cases": [
+    {
+      "group": "hourly_tpm",
+      "tier": "canonical",
+      "phrase": "查看阳春面、豆汁、佛跳墙全部模型上一小时 TPM",
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all", "interactive": false}
+    },
+    {
+      "group": "hourly_tpm",
+      "tier": "canonical",
+      "phrase": "佛跳墙 Kimi-K3 上一小时 TPM 峰值和均值",
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "selected", "models": ["Kimi-K3"], "interactive": false}
+    },
+    {
+      "group": "hourly_tpm",
+      "tier": "canonical",
+      "phrase": "上一小时 TPM",
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "interactive": true}
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "现在佛跳墙的K3每分钟能跑多少token",
+      "expect": null
+    },
+    {
+      "group": "hourly_tpm",
+      "tier": "paraphrase",
+      "phrase": "过去一小时佛跳墙全部模型的吞吐量怎么样",
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all", "tenants": ["佛跳墙"]}
+    },
+    {
+      "group": "hourly_tpm",
+      "tier": "paraphrase",
+      "phrase": "上一个钟头K3的TPM什么情况",
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "models": ["K3"], "tenants": [], "interactive": true}
+    },
+    {
+      "group": "hourly_tpm",
+      "tier": "paraphrase",
+      "phrase": "佛跳墙刚才那个小时Kimi-K3每分钟请求量多少",
+      "expect": {"action": "report_parse_failed"}
+    },
+    {
+      "group": "hourly_tpm",
+      "tier": "paraphrase",
+      "phrase": "帮我看看豆汁上个小时各模型TPM峰值",
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all", "tenants": ["豆汁"]}
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "当前佛跳墙用户k3模型的TPM是多少",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "佛跳墙 Kimi-K3 的当前TPM",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "当前阳春面全部模型的TPM是多少",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "现在TPM怎么样",
+      "expect": null
+    },
+    {
+      "group": "realtime",
+      "tier": "negative",
+      "phrase": "佛跳墙 Kimi-K3 实时TPM",
+      "expect": null
+    },
+    {
+      "group": "daily_brief",
+      "tier": "canonical",
+      "phrase": "我要日报",
+      "expect": {"action": "cube_report", "period": "day", "interactive": true}
+    },
+    {
+      "group": "daily_brief",
+      "tier": "canonical",
+      "phrase": "详细日报",
+      "expect": {"action": "cube_report", "period": "day", "report_template": "matrix_card"}
+    },
+    {
+      "group": "daily_brief",
+      "tier": "canonical",
+      "phrase": "完整日报",
+      "expect": {"action": "cube_report", "period": "day", "report_template": "full"}
+    },
+    {
+      "group": "daily_brief",
+      "tier": "canonical",
+      "phrase": "Kimi-K3模型的日报（全部客户）",
+      "route": "legacy",
+      "expect": {"model": "Kimi-K3", "granularity": "day", "interactive": true}
+    },
+    {
+      "group": "daily_brief",
+      "tier": "paraphrase",
+      "phrase": "出一份昨天的用量报表",
+      "expect": {"action": "cube_report", "period": "day"}
+    },
+    {
+      "group": "daily_brief",
+      "tier": "paraphrase",
+      "phrase": "昨天各个客户都用得怎么样",
+      "expect": {"action": "multi_scope_brief", "period": "day", "all_tenants": true}
+    },
+    {
+      "group": "daily_brief",
+      "tier": "paraphrase",
+      "phrase": "给我看看前天K3的消耗情况",
+      "expect": {"action": "cube_report", "period": "day", "model": "K3"}
+    },
+    {
+      "group": "daily_brief",
+      "tier": "paraphrase",
+      "phrase": "最近七天大家用了多少token",
+      "expect": {"action": "cube_report", "period": "recent7"}
+    },
+    {
+      "group": "multi_scope_brief",
+      "tier": "canonical",
+      "phrase": "多客户多模型日报简报",
+      "expect": {"action": "multi_scope_brief", "period": "day", "interactive": true}
+    },
+    {
+      "group": "multi_scope_brief",
+      "tier": "canonical",
+      "phrase": "阳春面、豆汁、佛跳墙全部模型的多客户多模型日报简报",
+      "expect": {"action": "multi_scope_brief", "period": "day", "tenants": ["阳春面", "豆汁", "佛跳墙"]}
+    },
+    {
+      "group": "multi_scope_brief",
+      "tier": "canonical",
+      "phrase": "查看各客户模型周报",
+      "expect": {"action": "multi_scope_brief", "period": "week", "interactive": true}
+    },
+    {
+      "group": "multi_scope_brief",
+      "tier": "paraphrase",
+      "phrase": "上周每个客户的模型用量对比一下",
+      "expect": {"action": "multi_scope_brief", "period": "week", "all_tenants": true}
+    },
+    {
+      "group": "multi_scope_brief",
+      "tier": "paraphrase",
+      "phrase": "把三个大客户这个礼拜的用量按模型拆开看看",
+      "expect": {"action": "report_parse_failed"}
+    },
+    {
+      "group": "machine_tpm",
+      "tier": "canonical",
+      "phrase": "Kimi-K3 单机 TPM 峰值",
+      "expect": {"action": "machine_tpm_report", "period": "day", "model": "Kimi-K3"}
+    },
+    {
+      "group": "machine_tpm",
+      "tier": "paraphrase",
+      "phrase": "K3每台机器能跑多少TPM",
+      "expect": {"action": "machine_tpm_report", "period": "day", "model": "K3"}
+    },
+    {
+      "group": "machine_tpm",
+      "tier": "paraphrase",
+      "phrase": "单机折算TPM看一下vLLM",
+      "expect": {"action": "machine_tpm_report", "period": "day", "model": "vLLM"}
+    },
+    {
+      "group": "health",
+      "tier": "canonical",
+      "phrase": "健康报告",
+      "expect": {"action": "health_report", "period": "recent15m"}
+    },
+    {
+      "group": "health",
+      "tier": "canonical",
+      "phrase": "近15分钟平台健康情况",
+      "expect": {"action": "health_report", "period": "recent15m"}
+    },
+    {
+      "group": "health",
+      "tier": "paraphrase",
+      "phrase": "平台现在健康吗",
+      "expect": {"action": "health_report", "period": "recent15m"}
+    },
+    {
+      "group": "health",
+      "tier": "paraphrase",
+      "phrase": "错误率有没有涨起来",
+      "expect": {"action": "health_report", "period": "recent15m"}
+    },
+    {
+      "group": "cost",
+      "tier": "canonical",
+      "phrase": "成本报告",
+      "expect": {"action": "cost_report", "period": "month", "interactive": true}
+    },
+    {
+      "group": "cost",
+      "tier": "canonical",
+      "phrase": "余额情况",
+      "expect": {"action": "cost_report", "period": "month", "interactive": true}
+    },
+    {
+      "group": "cost",
+      "tier": "paraphrase",
+      "phrase": "上个月花了多少钱",
+      "expect": {"action": "cost_report", "period": "month"}
+    },
+    {
+      "group": "cost",
+      "tier": "paraphrase",
+      "phrase": "这个月账单多少了",
+      "expect": {"action": "report_parse_failed"}
+    },
+    {
+      "group": "provider_quality",
+      "tier": "canonical",
+      "phrase": "供应商质量报告",
+      "expect": {"action": "provider_quality_report", "period": "recent15m"}
+    },
+    {
+      "group": "provider_quality",
+      "tier": "canonical",
+      "phrase": "Kimi-K3 各供应商性能对比",
+      "expect": {"action": "provider_quality_report", "period": "recent15m", "model": "Kimi-K3"}
+    },
+    {
+      "group": "provider_quality",
+      "tier": "paraphrase",
+      "phrase": "哪个供应商的质量好一点",
+      "expect": {"action": "provider_quality_report", "period": "recent15m"}
+    },
+    {
+      "group": "provider_quality",
+      "tier": "paraphrase",
+      "phrase": "GLM-5.2哪家供应商跑得好",
+      "expect": {"action": "provider_quality_report", "period": "recent15m", "model": "GLM-5.2"}
+    },
+    {
+      "group": "navigation",
+      "tier": "canonical",
+      "phrase": "报表中心",
+      "expect": {"action": "home"}
+    },
+    {
+      "group": "navigation",
+      "tier": "canonical",
+      "phrase": "查看我的订阅",
+      "expect": {"action": "subscriptions"}
+    },
+    {
+      "group": "navigation",
+      "tier": "canonical",
+      "phrase": "查看最近报表",
+      "expect": {"action": "recent"}
+    },
+    {
+      "group": "navigation",
+      "tier": "paraphrase",
+      "phrase": "有哪些报表可以看",
+      "expect": {"action": "home"}
+    },
+    {
+      "group": "navigation",
+      "tier": "paraphrase",
+      "phrase": "我订阅了什么",
+      "expect": {"action": "subscriptions"}
+    },
+    {
+      "group": "navigation",
+      "tier": "paraphrase",
+      "phrase": "之前生成的报表在哪看",
+      "expect": {"action": "recent"}
+    },
+    {
+      "group": "negative",
+      "tier": "negative",
+      "phrase": "你好",
+      "expect": null
+    },
+    {
+      "group": "negative",
+      "tier": "negative",
+      "phrase": "今天天气怎么样",
+      "expect": null
+    },
+    {
+      "group": "negative",
+      "tier": "negative",
+      "phrase": "帮我写个Python脚本",
+      "expect": null
+    },
+    {
+      "group": "negative",
+      "tier": "negative",
+      "phrase": "K3是什么模型",
+      "expect": null
+    },
+    {
+      "group": "negative",
+      "tier": "negative",
+      "phrase": "现在几点了",
+      "expect": null
+    },
+    {
+      "group": "negative",
+      "tier": "negative",
+      "phrase": "谢谢",
+      "expect": null
+    }
+  ]
+}

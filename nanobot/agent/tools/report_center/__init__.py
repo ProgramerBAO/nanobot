@@ -26,8 +26,14 @@ from nanobot.agent.reporting.cube_subscription_intent import (
     is_subscription_intent_candidate,
     parse_deterministic_subscription_intent,
 )
+from nanobot.agent.reporting.intent_router import (
+    classify_report_intent,
+    effective_router_mode,
+    is_realtime_tpm,
+    is_report_candidate,
+)
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.context import current_request_context
+from nanobot.agent.tools.context import RequestContext, current_request_context
 from nanobot.agent.tools.magik_cube import effective_tenant_mappings
 from nanobot.agent.tools.report_center.catalog import _CatalogReconciliationMixin
 from nanobot.agent.tools.report_center.execution import _ReportExecutionMixin
@@ -63,6 +69,23 @@ from nanobot.reporting.capabilities import (
 )
 from nanobot.reporting.store import get_report_state_store
 from nanobot.reporting.subscriptions import SubscriptionServiceError
+from nanobot.runtime_context import (
+    RuntimeContextBlock,
+    RuntimeContextProvider,
+    wrap_runtime_context_lines,
+)
+
+# Phase 1 guardrail gate (2026-10-09): intentionally broad so any plausibly
+# numeric/ops question catches the fabrication guardrail, while plain chit-chat
+# turns skip both the prompt cost and the history bloat. Keep wider than the
+# routing vocabulary — the guardrail must fire even for paraphrases the regex
+# chain cannot route (that is exactly the fallthrough it defends).
+_REPORT_GUARDRAIL_SIGNAL_RE = re.compile(
+    r"(?:用量|使用量|使用情况|消耗|吞吐|请求量|流量|报表|报告|日报|周报|月报|简报|订阅|"
+    r"tpm|token|成本|费用|账单|余额|金额|健康|错误率|延迟|供应商|"
+    r"客户|租户|用户|模型|集群|gpu|endpoint|小时|峰值|均值)",
+    re.IGNORECASE,
+)
 
 _HOME_RE = re.compile(
     r"^(?:请)?(?:打开|显示|查看|进入)?(?:报表中心|报表菜单|功能菜单|菜单|帮助|你能做什么|你会什么|有哪些功能)[？?。！!]*$"
@@ -141,27 +164,59 @@ _MULTI_SCOPE_NAMED_RE = re.compile(
     r"(?P<period>日报|周报)简报[？?。！!]*$",
     re.IGNORECASE,
 )
+# Hourly TPM deterministic routing covers explicit complete-hour wording
+# (“上一/最近 … 小时”) only.  “当前/现在/目前/实时 … TPM” asks for the live
+# window, which complete-hour Cube data cannot answer: those phrases are
+# deliberately NOT claimed here — they fall through to the LLM agent turn,
+# where the connected Grafana MCP tools (query_prometheus 等) plus the
+# report guardrail serve real-time questions (user-directed 2026-10-09).
+# The legacy deferral guard in magik_cube.match_direct_request still
+# deflects current-word TPM phrasing so the daily matcher never claims it.
+_PREV_HOUR_WORDS = r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时"
 _CUSTOMER_MODEL_HOURLY_TPM_RE = re.compile(
-    r"^(?:请)?(?:查看|查询|生成)?\s*(?P<tenants>.+?)\s*(?:的)?\s*"
+    r"^(?:请)?(?:查看|查询|生成)?\s*"
+    r"(?P<tenants>.+?)\s*(?:的)?\s*"
     r"(?:全部|所有|全量)\s*模型\s*(?:的)?\s*"
-    r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时\s*(?:TPM|tpm)\s*"
-    r"(?:峰值和均值|均值和峰值|报告|报表)?[？?。！!]*$",
+    rf"(?P<hour>{_PREV_HOUR_WORDS})?\s*"
+    r"(?:TPM|tpm)\s*"
+    r"(?:峰值和均值|均值和峰值|报告|报表|是多少|多少)?\s*[？?。！!]*$",
     re.IGNORECASE,
 )
 _CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE = re.compile(
-    r"^(?:请)?(?:查看|查询|生成)?\s*(?P<tenants>.+?)\s+"
+    r"^(?:请)?(?:查看|查询|生成)?\s*"
+    # The tenant/model boundary must be a Chinese char or whitespace: without
+    # it, a tenant-less phrase (“查看 Kimi-K3 …”) would split into a garbage
+    # tenant (“K” + “imi-K3”).
+    r"(?P<tenants>.+?)(?:用户|客户)?(?<=[\u4e00-\u9fff\s])\s*"
     r"(?P<models>[A-Za-z0-9][A-Za-z0-9._-]*(?:[、，,]\s*[A-Za-z0-9][A-Za-z0-9._-]*)*)\s*"
-    r"(?:模型)?\s*(?:的)?\s*(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时\s*"
-    r"(?:TPM|tpm)\s*(?:峰值和均值|均值和峰值|报告|报表)?[？?。！!]*$",
+    r"(?:模型)?\s*(?:的)?\s*"
+    rf"(?P<hour>{_PREV_HOUR_WORDS})?\s*"
+    r"(?:TPM|tpm)\s*(?:峰值和均值|均值和峰值|报告|报表|是多少|多少)?\s*[？?。！!]*$",
     re.IGNORECASE,
 )
-# This guard is intentionally broader than the deterministic parsers above.
-# Hourly TPM requests that are incomplete must fail closed in ReportCenter
-# instead of falling through to the legacy daily-usage matcher.
+# This guard is intentionally broader than the deterministic parsers above:
+# explicit complete-hour requests that cannot be fully parsed must fail closed
+# in ReportCenter instead of falling through to the legacy daily-usage
+# matcher.  It deliberately does NOT claim current-word phrasing — that class
+# reaches the agent turn for Grafana-backed real-time answers.
 _HOURLY_TPM_SIGNAL_RE = re.compile(
-    r"(?:上一|最近)\s*(?:完整)?\s*(?:一)?\s*小时.*(?:TPM|tpm)",
+    rf"(?:{_PREV_HOUR_WORDS}).*(?:TPM|tpm)",
     re.IGNORECASE,
 )
+# The optional 查看/查询/生成 prefix can be backtracked into the tenants
+# group when a tenant-less phrase only matches that way; these words are
+# never real tenant names, so a filtered-empty list defers to the broad
+# signal (interactive selector) instead of producing a garbage tenant.
+_HOURLY_TENANT_STOPWORDS = frozenset({"请", "查看", "查询", "生成"})
+
+
+def _hourly_tenant_values(match: re.Match[str]) -> list[str]:
+    values = [
+        item.strip()
+        for item in re.split(r"[、，,；;和与及]+", match.group("tenants"))
+        if item.strip()
+    ]
+    return [value for value in values if value not in _HOURLY_TENANT_STOPWORDS]
 _MACHINE_TPM_RE = re.compile(
     r"^(?:请)?(?:查看|查询|生成)?\s*(?P<model>[A-Za-z0-9][A-Za-z0-9._-]*)"
     r"\s*(?:模型)?(?:的)?(?:单机|每台机器)\s*(?:折算)?\s*TPM"
@@ -301,8 +356,41 @@ class ReportCenterTool(  # noqa: UP046
     def description(self) -> str:
         return (
             "Open the deterministic report center, show recent reports or subscriptions, "
-            "generate Cube reports, and manage report subscriptions."
+            "generate Cube reports, and manage report subscriptions. Any question about "
+            "usage numbers, TPM, tokens, costs, error rates, or provider quality must go "
+            "through this tool (call it exactly once) — explain its returned summary "
+            "without recalculating or estimating any numeric value, and never answer such "
+            "questions from memory."
         )
+
+    def runtime_context_provider(self) -> RuntimeContextProvider | None:
+        """Guardrail block injected into report-ish LLM agent turns (2026-10-09, Phase 1).
+
+        The unstructured agent turn is where report questions land when the
+        deterministic chain misses (the documented fabrication incident class):
+        the generic tool contract has no report-specific numeric-integrity
+        rule, so this block carries it for turns whose text shows usage/ops
+        semantics. Signal-gated on purpose — chit-chat turns neither need the
+        guardrail nor should pay its prompt cost, and session history stays
+        clean for non-report conversations.
+        """
+
+        async def _provide(request: RequestContext) -> RuntimeContextBlock | None:
+            text = request.original_user_text or ""
+            if not _REPORT_GUARDRAIL_SIGNAL_RE.search(text):
+                return None
+            return RuntimeContextBlock(
+                source="report_center",
+                content=wrap_runtime_context_lines([
+                    "report_center owns every deterministic usage/TPM/token/cost/health/provider-quality answer.",
+                    "For any question about usage numbers, TPM, tokens, costs, error rates, or provider quality, call report_center (or magik_cube_daily_report) instead of answering from memory; never estimate, calculate, or invent such numbers.",
+                    "report_center covers complete past windows only (e.g. the previous full hour). For questions about the current live state (当前/现在/实时), prefer the connected Grafana MCP tools (query_prometheus, get_dashboard_panel_queries, query_loki_logs 等) when they are registered; fall back to report_center's hourly report when no Grafana connection exists.",
+                    "If the user's phrasing does not exactly match a known example, still pick the closest action: cube_report (daily/weekly/monthly usage), multi_scope_brief (per-customer model briefs), customer_model_hourly_tpm (last complete hour TPM), machine_tpm_report, health_report, cost_report, provider_quality_report, recent, subscriptions.",
+                    "Pass the user's customer/model names through exactly as written (tenant_query/tenants, model/models); the server re-resolves them against the live catalog — do not guess tenant IDs or model IDs.",
+                ]),
+            )
+
+        return _provide
 
     @property
     def trusted_direct(self) -> bool:
@@ -322,17 +410,55 @@ class ReportCenterTool(  # noqa: UP046
         return 1
 
     def is_direct_intent_candidate(self, text: str) -> bool:
-        """Use one schema-forced LLM call only for subscription-like language."""
+        """Offer one semantic fallback while keeping subscription preemption separate."""
 
-        return bool(
+        subscription = bool(
             (self._flag("cube_subscription_nlu_v2"))
             and self._flag("cube_subscription")
             and is_subscription_intent_candidate(text)
         )
+        return subscription or (
+            not is_subscription_intent_candidate(text)
+            and self.report_router_mode != "off" and is_report_candidate(text)
+        )
+
+    @property
+    def report_router_mode(self) -> str:
+        """Effective mode is read per turn so page updates require no restart."""
+        return effective_router_mode(self._store, self._config.report_intent_router)
+
+    @property
+    def direct_intent_priority(self) -> int:
+        """The unified router owns the fallback ahead of the legacy classifier."""
+        return 10
+
+    def prefer_semantic_direct_request(self, text: str) -> bool:
+        """Primary precedes only legacy matching; canonical center routes remain free."""
+        return (
+            self.report_router_mode == "primary"
+            and not is_subscription_intent_candidate(text)
+            and is_report_candidate(text)
+            and self.match_direct_request(text) is None
+        )
 
     async def classify_direct_request(self, text: str, runtime: Any) -> dict[str, Any] | None:
-        """Parse a direct subscription request without allowing the LLM to execute it."""
+        """Classify reports or subscription slots; execution stays server-owned."""
 
+        if not is_subscription_intent_candidate(text):
+            if self.report_router_mode == "off" or not is_report_candidate(text):
+                return None
+            draft = await classify_report_intent(
+                text, runtime,
+                timeout_seconds=self._config.cube_subscription_nlu_timeout_seconds,
+            )
+            if draft is None:
+                return {"action": "report_parse_failed"}
+            from zoneinfo import ZoneInfo
+
+            params = draft.compile(text, today=datetime.now(ZoneInfo(self._config.timezone)).date())
+            logger.info("Report intent routing: mode={} outcome={}", self.report_router_mode,
+                        params.get("action") if params else "agent_turn")
+            return params
         deterministic_intent = parse_deterministic_subscription_intent(text)
         if deterministic_intent is not None:
             logger.info("Cube subscription intent parsed deterministically: mode=direct")
@@ -437,6 +563,8 @@ class ReportCenterTool(  # noqa: UP046
 
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
         raw = text.strip()
+        if is_realtime_tpm(raw):
+            return None
         subscription_control = _SUBSCRIPTION_CONTROL_RE.fullmatch(raw)
         if subscription_control:
             operation = "enable" if subscription_control.group("operation") == "启用" else "disable"
@@ -546,39 +674,36 @@ class ReportCenterTool(  # noqa: UP046
         if _MULTI_SCOPE_WEEKLY_RE.fullmatch(raw):
             return {"action": "multi_scope_brief", "interactive": True, "period": "week"}
         hourly_tpm_match = _CUSTOMER_MODEL_HOURLY_TPM_RE.fullmatch(raw)
-        if hourly_tpm_match:
-            tenant_values = [
-                item.strip()
-                for item in re.split(r"[、，,；;和与及]+", hourly_tpm_match.group("tenants"))
-                if item.strip()
-            ]
-            return {
-                "action": "customer_model_hourly_tpm",
-                "period": "recent1h",
-                "tenants": tenant_values,
-                "model_scope": "all",
-                "interactive": False,
-            }
+        # A phrase without an explicit complete-hour word ("阳春面全部模型的
+        # TPM") must keep its legacy routing.  A filtered-empty tenant list
+        # (prefix backtracking) defers as well.
+        if hourly_tpm_match and hourly_tpm_match.group("hour"):
+            tenant_values = _hourly_tenant_values(hourly_tpm_match)
+            if tenant_values:
+                return {
+                    "action": "customer_model_hourly_tpm",
+                    "period": "recent1h",
+                    "tenants": tenant_values,
+                    "model_scope": "all",
+                    "interactive": False,
+                }
         selected_hourly_match = _CUSTOMER_MODEL_HOURLY_TPM_SELECTED_RE.fullmatch(raw)
-        if selected_hourly_match:
-            tenant_values = [
-                item.strip()
-                for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("tenants"))
-                if item.strip()
-            ]
-            model_values = [
-                item.strip()
-                for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("models"))
-                if item.strip()
-            ]
-            return {
-                "action": "customer_model_hourly_tpm",
-                "period": "recent1h",
-                "tenants": tenant_values,
-                "models": model_values,
-                "model_scope": "selected",
-                "interactive": False,
-            }
+        if selected_hourly_match and selected_hourly_match.group("hour"):
+            tenant_values = _hourly_tenant_values(selected_hourly_match)
+            if tenant_values:
+                model_values = [
+                    item.strip()
+                    for item in re.split(r"[、，,；;和与及]+", selected_hourly_match.group("models"))
+                    if item.strip()
+                ]
+                return {
+                    "action": "customer_model_hourly_tpm",
+                    "period": "recent1h",
+                    "tenants": tenant_values,
+                    "models": model_values,
+                    "model_scope": "selected",
+                    "interactive": False,
+                }
         if _HOURLY_TPM_SIGNAL_RE.search(raw):
             return {
                 "action": "customer_model_hourly_tpm",
@@ -863,6 +988,11 @@ class ReportCenterTool(  # noqa: UP046
     ) -> Any:
         channel, chat_id, user_id, session_key, metadata = self._request_identity()
         self._store.prune_runs(self._config.run_retention_days)
+        if action == "report_parse_failed":
+            return ToolResult.error(
+                "未能可靠识别报表范围或统计周期。请明确客户、模型和日期，"
+                "或发送“报表中心”选择报表。当前周/月、实时值和请求 RPM 不会被替换成历史 TPM。"
+            )
         if action == "home":
             return self._result(
                 home_document(

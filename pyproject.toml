@@ -177,6 +177,13 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "nanobot/channels"]
+markers = [
+    # Routing evaluation corpus (2026-10-09 report-chain LLM overhaul): the
+    # canonical/negative halves are hard gates, paraphrase halves are the
+    # pre-Phase-2 baseline and flip to hard assertions when the unified
+    # intent router lands.
+    "routing_eval: report routing phrase corpus (see tests/tools/test_routing_eval.py)",
+]
 
 [tool.coverage.run]
 source = ["nanobot"]

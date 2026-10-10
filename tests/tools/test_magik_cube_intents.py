@@ -62,6 +62,33 @@ def test_attached_slug_and_fixed_daily_monthly_templates_route_without_interacti
     assert tool.match_direct_request("深度分析上周和上上周各模型用量") is None
 
 
+def test_current_hour_tpm_phrases_defer_to_report_center(tmp_path: Path) -> None:
+    """“当前/现在/目前/实时 … TPM” stays out of the legacy daily matcher.
+
+    User-directed 2026-10-09: current-word TPM phrasing asks for the live
+    window.  The deterministic chain deliberately does not claim it — it
+    falls through to the LLM agent turn, where the connected Grafana MCP
+    tools plus the report guardrail serve real-time questions.  The legacy
+    deferral guard keeps both current-word and explicit-hour phrasing away
+    from the date-based daily matcher.
+    """
+
+    tool = MagikCubeDailyReportTool(snapshot_path=tmp_path / "proxy.json")
+
+    for phrase in (
+        "当前佛跳墙用户k3模型的TPM是多少",
+        "现在阳春面全部模型的TPM",
+        "佛跳墙 Kimi-K3 实时TPM",
+        "上一小时 TPM",
+    ):
+        assert tool.match_direct_request(phrase) is None, phrase
+
+    # Without an hour/current word the legacy daily usage query still owns it.
+    kept = tool.match_direct_request("佛跳墙用户k3模型的TPM")
+    assert kept is not None
+    assert kept.get("tenant_query") == "佛跳墙"
+
+
 class _ZeroFilteringClient:
     def __init__(self) -> None:
         self.tpm_models: list[str] = []

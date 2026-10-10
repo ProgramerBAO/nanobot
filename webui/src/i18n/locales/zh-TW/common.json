@@ -1041,6 +1041,13 @@
       "permissions": {
         "rbacDescription": "啟用後校驗 Connector、Template、客戶、模型和訂閱範本授權。"
       },
+      "router": {
+        "label": "自然語言報表路由",
+        "off": "關閉：保留現有路由",
+        "fallback": "補充識別：固定問法未匹配時識別",
+        "primary": "優先識別：在舊用量匹配之前識別",
+        "description": "儲存立即生效。客戶、模型與權限由伺服器驗證；不確定時要求補充資訊。即時 TPM 使用 Grafana。"
+      },
       "flags": {
         "title": "功能開關",
         "description": "切換立即生效，無需重啟網關；覆蓋值保存在報表狀態庫並記錄管理稽核。計算口徑、閾值與擴充連接（Grafana/企業微信/釘釘/成本 TokenAPI）仍屬部署設定，需修改設定檔並重新啟動。",

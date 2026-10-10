@@ -126,23 +126,57 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   actual usage from `analysis/machine-tpm-trend/query` (target-hour point-in-time,
   informational — a missing usage value must not downgrade quality). The data
   section renders as a single six-column table (客户 | 模型 | 峰值 | 均值 |
-  机器占用 | 机器真实使用，user-confirmed 2026-09-16). Idle =
-  allocation minus usage, flagged as （闲N） inside the 机器真实使用 column from one
-  machine difference and summed into the subtitle as `N 机器空闲`; both values are
+  机器占用 | 机器冗余（闲N）, user-directed 2026-10-10, superseding the
+  2026-09-16 真实使用 column; the flag-off fallback restores it). Idle =
+  allocation minus usage, flagged as （闲N） inside the second machine column from one
+  machine difference; used machines stay derivable as 占用−闲. Both values are
   platform-level and must never be attributed to a customer. A missing target-hour
   point stays 暂不可用 with `partial` quality and must never be rendered as zero.
-  The card appends a seven-column cluster inventory table (集群 | 机器总数 | 空闲 |
-  生产 | 测试 | 开发 | 备用, user-confirmed 2026-09-17 order with idle right
+- Hourly capacity analysis (user-approved 2026-10-10, flag
+  `hourly_tpm_capacity_analysis` default ON with a WebUI 功能开关 toggle):
+  机器冗余 = 占用 − ⌈当前小时负载 ÷ 30 天最佳单机吞吐⌉ on the token-average
+  basis — `tpmPerMachine` (= totalTokens ÷ machineCount ÷ 60) from
+  `analysis/machine-tpm-trend/query`, computed per (model, cluster, card-type)
+  group. Live contract probes (2026-10-10): a 30-day HOUR window returns one
+  complete 720-point series per named cluster group; not-yet-elapsed hours come
+  back as zero placeholders with an EMPTY cluster (machineCount 0 — exclude by
+  count, not only by window); `gpuProduct` is spelled "NVIDIA B30Z" (spaces) on
+  the trend route but "NVIDIA-B30Z" (hyphens) on model-machine-usage — group
+  joins must normalize separators (`_capacity_gpu_key`), and the trend spelling
+  wins the display; a model can 500 on the trend route for every window while
+  its TPM data still flows (DeepSeek-R1), so per-model failures are
+  informational warnings (`: capacity_baseline` / `: capacity_tokens` markers)
+  that never downgrade quality. The 30-day baseline is cached per model per
+  calendar day in `report_settings` (`hourly_capacity_baseline:<model>`); a
+  failed refresh keeps the report complete. Baselines shorter than 7 days
+  produce no redundancy number (—), and required > allocation clamps to 0.
+  Multi-customer models get a conditional attribution table splitting the
+  model-level redundant machines by each tenant's share of the target hour's
+  token volume (`active-tenant-daily-usage/query` with `TIME_LEVEL_HOUR`,
+  buckets labeled "YYYY-MM-DD HH" in the report timezone, totalTokens is a
+  string) — token share only, never avgTpm (cross-endpoint/customer aggregation
+  stays forbidden); single-tenant models never pay the token query. The
+  conditional basis table (模型 | 集群·卡型 | 单机最佳TPM(30d) | 当前单机TPM |
+  需求机器 | 占用机器 | 冗余机器) is the auditable math surface. 冗余/闲 are
+  estimates and must stay labeled as such; zero-usage causes (standby/drain/
+  fault) are indistinguishable upstream.
+- The hourly card appends a seven-column cluster inventory table (集群 | 机器总数 |
+  空闲 | 生产 | 测试 | 开发 | 备用, user-confirmed 2026-09-17 order with idle right
   after the total) from `analysis/machine-usage-summary/query` (POST
   `{"noloading":true}`, send-time platform snapshot; `occupiedMachineCount` carries
   the TEST machine total; production = total − the other categories and renders `—`
   when parts are missing or exceed the total). The inventory table is
   informational: a failed or empty summary omits the table without downgrading
-  quality, and cluster-level idle never converts to or from the model-level （闲N）
-  semantics. Clusters whose machine total is zero are hidden from the table with
-  an explicit hidden-count sentence in the disclosure note (2026-09-17, never
-  silent); a MISSING total keeps rendering —. Feishu splits the tables across
-  cards (one table per card, page-marked subtitles).
+  quality, and cluster-level idle never converts to or from the model-level
+  （闲N）/冗余 semantics. Clusters whose machine total is zero are hidden from
+  the table with an explicit hidden-count sentence in the disclosure note
+  (2026-09-17, never silent); a MISSING total keeps rendering —. Feishu splits
+  the tables across cards (one table per card, page-marked subtitles).
+- `ReportStateStore._connect` is a context manager that COMMITS (inner
+  `with connection:`) and CLOSES (outer `finally`) every connection: a bare
+  `with sqlite3.connect(...)` never closes and leaks Windows file handles
+  (proven 2026-10-10 — the state.db lock outlives the store object). Never read
+  `cursor.rowcount` after the `with` block exits; materialize it inside.
 - Quantity values (tokens, requests, TPM) across every template render
   through the shared `format_quantity_compact` ladder
   (`nanobot/utils/number_format.py`, 2026-09-17): K=10³, M=10⁶, B=10⁹
@@ -239,8 +273,45 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   Bump the pinned package only after re-verifying both catalogs against the
   new release — the 2.x alerting split renames `alerting_manage_*` into
   `alerting_rules_read/write` and will require catalog updates.
+- Routing eval corpus (2026-10-09 report-chain LLM overhaul, Phase 0):
+  `tests/fixtures/routing_eval.json` + `tests/tools/test_routing_eval.py` is
+  the phrase-routing regression gate. Canonical and negative phrases are hard
+  assertions (zero-regression, forever); paraphrase phrases carry the
+  pre-Phase-2 xfail baseline (31.8% deterministically routed, 15/22 fell to
+  the unstructured LLM turn) and flip to hard assertions as the Phase 2
+  unified intent router lands. The negative tier also hosts the realtime
+  group (user-directed 2026-10-09, reversing the 2026-10-08 current-word
+  routing): 当前/现在/目前/实时 + TPM phrasing asks for the live window,
+  which complete-hour Cube data cannot answer — no deterministic tier may
+  claim it (report_center's hourly regexes key on explicit 上一/最近…小时
+  wording only, and the magik deferral guard keeps it out of the daily
+  matcher); those phrases must reach the LLM agent turn, where the
+  signal-gated guardrail steers the model to the connected Grafana MCP tools
+  (hourly report only as the no-Grafana fallback). Any new routing vocabulary
+  or matcher change must extend the corpus, not just the regexes; live routing
+  regexes live only in `report_center/__init__.py` (the stale `phrases.py`
+  copies were removed — that module now holds only the shared param allowlist,
+  safe-ID pattern, and tenant-mention dataclass). ReportCenterTool registers a
+  signal-gated `runtime_context_provider` (broad report-signal regex) that
+  injects the anti-fabrication guardrail into report-ish LLM agent turns —
+  keep the signal regex wider than the routing vocabulary, since the
+  guardrail exists precisely for paraphrases the regexes cannot route.
+  AgentLoop logs the routing outcome per message (`Direct request route …
+  source=…` / `Routing outcome: agent_turn`) — keep that telemetry intact.
 
 ## Common File Locations
+
+- Report-chain Phase 2 (2026-10-10): `nanobot/agent/reporting/intent_router.py`
+  is a leaf module that classifies read-only semantic slots with one bounded
+  call to the session provider/model. `report_settings.report_intent_router`
+  overrides startup `reportIntentRouter`; page modes are off/fallback/primary,
+  default off pending real-model acceptance. Primary precedes only the legacy
+  usage matcher; exact report/admin routes and the subscription confirmation
+  chain remain authoritative. Never silently discard unsupported dates,
+  entities or filters; clarify instead. Realtime token-throughput phrasing
+  must bypass both report-center and legacy matchers. Mocked classification
+  tests are dispatch/schema evidence, not live model accuracy. Keep the
+  regex-only xfail baseline separate from `scripts/evaluate_report_intents.py`.
 
 - Config schema: `nanobot/config/schema.py`
 - Provider base / new provider template: `nanobot/providers/base.py`

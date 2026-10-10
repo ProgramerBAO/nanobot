@@ -257,6 +257,19 @@ class Tool(ABC):
 
         return False
 
+    def prefer_semantic_direct_request(self, text: str) -> bool:
+        """Opt in to one semantic attempt before legacy deterministic matches.
+
+        The default preserves all existing tools' ordering. Opt-in tools must
+        exclude their canonical fast path and side-effecting requests.
+        """
+        return False
+
+    @property
+    def direct_intent_priority(self) -> int:
+        """Semantic fallback priority only; higher runs before legacy classifiers."""
+        return 0
+
     async def classify_direct_request(
         self, text: str, runtime: LLMRuntime
     ) -> dict[str, Any] | None:

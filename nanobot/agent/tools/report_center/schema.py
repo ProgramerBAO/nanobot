@@ -40,6 +40,8 @@ _RETIRED_TEMPLATE_FLAG_FIELDS = frozenset(
 
 class ReportCenterToolConfig(Base):
     enable: bool = True
+    # Runtime page override wins; off preserves the existing route chain.
+    report_intent_router: Literal["off", "fallback", "primary"] = "off"
     # Cube is the only production report path in this phase; the Magik tool
     # remains a separate compatibility entry point when its own flag is on.
     cube_connector: bool = True
@@ -81,6 +83,11 @@ class ReportCenterToolConfig(Base):
     cube_machine_tpm_report: bool = True
     cube_customer_model_hourly_tpm: bool = True
     cube_customer_model_hourly_tpm_subscription: bool = True
+    # Capacity-redundancy analysis inside the hourly TPM report (2026-10-10):
+    # replaces the 机器真实使用 column with 机器冗余（闲M） and adds the
+    # conditional basis/attribution tables. A store override on the runtime
+    # flag (same key) wins per request; this is only the configured default.
+    hourly_tpm_capacity_analysis: bool = True
     report_management_v1: bool = True
     # Guided WebUI subscription editing and result-card policy follow the
     # same default-on decision; the legacy settings endpoint remains
@@ -180,6 +187,7 @@ _REPORT_CENTER_PARAMETERS = {
             "type": "string",
             "enum": [
                 "home",
+                "report_parse_failed",
                 "cube_report",
                 "health_report",
                 "cost_report",

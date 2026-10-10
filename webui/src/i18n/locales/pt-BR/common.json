@@ -1041,6 +1041,13 @@
       "permissions": {
         "rbacDescription": "Quando ativado, valida concessões de Connector, Template, clientes, modelos e modelos de assinatura."
       },
+      "router": {
+        "label": "Roteamento de relatórios em linguagem natural",
+        "off": "Desativado: manter o roteamento atual",
+        "fallback": "Complementar: classificar solicitações não reconhecidas",
+        "primary": "Prioritário: classificar antes do uso legado",
+        "description": "Aplicação imediata. O servidor valida clientes, modelos e permissões; solicitações incertas exigem esclarecimento. TPM em tempo real usa Grafana."
+      },
       "flags": {
         "title": "Chaves de recurso",
         "description": "As chaves aplicam-se imediatamente sem reiniciar o gateway; as substituições são salvas no banco de estado de relatórios e auditadas. Semântica de cálculo, limiares e conectores de extensão (Grafana/WeCom/DingTalk/TokenAPI de custo) continuam sendo configuração de implantação, exigindo alteração de configuração e reinício.",

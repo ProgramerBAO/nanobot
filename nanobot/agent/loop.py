@@ -1529,6 +1529,11 @@ class AgentLoop:
         metadata = ctx.msg.metadata or {}
         trusted_direct = metadata.get(INBOUND_META_DIRECT_TOOL)
         direct: tuple[str, dict[str, Any]] | None = None
+        # Routing telemetry (2026-10-09 report-chain overhaul, Phase 0b): the
+        # tier that produced `direct` plus the agent-turn fallthrough log give
+        # a measurable per-message routing outcome — the production twin of the
+        # tests/tools/test_routing_eval.py baseline corpus.
+        direct_source = ""
         if (
             isinstance(trusted_direct, dict)
             and (
@@ -1548,6 +1553,7 @@ class AgentLoop:
                 and isinstance(params, dict)
             ):
                 direct = (tool_name, params)
+                direct_source = "direct_resume"
 
         direct_raw = metadata.get("direct_request_text")
         if not isinstance(direct_raw, str) or not direct_raw.strip():
@@ -1574,7 +1580,9 @@ class AgentLoop:
                         direct_raw
                     )
                 )
-                is_subscription_candidate = subscription_signal or classifier_enabled
+                # ReportCenter now also classifies read-only reports. Only
+                # schedule signals may preempt the subscription/reference flow.
+                is_subscription_candidate = subscription_signal
                 if isinstance(parent_id, str) and parent_id and is_subscription_candidate:
                     # A quoted report is resolved from a server-side message
                     # reference. The model receives only a safe template/period
@@ -1620,6 +1628,11 @@ class AgentLoop:
                     report_params = report_center.match_direct_request(direct_raw)
                 if report_params is not None:
                     direct = ("report_center", report_params)
+                    direct_source = (
+                        "subscription_classifier"
+                        if subscription_preempted
+                        else "report_center_regex"
+                    )
                 elif not fixed_cube_reports and not subscription_preempted:
                     # In minimal/legacy deployments the center has no real Cube
                     # connector; preserve an explicitly registered compatibility Tool.
@@ -1628,17 +1641,21 @@ class AgentLoop:
                         legacy_params = legacy_tool.match_direct_request(direct_raw)
                         if legacy_params is not None:
                             direct = ("magik_cube_daily_report", legacy_params)
+                            direct_source = "legacy_regex"
         if result is None and direct is None:
             direct = await self.tools.resolve_direct_request(
                 direct_raw,
                 runtime=self.runtime_for_session(ctx.session),
                 history=ctx.session.messages,
             )
+            if direct is not None:
+                direct_source = "registry"
         if result is None and direct is not None:
             tool_name, params = direct
             logger.info(
-                "Direct request route: {} param_keys={}",
+                "Direct request route: {} source={} param_keys={}",
                 tool_name,
+                direct_source or "unknown",
                 sorted(str(key) for key in params),
             )
             direct_started = time.perf_counter()
@@ -1734,6 +1751,13 @@ class AgentLoop:
                 self.sessions.save(ctx.session)
                 self._clear_pending_user_turn(ctx.session)
             return "shortcut"
+        # Nothing deterministic claimed this message: it reaches the
+        # unstructured LLM agent turn (the fabrication-risk tier). Logged as
+        # the routing-outcome counterpart of the direct-route line above so
+        # freestyle fallthrough stays measurable in production logs.
+        logger.info(
+            "Routing outcome: agent_turn (no deterministic route claimed message)",
+        )
         return "dispatch"
 
     async def _state_build(self, ctx: TurnContext) -> str:

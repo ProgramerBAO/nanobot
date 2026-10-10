@@ -2,6 +2,47 @@
 
 This page collects contributor-facing notes for extending nanobot. User-facing setup and runtime options live in [`configuration.md`](./configuration.md).
 
+## Report intent routing verification (Phase 2)
+
+Windows PowerShell, repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/tools/test_report_intent_router.py tests/tools/test_routing_eval.py tests/agent/test_magik_report_intent_route.py tests/webui/test_reporting_api.py -q
+.\.venv\Scripts\python.exe -m ruff check nanobot/ tests/tools/test_report_intent_router.py scripts/evaluate_report_intents.py
+.\.venv\Scripts\python.exe -m compileall -q nanobot scripts/evaluate_report_intents.py
+```
+
+The provider fixtures test validation/dispatch only, not model accuracy. The
+regex-only corpus retains its historical paraphrase xfails independently; they
+must not be flipped to passing based on mocked model responses. The realtime
+token-throughput phrase is now a hard negative and RPM/current-week/current-month
+requests that unsupported runners would reinterpret must clarify.
+
+Explicit read-only live-model smoke (uses local Gateway configuration; sends
+fixture phrases to the configured model, but never queries Cube, creates jobs or
+sends Feishu messages):
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.evaluate_report_intents --today 2026-10-10 --limit 21
+.\.venv\Scripts\python.exe -m scripts.evaluate_report_intents --today 2026-10-10 --limit 21 --timeout-seconds 120 --max-tokens 8192
+```
+
+Update `--today` to the client date when checking relative windows. A nonzero exit
+means the corpus did not satisfy the selected classification gate. The second
+command is the user-approved functional evaluation budget for a slower reasoning
+model: elapsed time is recorded but not scored against the 3-second target. CLI
+deadlines are finite (1–180 seconds) and token limits are bounded (128–8192).
+These options do not modify Gateway or subscription timeouts. The first wide-budget
+run matched 13/21 before slot fixes; a mock pass is not a replacement for live results.
+Real Cube/Feishu integration acceptance is separate and has not been run.
+
+WebUI (working directory `webui`):
+
+```powershell
+npm.cmd run test -- --run src/tests/reports-settings.test.tsx
+npm.cmd run build
+```
+
 ## Adding an LLM Provider
 
 nanobot uses the provider registry in `nanobot/providers/registry.py` as the source of truth for LLM provider metadata. Most OpenAI-compatible providers need only two changes.

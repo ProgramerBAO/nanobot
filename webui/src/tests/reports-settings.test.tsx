@@ -52,6 +52,22 @@ describe("ReportsSettings feature flags", () => {
     vi.mocked(runReportingSettingsAction).mockReset();
   });
 
+  it("changes the semantic router mode through the authenticated management action", async () => {
+    const user = userEvent.setup();
+    const payload = payloadWithFlags();
+    payload.report_intent_router = { mode: "off", default: "off" };
+    vi.mocked(fetchReportingSettings).mockResolvedValue(payload);
+    vi.mocked(runReportingSettingsAction).mockResolvedValue({
+      ...payload, report_intent_router: { mode: "fallback", default: "off" },
+    });
+    render(<ReportsSettings token="token" />);
+    await user.click(await screen.findByRole("tab", { name: /Feature flags/ }));
+    await user.selectOptions(screen.getByLabelText("Natural-language report routing"), "fallback");
+    await waitFor(() => expect(runReportingSettingsAction).toHaveBeenCalledWith(
+      "token", "report_intent_router", { mode: "fallback" },
+    ));
+  });
+
   it("toggles a flag instantly through the feature_flag action", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchReportingSettings).mockResolvedValue(payloadWithFlags());

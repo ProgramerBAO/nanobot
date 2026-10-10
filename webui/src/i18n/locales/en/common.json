@@ -1041,6 +1041,13 @@
       "permissions": {
         "rbacDescription": "When enabled, validates Connector, Template, customer, model, and subscription-template grants."
       },
+      "router": {
+        "label": "Natural-language report routing",
+        "off": "Off: keep current routing",
+        "fallback": "Fallback: classify unmatched requests",
+        "primary": "Primary: classify before legacy usage matching",
+        "description": "Applies immediately. The server validates customers, models and permissions; uncertain requests ask for clarification. Live TPM uses Grafana."
+      },
       "flags": {
         "title": "Feature flags",
         "description": "Toggles apply immediately without a gateway restart; overrides are stored in the report state database and audited. Calculation semantics, thresholds, and extension connectors (Grafana/WeCom/DingTalk/cost TokenAPI) remain deployment configuration requiring a config change and restart.",

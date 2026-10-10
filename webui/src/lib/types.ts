@@ -1072,6 +1072,8 @@ export interface ReportingSettingsPayload {
     resource_types: string[];
   };
   feature_flags?: ReportingFeatureFlag[];
+  /** Server-owned semantic routing policy; changing it never grants data access. */
+  report_intent_router?: { mode: "off" | "fallback" | "primary"; default: string };
   storage: { backend: string; retention_days: number };
   construction?: {
     cube_health_semantics_v2: boolean;

@@ -951,6 +951,18 @@ export function ReportsSettings({ token }: { token: string }) {
           return acc;
         }, {});
         return <section className="space-y-4">
+          <div className="space-y-2 rounded-lg border p-3">
+            <label htmlFor="report-intent-router" className="text-sm font-medium">{t("settings.reports.router.label", { defaultValue: "自然语言报表路由" })}</label>
+            <select id="report-intent-router" className={SELECT_CLASS}
+              value={payload?.report_intent_router?.mode ?? "off"}
+              disabled={action !== null || !payload?.policy.management_enabled}
+              onChange={(event) => void run("report_intent_router", { mode: event.target.value })}>
+              <option value="off">{t("settings.reports.router.off", { defaultValue: "关闭：保留现有路由" })}</option>
+              <option value="fallback">{t("settings.reports.router.fallback", { defaultValue: "补充识别：固定问法未匹配时识别" })}</option>
+              <option value="primary">{t("settings.reports.router.primary", { defaultValue: "优先识别：固定入口后、旧用量匹配前识别" })}</option>
+            </select>
+            <p className="text-xs text-muted-foreground">{t("settings.reports.router.description", { defaultValue: "保存立即生效。客户、模型和权限仍由服务端校验；无法识别时提示补充信息。实时 TPM 使用 Grafana 查询。" })}</p>
+          </div>
           <div><h3 className="text-sm font-semibold">{t("settings.reports.flags.title", { defaultValue: "功能开关" })}</h3><p className="mt-1 text-xs text-muted-foreground">{t("settings.reports.flags.description", { defaultValue: "切换立即生效，无需重启网关；覆盖值保存在报表状态库并记录管理审计。计算口径、阈值与扩展连接（Grafana/企业微信/钉钉/成本 TokenAPI）仍属部署配置，需修改配置文件并重启。" })}</p></div>
           {Object.entries(groups).map(([group, items]) => (
             <div key={group} className="space-y-1">

@@ -53,6 +53,7 @@ CANONICAL_METRICS = frozenset(
         "ai.machine.used",
         "ai.machine.gpu_count",
         "ai.machine.inventory",
+        "ai.machine.capacity",
     }
 )
 

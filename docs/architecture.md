@@ -6,6 +6,28 @@ For the product-level mental model, read [`concepts.md`](./concepts.md) first.
 
 ## Core Flow
 
+### Cube report routing Phase 2 (2026-10-10)
+
+Exact report/management routes remain the fast path. A page-controlled
+`report_intent_router` setting (`off` by default, `fallback`, `primary`) enables
+one bounded structured classification using the session provider/model.
+`primary` precedes only the legacy usage matcher, not exact admin routes.
+The leaf module `nanobot/agent/reporting/intent_router.py` has no dependency on
+the reporting package, avoiding tool-discovery/connector-construction cycles.
+
+The model can emit read-only semantic slots only. Grounded names and explicit
+dates are checked before compiling an existing ReportCenter action; existing
+catalog resolution, RBAC, policies, planning and computation remain authoritative.
+Unsupported filters must clarify instead of being silently dropped. Mutations
+and subscription creation are absent from the report schema; subscription signals
+retain their separate confirmation path. Realtime TPM bypasses all historical
+report tiers and reaches the Grafana-capable agent turn.
+
+Timeout/malformed output produces a safe clarification result, never a second
+classifier or fabricated business output. Phase 3 entity matching and Phase 4
+learning are not implemented here. The configured live model did not meet the
+classification budget, so Phase 2 remains disabled pending real-model acceptance.
+
 ```mermaid
 flowchart LR
     Channel["Channel<br/>CLI, WebUI, chat apps"] --> Bus["MessageBus<br/>InboundMessage"]

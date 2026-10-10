@@ -1667,6 +1667,7 @@ def build_default_registry(
     # deployment-aware caller resolves these via default_registry_kwargs.
     wecom_renderer_enabled: bool = False,
     dingtalk_renderer_enabled: bool = False,
+    hourly_capacity_analysis_default: bool = True,
 ) -> ReportPluginRegistry:
     registry = ReportPluginRegistry()
     registry.register_renderer(TextChannelRenderer())
@@ -1710,7 +1711,10 @@ def build_default_registry(
     if cube_connector_active:
         registry.register_template(MultiCustomerModelDailyBriefTemplate(timezone=timezone))
         registry.register_template(MultiCustomerModelWeeklyBriefTemplate(timezone=timezone))
-        registry.register_template(CubeCustomerModelHourlyTpmTemplate(timezone_name=timezone))
+        registry.register_template(CubeCustomerModelHourlyTpmTemplate(
+            timezone_name=timezone,
+            capacity_analysis_default=hourly_capacity_analysis_default,
+        ))
         registry.register_template(CubeMachineTpmTemplate(timezone_name=timezone))
         registry.register_template(
             CubeHealthTemplate(
@@ -1806,4 +1810,7 @@ def default_registry_kwargs(
         "health_thresholds": getattr(reporting_config, "health_thresholds", None),
         "wecom_renderer_enabled": flag("wecom_renderer"),
         "dingtalk_renderer_enabled": flag("dingtalk_renderer"),
+        # Configured default for the hourly capacity-analysis runtime flag
+        # (store override wins per request, resolved inside the template).
+        "hourly_capacity_analysis_default": flag("hourly_tpm_capacity_analysis", True),
     }
