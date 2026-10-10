@@ -10,6 +10,8 @@
 
 ## 配置
 
+2026-10-10 合并补验：实际本地项目 `D:\Code\bots\nanobot` 的 main=`07fbaed` 与 GitHub一致、工作区干净。使用其 Python3.14.6、MCP1.29.0、httpx0.28.1、aiohttp3.14.3、lark-oapi1.7.3、pytest9.1.1、ruff0.16.3 验证集成和报表兼容；未升级该虚拟环境依赖。此前3.13/MCP1.30结果是历史证据，不替代本轮补验。运行中的网关未重启，其实际加载版本未检查。
+
 接收器与 MCP 仅从受控环境读取以下真实字段，非法值启动失败且不输出输入。secret 不进入模型上下文、结果、Git 或日志。
 
 | 环境变量 | 契约 |
@@ -71,7 +73,7 @@ unknown 人工核对：先停用 Trail 订阅与接收器，备份 inbox.db 及 
 .venv\Scripts\python.exe -m pytest tests/test_trail_integration.py tests/test_trail_tool_boundary.py -q --cov=nanobot.integrations.trail --cov-report=term-missing --cov-fail-under=75
 ```
 
-扩大回归覆盖现有 registry/config/skills/MCP连接/调用/loop。既有 `tests/agent/test_mcp_reconnect_crash.py::test_mcp_reconnect_during_shutdown_does_not_crash` 在原始基线+mcp1.30也失败（5s reconnect event wait 超时）；不可扩大timeout或跳过断言伪造绿色。参见 TECH_DEBT。本轮跨仓库脚本 `scripts/verify_trail_joint.py` 只由 Trail TestNanobotJointHTTP 启动，不手动填业务账号。真实数据库/签名/stdio与飞书替身分别报告。
+扩大回归覆盖现有 registry/config/skills/MCP连接/调用/loop。既有 `tests/agent/test_mcp_reconnect_crash.py::test_mcp_reconnect_during_shutdown_does_not_crash` 在原始基线+mcp1.30也失败（5s reconnect event wait 超时）；不可扩大timeout或跳过断言伪造绿色。参见 TECH_DEBT 的 TD-20261010-003。本轮跨仓库脚本 `scripts/verify_trail_joint.py` 只由 Trail TestNanobotJointHTTP 启动，不手动填业务账号。真实数据库/签名/stdio与飞书替身分别报告。
 
 Python wheel验证使用已有 NANOBOT_SKIP_WEBUI_BUILD=1 跳过未改动的 WebUI；只证明Python插件及skills打包，不代表WebUI构建通过。
 

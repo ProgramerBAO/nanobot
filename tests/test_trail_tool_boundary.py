@@ -40,3 +40,21 @@ def test_default_registry_preserves_existing_behavior():
 
     registry.register(Dummy())
     assert registry.has("exec")
+
+
+async def test_restricted_profile_cannot_dispatch_excluded_report_router():
+    """The new main's semantic/contextual routes must respect registration scope."""
+    registry = ToolRegistry(allowed_names=[])
+
+    class Report:
+        name = "report_center"
+
+        def match_direct_request(self, text):
+            raise AssertionError("excluded report matcher must not run")
+
+        def runtime_context_provider(self):
+            raise AssertionError("excluded context provider must not run")
+
+    registry.register(Report())
+    assert registry.get_runtime_context_providers() == []
+    assert await registry.resolve_direct_request("上一小时 TPM", runtime=None, history=[{"role": "user", "content": "report"}]) is None

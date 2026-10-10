@@ -2,6 +2,8 @@
 
 ## 2026-10-10：可选 Trail 单人只读试点
 
+本地合入补验（2026-10-10）：基于 GitHub/实际本地一致的 `07fbaed` 合并，保留报表意图路由与小时 TPM 冗余分析及其默认开关。工具注册白名单默认为 null，已有 profile 不需增加配置；仅专用 Trail profile 显式限制工具。未改变模型/飞书凭据或重启网关；新增 skills 可被发现，但通知接收与 MCP 仍需显式配置。实际本地运行时和补验结果见 [合并证据](TRAIL_VALIDATION.md)。
+
 新增独立持久化接收器、三类模板提醒、五个只读 MCP 工具及三个 Trail skills；不依赖模型发送通知，不修改工单。单独 profile 明确绑定本人、普通服务账号和项目，exact allowedTools 阻止其他工具。既有 profile 默认行为保持。详见 [Trail 集成](TRAIL_INTEGRATION.md)。代码实现与真实部署分开：飞书收发、模型追问、扫描周期、回滚演练尚待验收，未改现有 bot 配置。
 
 > 使用者上手教程见 [USER_GUIDE.md](USER_GUIDE.md)（公司内部分发入口）；

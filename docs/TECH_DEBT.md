@@ -1,14 +1,15 @@
 # 技术债登记
 
-## TD-20261010-001 · MCP shutdown reconnect 基线失败
+## TD-20261010-003 · MCP shutdown reconnect 基线失败
 
 - 位置：tests/agent/test_mcp_reconnect_crash.py::test_mcp_reconnect_during_shutdown_does_not_crash。
 - 类型：测试/依赖契约；原因：本轮扩大回归发现 mcp1.30.0 下 5s reconnect_started.wait 超时，在未修改 fa51367 基线上同命令复现。
 - 利息：影响 MCP 可靠性门禁可信度，不能据此声称全量通过；没有改变 timeout 或断言。
 - 偿还触发：下一次 MCP 可靠性专项或升级依赖之前；成本：半天至一天，核对 transport idle/reconnect 协议及 fixture。
 - owner：bot 管理者；deadline：试点部署前确认处置；证据由 Trail 本轮评审卡记录。
+- 合并补验：实际本地Python3.14.6/MCP1.29.0运行该文件2个测试PASS/exit0；不证明MCP1.30的历史失败已修复。编号由001调整为003，避让已有报表债务。
 
-## TD-20261010-002 · Trail 真实飞书与模型验收缺口
+## TD-20261010-004 · Trail 真实飞书与模型验收缺口
 
 - 位置：docs/TRAIL_INTEGRATION.md、独立部署 profile。
 - 类型：测试/运维；原因：部署 SHA、profile、本人 open_id、模型配置及专用Token尚未提供；不访问/改动既有 bot 私密配置。

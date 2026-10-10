@@ -322,6 +322,12 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
 
 ## Cross-device Handoff
 
+- Confirm the actual working repository with the user before cross-project
+  integration. Announce any new branch before creating it; prefer an existing
+  integration branch when one already exists.
+- Preserve work from other chats: never auto-stash, overwrite or commit their
+  uncommitted changes. Verify the current local/remote baseline before merging.
+
 - At the start of work, read `docs/WORK_CONTEXT.md` and `docs/CODEX_SESSIONS.md` when
   they exist, then run `git status --short --branch`.
 - Keep durable project rules in this file or `.agent/`; keep current task state in
