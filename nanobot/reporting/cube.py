@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -43,6 +45,7 @@ from nanobot.reporting.registry import (
     TemplateManifest,
     TemplatePlugin,
 )
+from nanobot.reporting.store import get_report_state_store
 from nanobot.utils.number_format import format_quantity_compact
 from nanobot.utils.report_failures import classify_report_failure
 
@@ -74,12 +77,18 @@ _CUBE_MACHINE_METRICS = frozenset(
 # of _CUBE_MACHINE_METRICS because that set doubles as the per-model
 # machine TPM template's required_metrics contract.
 _CUBE_INVENTORY_METRICS = frozenset({"ai.machine.inventory"})
+# Capacity-redundancy marker (user-approved 2026-10-10): gates the hourly
+# report's extra baseline/current/token sub-jobs exactly like the inventory
+# marker above. Only the hourly TPM plan requests it, and only while the
+# runtime flag hourly_tpm_capacity_analysis is enabled.
+_CUBE_CAPACITY_METRICS = frozenset({"ai.machine.capacity"})
 _CUBE_METRICS = (
     frozenset({"ai.usage.tokens", "ai.requests", "ai.tpm.avg", "ai.tpm.peak"})
     | _CUBE_HEALTH_METRICS
     | _CUBE_ACCOUNT_METRICS
     | _CUBE_MACHINE_METRICS
     | _CUBE_INVENTORY_METRICS
+    | _CUBE_CAPACITY_METRICS
 )
 _CUBE_DIMENSIONS = frozenset(
     {
@@ -109,6 +118,30 @@ _ALLOWED_FILTERS = frozenset(
         "cluster",
     }
 )
+
+# --- Capacity-redundancy analysis (user-approved 2026-10-10) -----------------
+#
+# 冗余 = 占用 − ⌈当前小时负载 ÷ 30 天最佳单机吞吐⌉ per (model, cluster,
+# card-type) group. The per-machine throughput basis is token-average
+# (tpmPerMachine = totalTokens ÷ machineCount ÷ 60, live-verified 2026-10-10:
+# a 30-day hourly window returns one complete 720-point series per named
+# cluster group), which the user confirmed over the noisier minute-peak
+# basis. The 30-day baseline is computed once per calendar day and cached in
+# report_settings; a failed baseline or token query is informational only.
+_CAPACITY_BASELINE_WINDOW_DAYS = 30
+_CAPACITY_MIN_BASELINE_DAYS = 7
+_CAPACITY_BASELINE_KEY_PREFIX = "hourly_capacity_baseline:"
+# model-machine-usage reports gpuProduct with hyphens ("NVIDIA-B30Z") while
+# machine-tpm-trend uses spaces ("NVIDIA B30Z") — live-verified 2026-10-10.
+# Group joins collapse separator/case differences; the raw trend value stays
+# the display string.
+_CAPACITY_GPU_NORMALIZE_RE = re.compile(r"[\s_-]+")
+
+
+def _capacity_gpu_key(gpu_product: str) -> str:
+    """Return the join key for a card-type name across the two machine sources."""
+
+    return _CAPACITY_GPU_NORMALIZE_RE.sub("", gpu_product).upper()
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +447,72 @@ class CubeConnector(ConnectorPlugin):
         )
         return aliases[0] if aliases else tenant.name
 
+    def _capacity_baseline_cache(self, key: str, day_key: str) -> dict[str, Any] | None:
+        """Read the day-keyed 30-day baseline cache; stale or corrupt → None.
+
+        The store singleton is process-wide (SQLite, lock-guarded); a read
+        failure must degrade to a fresh query, never fail the report.
+        """
+
+        try:
+            raw = get_report_state_store().setting(key)
+            if not raw:
+                return None
+            cached = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(cached, dict) or cached.get("date") != day_key:
+            return None
+        return cached
+
+    def _capacity_baseline_store(self, key: str, payload: dict[str, Any]) -> None:
+        """Persist today's baseline best-effort (cache write loss only costs a recompute)."""
+
+        try:
+            get_report_state_store().set_setting(
+                key, json.dumps(payload, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _capacity_group_row(
+        *,
+        model: str,
+        cluster: str,
+        gpu_product: str,
+        aggregation: str,
+        source: str,
+        value: float,
+        extra: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build one ``ai.machine.capacity`` row for a (model, cluster, card) group.
+
+        The three capacity sub-jobs (allocation snapshot, target-hour usage,
+        30-day baseline) each emit their own group rows; the template merges
+        them on (model, cluster, ``capacity_gpu_key``). ``capacity_gpu_key``
+        exists because the two machine sources spell card types differently
+        ("NVIDIA B30Z" vs "NVIDIA-B30Z", live-verified 2026-10-10).
+        """
+
+        row: dict[str, Any] = {
+            "period": "current",
+            "model": model,
+            "endpoint": "",
+            "tenant_id": "",
+            "metric_scope": "platform_model_group",
+            "metric": "ai.machine.capacity",
+            "value": value,
+            "unit": "machines",
+            "aggregation": aggregation,
+            "source": source,
+            "cluster": cluster,
+            "gpu_product": gpu_product,
+            "capacity_gpu_key": _capacity_gpu_key(gpu_product),
+        }
+        row.update(extra)
+        return row
+
     async def _query_hourly_endpoint_tpm(self, query: ReportQuery) -> ReportDataset:
         """Read hourly ``maxTpm``/``avgTpm`` from Cube's endpoint TPM API.
 
@@ -465,6 +564,11 @@ class CubeConnector(ConnectorPlugin):
         # hourly connector contract stays backward compatible: callers that
         # do not request ai.machine.inventory never pay the extra call.
         include_inventory = "ai.machine.inventory" in query.metrics
+        # Same opt-in shape for the capacity analysis (2026-10-10): the
+        # marker is requested only while the hourly_tpm_capacity_analysis
+        # runtime flag is enabled, so a disabled flag adds zero queries and
+        # the dataset stays byte-identical to the legacy report.
+        include_capacity = "ai.machine.capacity" in query.metrics
 
         async with MagikCubeClient(self._config, transport=self._transport) as client:
             async def run_tpm_job(
@@ -572,13 +676,15 @@ class CubeConnector(ConnectorPlugin):
                 seen_machine: set[tuple[str, str]] = set()
                 machine_total = 0.0
                 matched_machine = False
+                group_allocations: dict[tuple[str, str], dict[str, Any]] = {}
                 for item in data.get("list") or []:
                     if not isinstance(item, dict):
                         continue
-                    key = (
-                        str(item.get("clusterName") or item.get("cluster") or ""),
-                        str(_pick(item, "gpuProduct", "gpu_product", default="") or ""),
+                    cluster_name = str(item.get("clusterName") or item.get("cluster") or "")
+                    gpu_product = str(
+                        _pick(item, "gpuProduct", "gpu_product", default="") or ""
                     )
+                    key = (cluster_name, gpu_product)
                     if key in seen_machine:
                         continue
                     seen_machine.add(key)
@@ -588,8 +694,26 @@ class CubeConnector(ConnectorPlugin):
                     if machine_count is not None:
                         machine_total += machine_count
                         matched_machine = True
+                        if include_capacity:
+                            group_allocations[(cluster_name, gpu_product)] = {
+                                "capacity_allocated": _as_optional_int(
+                                    _pick(item, "machineCount", "machine_count")
+                                ),
+                                "capacity_gpu_display": gpu_product,
+                            }
                 if not matched_machine:
                     return [], [f"{model_filter}: machine_count no_data"]
+                capacity_rows: list[dict[str, Any]] = []
+                for (cluster_name, gpu_product), fields in group_allocations.items():
+                    capacity_rows.append(self._capacity_group_row(
+                        model=model_filter,
+                        cluster=cluster_name,
+                        gpu_product=fields["capacity_gpu_display"],
+                        aggregation="current_allocation_group",
+                        source="Cube Admin / analysis/model-machine-usage/query",
+                        value=float(fields["capacity_allocated"] or 0.0),
+                        extra=fields,
+                    ))
                 return [
                     {
                         "period": "current", "timestamp": target_start.isoformat(),
@@ -597,15 +721,15 @@ class CubeConnector(ConnectorPlugin):
                         "hour": target_start.strftime("%H:00"),
                         "model": model_filter, "endpoint": "",
                         # The machine-usage route has no tenant dimension. Keep
-                        # this row platform-scoped instead of attaching the
-                        # same machine count to every related customer.
+                        # this row platform-scoped instead of attaching
+                        # the same machine count to every related customer.
                         "tenant_id": "",
                         "metric_scope": "platform_model",
                         "metric": "ai.machine.count", "value": machine_total,
                         "unit": "machines", "aggregation": "current_allocation_sum",
                         "source": "Cube Admin / analysis/model-machine-usage/query",
                     }
-                ], []
+                ] + capacity_rows, []
 
             async def run_usage_job(
                 model_filter: str,
@@ -632,6 +756,7 @@ class CubeConnector(ConnectorPlugin):
                 seen_usage: set[tuple[str, str, str]] = set()
                 usage_total = 0.0
                 matched_usage = False
+                group_usage: dict[tuple[str, str], dict[str, Any]] = {}
                 for point in data.get("points") or []:
                     if not isinstance(point, dict):
                         continue
@@ -641,10 +766,14 @@ class CubeConnector(ConnectorPlugin):
                     local_timestamp = timestamp.astimezone(target_start.tzinfo)
                     if not (target_start <= local_timestamp < target_end):
                         continue
+                    cluster_name = str(point.get("cluster") or "")
+                    gpu_product = str(
+                        _pick(point, "gpuProduct", "gpu_product", default="") or ""
+                    )
                     key = (
                         timestamp.isoformat(),
-                        str(point.get("cluster") or ""),
-                        str(_pick(point, "gpuProduct", "gpu_product", default="") or ""),
+                        cluster_name,
+                        gpu_product,
                     )
                     if key in seen_usage:
                         continue
@@ -652,11 +781,42 @@ class CubeConnector(ConnectorPlugin):
                     machine_count = self._as_float(
                         _pick(point, "machineCount", "machine_count", default=None)
                     )
+                    tpm_per_machine = self._as_float(
+                        _pick(point, "tpmPerMachine", "tpm_per_machine", default=None)
+                    )
                     if machine_count is not None:
                         usage_total += machine_count
                         matched_usage = True
+                        # The target window is one complete hour, so each
+                        # (cluster, card) group contributes at most one point;
+                        # a second point for the same group would be a repeat.
+                        if include_capacity and (cluster_name, gpu_product) not in group_usage:
+                            group_usage[(cluster_name, gpu_product)] = {
+                                "capacity_used_machines": _as_optional_int(
+                                    _pick(point, "machineCount", "machine_count")
+                                ),
+                                "capacity_current_per_machine": tpm_per_machine,
+                                "capacity_current_tpm": (
+                                    tpm_per_machine * machine_count
+                                    if tpm_per_machine is not None
+                                    else None
+                                ),
+                                "capacity_gpu_display": gpu_product,
+                            }
                 if not matched_usage:
                     return [], [f"{model_filter}: machine_used no_data"]
+                usage_capacity_rows = [
+                    self._capacity_group_row(
+                        model=model_filter,
+                        cluster=cluster_name,
+                        gpu_product=fields["capacity_gpu_display"],
+                        aggregation="hourly_group_usage",
+                        source="Cube Admin / analysis/machine-tpm-trend/query",
+                        value=float(fields["capacity_used_machines"] or 0.0),
+                        extra=fields,
+                    )
+                    for (cluster_name, _gpu), fields in group_usage.items()
+                ]
                 return [
                     {
                         "period": "current", "timestamp": target_start.isoformat(),
@@ -669,7 +829,7 @@ class CubeConnector(ConnectorPlugin):
                         "unit": "machines", "aggregation": "hourly_machine_count",
                         "source": "Cube Admin / analysis/machine-tpm-trend/query",
                     }
-                ], []
+                ] + usage_capacity_rows, []
 
             async def run_cluster_summary_job() -> tuple[list[dict[str, Any]], list[str]]:
                 # machine-usage-summary is the platform-level cluster inventory
@@ -752,6 +912,171 @@ class CubeConnector(ConnectorPlugin):
                     return [], ["machine_inventory no_data"]
                 return inventory_rows, inventory_warnings
 
+            async def run_capacity_job(
+                model_filter: str,
+            ) -> tuple[list[dict[str, Any]], list[str]]:
+                # 30-day best per-machine throughput baseline per (cluster,
+                # card) group (user-approved 2026-10-10). Computed once per
+                # target calendar day and cached in report_settings, so the
+                # hourly cadence pays one 30-day query per model per day.
+                # Informational: a failed baseline keeps the report complete
+                # and the model renders 冗余 as 暂不可用.
+                day_key = target_start.date().isoformat()
+                cache_key = f"{_CAPACITY_BASELINE_KEY_PREFIX}{model_filter}"
+                cached = self._capacity_baseline_cache(cache_key, day_key)
+                if cached is None:
+                    window_start = target_start - timedelta(days=_CAPACITY_BASELINE_WINDOW_DAYS)
+                    body = {
+                        "startTime": window_start.astimezone(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "endTime": target_start.astimezone(timezone.utc)
+                        .isoformat(timespec="milliseconds")
+                        .replace("+00:00", "Z"),
+                        "model": model_filter,
+                        "cluster": "",
+                        "timeLevel": "TIME_LEVEL_HOUR",
+                        "registerChannels": [],
+                        "noloading": True,
+                    }
+                    try:
+                        data = await client.request(
+                            "POST", "analysis/machine-tpm-trend/query", json_body=body
+                        )
+                    except Exception as exc:
+                        # A model can 500 on this route for every window while
+                        # its usage data still flows (live-verified 2026-10-10
+                        # with DeepSeek-R1); one model must not fail the run.
+                        return [], [
+                            f"{model_filter}: capacity_baseline {classify_report_failure(exc)}"
+                        ]
+                    baseline_groups: dict[tuple[str, str], dict[str, Any]] = {}
+                    for point in data.get("points") or []:
+                        if not isinstance(point, dict):
+                            continue
+                        machine_count = self._as_float(
+                            _pick(point, "machineCount", "machine_count", default=None)
+                        )
+                        if machine_count is None or machine_count < 1:
+                            # Not-yet-elapsed hours return zero placeholders
+                            # with an empty cluster (live-verified 2026-10-10).
+                            continue
+                        timestamp = self._parse_timestamp(point.get("timestamp"))
+                        if timestamp is None:
+                            continue
+                        local_timestamp = timestamp.astimezone(target_start.tzinfo)
+                        if not (window_start <= local_timestamp < target_start):
+                            continue
+                        cluster_name = str(point.get("cluster") or "")
+                        gpu_product = str(
+                            _pick(point, "gpuProduct", "gpu_product", default="") or ""
+                        )
+                        group = baseline_groups.setdefault(
+                            (cluster_name, gpu_product),
+                            {"best": None, "dates": set()},
+                        )
+                        group["dates"].add(local_timestamp.date().isoformat())
+                        tpm_per_machine = self._as_float(
+                            _pick(point, "tpmPerMachine", "tpm_per_machine", default=None)
+                        )
+                        if tpm_per_machine is not None and (
+                            group["best"] is None or tpm_per_machine > group["best"]
+                        ):
+                            group["best"] = tpm_per_machine
+                    cached = {
+                        "date": day_key,
+                        "groups": {
+                            f"{cluster_name}\u0000{gpu_product}": {
+                                "best": group["best"],
+                                "days": len(group["dates"]),
+                            }
+                            for (cluster_name, gpu_product), group in baseline_groups.items()
+                        },
+                    }
+                    self._capacity_baseline_store(cache_key, cached)
+                baseline_rows: list[dict[str, Any]] = []
+                for composite, info in cached.get("groups", {}).items():
+                    cluster_name, gpu_product = str(composite).split("\u0000", 1)
+                    baseline_rows.append(
+                        self._capacity_group_row(
+                            model=model_filter,
+                            cluster=cluster_name,
+                            gpu_product=gpu_product,
+                            aggregation="capacity_baseline_30d",
+                            source="Cube Admin / analysis/machine-tpm-trend/query",
+                            value=float(info.get("best") or 0.0),
+                            extra={
+                                "capacity_best_tpm": info.get("best"),
+                                "capacity_baseline_days": info.get("days"),
+                                "capacity_baseline_date": str(cached.get("date") or ""),
+                                "capacity_gpu_display": gpu_product,
+                            },
+                        )
+                    )
+                return baseline_rows, []
+
+            async def run_token_job(
+                tenant_id: str, model_filter: str
+            ) -> tuple[list[dict[str, Any]], list[str]]:
+                # Hourly token totals per (tenant, model) power the
+                # multi-customer proportional attribution. Only models shared
+                # by two or more report tenants are queried. Buckets are
+                # labeled "YYYY-MM-DD HH" in the report timezone
+                # (live-verified 2026-10-10); totalTokens arrives as a string.
+                body = {
+                    "startTime": target_start.isoformat(),
+                    "endTime": target_end.isoformat(),
+                    "tenantId": tenant_id,
+                    "topN": 0,
+                    "timeLevel": "TIME_LEVEL_HOUR",
+                    "model": model_filter,
+                }
+                try:
+                    data = await client.request(
+                        "POST",
+                        "analysis/active-tenant-daily-usage/query",
+                        json_body=body,
+                    )
+                except Exception as exc:
+                    return [], [
+                        f"{model_filter}: capacity_tokens {classify_report_failure(exc)}"
+                    ]
+                hour_label = target_start.strftime("%Y-%m-%d %H")
+                tokens: float | None = None
+                for item in data.get("items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("tenantId") or tenant_id) != tenant_id:
+                        continue
+                    for point in item.get("points") or []:
+                        if not isinstance(point, dict):
+                            continue
+                        if str(point.get("date") or "").strip() != hour_label:
+                            continue
+                        raw_tokens = self._as_float(
+                            _pick(point, "totalTokens", "total_tokens", default=None)
+                        )
+                        if raw_tokens is not None:
+                            tokens = raw_tokens
+                if tokens is None:
+                    return [], [f"{model_filter}: capacity_tokens no_data"]
+                return [
+                    {
+                        "period": "current",
+                        "timestamp": target_start.isoformat(),
+                        "date": target_start.date().isoformat(),
+                        "hour": target_start.strftime("%H:00"),
+                        "model": model_filter,
+                        "endpoint": "",
+                        "tenant_id": tenant_id,
+                        "metric": "ai.usage.tokens",
+                        "value": tokens,
+                        "unit": "tokens",
+                        "aggregation": "hourly_tokens_total",
+                        "source": "Cube Admin / analysis/active-tenant-daily-usage/query",
+                    }
+                ], []
+
             # The client enforces its own max_concurrency semaphore per
             # request, so this fan-out is bounded at the transport layer.
             for job_rows, job_warnings in await asyncio.gather(
@@ -767,6 +1092,23 @@ class CubeConnector(ConnectorPlugin):
             ]
             if include_inventory:
                 machine_jobs.append(run_cluster_summary_job())
+            if include_capacity:
+                machine_jobs.extend(
+                    run_capacity_job(model_filter) for model_filter in unique_models
+                )
+                # Token shares are only consumed by the attribution table for
+                # models shared across report tenants; single-tenant models
+                # never pay the extra hourly-token query.
+                multi_tenant_models = {
+                    model_filter
+                    for model_filter in unique_models
+                    if sum(1 for _tenant, m in jobs if m == model_filter) >= 2
+                }
+                machine_jobs.extend(
+                    run_token_job(tenant_id, model_filter)
+                    for tenant_id, model_filter in jobs
+                    if model_filter in multi_tenant_models
+                )
             for job_rows, job_warnings in await asyncio.gather(*machine_jobs):
                 rows.extend(job_rows)
                 warnings.extend(job_warnings)
@@ -779,10 +1121,15 @@ class CubeConnector(ConnectorPlugin):
         # source shares the upstream ingestion lag, and the inventory table
         # is a supplementary snapshot — neither may downgrade the report
         # (machine_used user-confirmed 2026-09-15, inventory 2026-09-16).
+        # Capacity warnings (capacity_baseline / capacity_tokens, 2026-10-10)
+        # follow the same rule: a missing baseline or token bucket renders
+        # 暂不可用 instead of failing the hourly report.
         actionable_warnings = [
             warning
             for warning in warnings
-            if ": machine_used" not in warning and "machine_inventory" not in warning
+            if ": machine_used" not in warning
+            and "machine_inventory" not in warning
+            and ": capacity_" not in warning
         ]
         if not has_peak or not has_avg:
             # Peak and mean are authoritative core metrics. A machine-only
@@ -2287,7 +2634,7 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
     manifest = TemplateManifest(
         template_id="usage_customer_model_hourly_tpm",
         display_name="多客户多模型小时 TPM 报告",
-        version="2.1",
+        version="2.2",
         category="usage",
         periods=frozenset({"recent1h"}),
         required_metrics=frozenset(
@@ -2297,15 +2644,38 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 "ai.machine.count",
                 "ai.machine.used",
                 "ai.machine.inventory",
+                "ai.machine.capacity",
             }
         ),
         required_dimensions=frozenset({"tenant", "model", "endpoint", "date", "hour"}),
         connector_ids=frozenset({"magik_cube"}),
-        description="按客户分组展示上一完整小时的模型级 TPM 峰值、均值和平台机器数，附集群机器库存快照",
+        description=(
+            "按客户分组展示上一完整小时的模型级 TPM 峰值、均值、机器占用与"
+            "冗余算力（闲=零使用子集），附冗余口径表、多客户折算表与集群机器库存快照"
+        ),
     )
 
-    def __init__(self, *, timezone_name: str = "Asia/Shanghai") -> None:
+    def __init__(
+        self,
+        *,
+        timezone_name: str = "Asia/Shanghai",
+        capacity_analysis_default: bool = True,
+    ) -> None:
         self.timezone_name = timezone_name
+        # Configured default for the runtime flag; the store override wins per
+        # request (same resolution order as ReportCenterTool._flag).
+        self._capacity_analysis_default = capacity_analysis_default
+
+    def _capacity_analysis_enabled(self) -> bool:
+        """Runtime flag: ``report_feature_flags`` store override wins per request."""
+
+        try:
+            overrides = get_report_state_store().get_feature_flags()
+        except Exception:
+            return self._capacity_analysis_default
+        if isinstance(overrides, dict) and "hourly_tpm_capacity_analysis" in overrides:
+            return bool(overrides["hourly_tpm_capacity_analysis"])
+        return self._capacity_analysis_default
 
     def plan(self, intent: ReportIntent) -> tuple[ReportQuery, ...]:
         tz = ZoneInfo(self.timezone_name)
@@ -2324,15 +2694,21 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 },
                 key=str.casefold,
             )
+        metrics = [
+            "ai.tpm.peak",
+            "ai.tpm.avg",
+            "ai.machine.count",
+            "ai.machine.used",
+            "ai.machine.inventory",
+        ]
+        if self._capacity_analysis_enabled():
+            # The capacity marker gates the connector's extra baseline/usage/
+            # token sub-jobs; a disabled flag keeps the legacy report (and its
+            # query volume) byte-identical.
+            metrics.append("ai.machine.capacity")
         return (ReportQuery(
             connector_id=intent.connector_id,
-            metrics=(
-                "ai.tpm.peak",
-                "ai.tpm.avg",
-                "ai.machine.count",
-                "ai.machine.used",
-                "ai.machine.inventory",
-            ),
+            metrics=tuple(metrics),
             dimensions=("tenant", "model", "endpoint", "date", "hour"),
             # The Cube route returns hourly points from startDate 00:00
             # through endDate 00:00 inclusive; a same-day range yields only
@@ -2349,16 +2725,24 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
 
     @staticmethod
     def _machine_columns(
-        allocation: float | None, used: float | None
+        allocation: float | None,
+        used: float | None,
+        redundant: int | None,
+        *,
+        capacity_mode: bool,
     ) -> tuple[str, str, int]:
-        """Build the ``机器占用`` / ``机器真实使用`` cells for one model row.
+        """Build the ``机器占用`` plus second machine cell for one model row.
 
-        The two platform-level sources render as separate table columns
-        (user-confirmed 2026-09-16 table layout). Idle is flagged inside the
-        usage column when allocation minus usage reaches one machine
-        (user-confirmed 2026-09-15). A missing usage value keeps the
-        allocation visible without guessing idle; negative differences
-        (machines removed after the hour) stay as raw values with no tag.
+        Legacy mode (capacity flag off) keeps the user-confirmed 2026-09-16
+        layout: ``机器占用`` / ``机器真实使用`` with the (闲N) tag inside
+        the usage column when allocation minus usage reaches one machine
+        (2026-09-15). Capacity mode (user-directed 2026-10-10) replaces the
+        usage column with ``机器冗余`` — allocation minus ⌈current-hour load
+        ÷ 30-day best per-machine throughput⌉ — while the idle tag stays as
+        the zero-usage subset of the redundancy; used machines remain
+        derivable as allocation − idle. Missing usage keeps the allocation
+        visible without guessing either value; negative differences
+        (machines removed after the hour) carry no tag.
         """
 
         if allocation is None:
@@ -2366,9 +2750,15 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         if used is None:
             return f"{allocation:.0f}", "—", 0
         idle = int(allocation - used)
-        if idle >= 1:
-            return f"{allocation:.0f}", f"{used:.0f}（闲{idle}）", idle
-        return f"{allocation:.0f}", f"{used:.0f}", 0
+        idle_tag = f"（闲{idle}）" if idle >= 1 else ""
+        if capacity_mode:
+            if redundant is None:
+                second_text = f"—{idle_tag}"
+            else:
+                second_text = f"{redundant:.0f}{idle_tag}"
+        else:
+            second_text = f"{used:.0f}{idle_tag}"
+        return f"{allocation:.0f}", second_text, idle if idle >= 1 else 0
 
     def analyze(self, datasets: tuple[ReportDataset, ...]) -> ReportDocument:
         """Group the previous complete hour's TPM by customer and model.
@@ -2390,16 +2780,55 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         window_end = str(dataset.metadata.get("window_end") or "")
         # Tenant/model TPM values keyed by (tenant, model, endpoint); machine
         # allocation and usage are platform rows keyed by model only; cluster
-        # inventory rows are platform rows keyed by cluster only.
+        # inventory rows are platform rows keyed by cluster only; capacity
+        # group rows are keyed by (model, cluster, normalized card type) and
+        # merged from the three connector sub-jobs.
         endpoint_values: dict[tuple[str, str, str], dict[str, Any]] = defaultdict(dict)
         machine_by_model: dict[str, float] = {}
         machine_used_by_model: dict[str, float] = {}
         cluster_inventory: list[dict[str, Any]] = []
+        capacity_groups: dict[tuple[str, str, str], dict[str, Any]] = defaultdict(dict)
+        token_by_scope: dict[tuple[str, str], float] = {}
         for row in dataset.rows:
             metric = str(row.get("metric") or "")
             model = str(row.get("model") or "未命名模型")
             if metric == "ai.machine.inventory":
                 cluster_inventory.append(row)
+                continue
+            if metric == "ai.machine.capacity":
+                gpu_key = str(row.get("capacity_gpu_key") or "")
+                if gpu_key:
+                    group = capacity_groups[
+                        (model, str(row.get("cluster") or ""), gpu_key)
+                    ]
+                    for field in (
+                        "capacity_allocated",
+                        "capacity_used_machines",
+                        "capacity_current_per_machine",
+                        "capacity_current_tpm",
+                        "capacity_best_tpm",
+                        "capacity_baseline_days",
+                        "capacity_baseline_date",
+                    ):
+                        if row.get(field) is not None:
+                            group[field] = row[field]
+                    # Card-type display: the trend route spells card names
+                    # with spaces ("NVIDIA B30Z") while the allocation route
+                    # uses hyphens ("NVIDIA-B30Z"). Trend-source rows win so
+                    # the basis table stays deterministic regardless of
+                    # sub-job completion order.
+                    if row.get("capacity_gpu_display") is not None:
+                        from_trend = "machine-tpm-trend" in str(row.get("source") or "")
+                        if from_trend or "capacity_gpu_display" not in group:
+                            group["capacity_gpu_display"] = row["capacity_gpu_display"]
+                continue
+            if (
+                metric == "ai.usage.tokens"
+                and str(row.get("aggregation") or "") == "hourly_tokens_total"
+            ):
+                tenant_id = str(row.get("tenant_id") or "").strip()
+                if tenant_id and isinstance(row.get("value"), (int, float)):
+                    token_by_scope[(tenant_id, model)] = float(row["value"])
                 continue
             if metric in {"ai.machine.count", "ai.machine.used"}:
                 if (
@@ -2420,6 +2849,70 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         tpm_by_scope: dict[tuple[str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
         for (tenant_id, model, endpoint), values in endpoint_values.items():
             tpm_by_scope[(tenant_id, model)][endpoint] = values
+
+        # --- Capacity-redundancy math (user-approved 2026-10-10) ---------------
+        capacity_on = self._capacity_analysis_enabled()
+
+        def _group_capacity_math(
+            group: Mapping[str, Any],
+        ) -> tuple[int | None, int | None]:
+            """Return (required, redundant) machines for one capacity group.
+
+            A group participates only when the 30-day baseline, the target
+            hour load, and the allocation snapshot are all present and the
+            baseline covers at least the minimum day count; otherwise both
+            values stay None so the cell renders 暂不可用 instead of a
+            guessed number. required > allocation (a record-setting hour or
+            machines removed after the hour) clamps redundancy to zero.
+            """
+            best = group.get("capacity_best_tpm")
+            days = group.get("capacity_baseline_days")
+            current = group.get("capacity_current_tpm")
+            allocated = group.get("capacity_allocated")
+            if not isinstance(best, (int, float)) or not best > 0:
+                return None, None
+            if not isinstance(days, int) or days < _CAPACITY_MIN_BASELINE_DAYS:
+                return None, None
+            if not isinstance(current, (int, float)) or not isinstance(allocated, int):
+                return None, None
+            required = math.ceil(current / best)
+            return required, max(0, allocated - required)
+
+        redundant_by_model: dict[str, int | None] = {}
+        partial_baseline_models: set[str] = set()
+
+        def _model_redundant(model: str) -> int | None:
+            """Sum group redundancy for one model (platform level, cached per run)."""
+            if model in redundant_by_model:
+                return redundant_by_model[model]
+            groups = [
+                group
+                for (m, _cluster, _gpu), group in capacity_groups.items()
+                if m == model
+            ]
+            total = 0
+            complete = 0
+            for group in groups:
+                _required, redundant_value = _group_capacity_math(group)
+                if redundant_value is None:
+                    continue
+                total += redundant_value
+                complete += 1
+            result = total if complete else None
+            if groups and 0 < complete < len(groups):
+                partial_baseline_models.add(model)
+            redundant_by_model[model] = result
+            return result
+
+        # Tenant membership per model (for the proportional attribution table).
+        tenants_by_model: dict[str, list[str]] = defaultdict(list)
+        if isinstance(tenant_models, Mapping):
+            for tenant_id, values in tenant_models.items():
+                for model in values if isinstance(values, (list, tuple)) else ():
+                    name = str(model).strip()
+                    tenant_value = str(tenant_id).strip()
+                    if name and tenant_value and tenant_value not in tenants_by_model[name]:
+                        tenants_by_model[name].append(tenant_value)
 
         table_rows: list[dict[str, Any]] = []
         endpoint_detail_rows: list[dict[str, Any]] = []
@@ -2473,8 +2966,12 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     avg_text = "多 Endpoint，不汇总"
                 else:
                     avg_text = _format_hourly_tpm(avgs[0])
-                allocated_text, used_text, idle = self._machine_columns(
-                    machine_by_model.get(model), machine_used_by_model.get(model)
+                redundant_value = _model_redundant(model) if capacity_on else None
+                allocated_text, machine_text, idle = self._machine_columns(
+                    machine_by_model.get(model),
+                    machine_used_by_model.get(model),
+                    redundant_value,
+                    capacity_mode=capacity_on,
                 )
                 if idle:
                     idle_by_model[model] = idle
@@ -2484,7 +2981,10 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     "tpm_peak": peak_text,
                     "tpm_avg": avg_text,
                     "machine_allocated": allocated_text,
-                    "machine_used": used_text,
+                    # Column key follows the mode so the renderer's
+                    # column-name → row-key lookup stays direct; the
+                    # capacity column replaces 机器真实使用 (2026-10-10).
+                    "machine_redundant" if capacity_on else "machine_used": machine_text,
                 })
                 if len(endpoints) > 1:
                     for endpoint, values in sorted(endpoints.items()):
@@ -2510,7 +3010,20 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             hour_text = f"{window_start[5:10]} {window_start[11:16]}–{window_end[11:16]}"
         idle_total = sum(idle_by_model.values())
         subtitle = f"{hour_text} · {tenant_count} 客户 / {len(displayed_models)} 模型"
-        if idle_total >= 1:
+        if capacity_on:
+            # 冗余 N（闲 M）: redundant totals lead, idle stays the
+            # zero-usage subset; idle-only keeps the legacy wording when no
+            # model produced a redundancy number this run.
+            redundant_total = sum(
+                value for value in redundant_by_model.values() if value is not None
+            )
+            if redundant_total >= 1:
+                subtitle += f" · 冗余 {redundant_total} 台"
+                if idle_total >= 1:
+                    subtitle += f"（闲 {idle_total} 台）"
+            elif idle_total >= 1:
+                subtitle += f" · {idle_total} 机器空闲"
+        elif idle_total >= 1:
             subtitle += f" · {idle_total} 机器空闲"
         # Scope-aware title (2026-10-09): the fixed “多客户多模型…” label made
         # a single customer/model question look like a routing failure. The
@@ -2523,6 +3036,98 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 title = f"小时 TPM · {only_tenant_label} {next(iter(displayed_models))}"
             else:
                 title = f"小时 TPM · {only_tenant_label}"
+        report_sources: list[ReportSource] = [
+            ReportSource(
+                system="Cube Admin",
+                route="analysis/endpoint-max-tpm/daily/query",
+                fields=("maxTpm", "avgTpm", "model", "endpoint", "tenantId"),
+            ),
+            ReportSource(
+                system="Cube Admin",
+                route="analysis/model-machine-usage/query",
+                fields=("machineCount", "clusterName", "gpuProduct", "model"),
+            ),
+            ReportSource(
+                system="Cube Admin",
+                route="analysis/machine-usage-summary/query",
+                fields=(
+                    "clusterName",
+                    "totalMachineCount",
+                    "occupiedMachineCount",
+                    "devMachineCount",
+                    "backupMachineCount",
+                    "idleMachineCount",
+                ),
+            ),
+        ]
+        report_metric_definitions: list[MetricDefinition] = [
+            MetricDefinition(
+                metric="ai.tpm.peak",
+                label="TPM 峰值",
+                unit="tokens/minute",
+                aggregation="上一完整小时的 maxTpm（小时峰值）",
+                source="Cube Admin / analysis/endpoint-max-tpm/daily/query",
+            ),
+            MetricDefinition(
+                metric="ai.tpm.avg",
+                label="TPM 均值",
+                unit="tokens/minute",
+                aggregation="上一完整小时的 avgTpm（小时均值），不跨 Endpoint 汇总",
+                source="Cube Admin / analysis/endpoint-max-tpm/daily/query",
+            ),
+            MetricDefinition(
+                metric="ai.machine.count",
+                label="机器占用",
+                unit="machines",
+                aggregation="发送时的当前配置快照，按模型跨集群求和，平台级",
+                source="Cube Admin / analysis/model-machine-usage/query",
+            ),
+            MetricDefinition(
+                metric="ai.machine.used",
+                label="机器使用",
+                unit="machines",
+                aggregation="上一完整小时时点实际使用数，按模型跨集群求和，平台级",
+                source="Cube Admin / analysis/machine-tpm-trend/query",
+            ),
+            MetricDefinition(
+                metric="ai.machine.inventory",
+                label="集群机器库存",
+                unit="machines",
+                aggregation=(
+                    "发送时的平台级集群库存快照；生产 = 机器总数 − 测试 − 开发 − 备用 − 空闲，"
+                    "集群级空闲与模型级（闲N）口径互不换算"
+                ),
+                source="Cube Admin / analysis/machine-usage-summary/query",
+            ),
+        ]
+        if capacity_on:
+            report_sources.append(
+                ReportSource(
+                    system="Cube Admin",
+                    route="analysis/machine-tpm-trend/query",
+                    fields=("tpmPerMachine", "machineCount", "cluster", "gpuProduct"),
+                )
+            )
+            report_sources.append(
+                ReportSource(
+                    system="Cube Admin",
+                    route="analysis/active-tenant-daily-usage/query",
+                    fields=("totalTokens", "requestCount"),
+                )
+            )
+            report_metric_definitions.append(
+                MetricDefinition(
+                    metric="ai.machine.capacity",
+                    label="机器冗余",
+                    unit="machines",
+                    aggregation=(
+                        "估算：占用 − ⌈当前小时负载 ÷ 30 天最佳单机吞吐⌉，token 均值口径"
+                        "（tpmPerMachine = totalTokens ÷ 机器数 ÷ 60），按集群×卡型分组求和，"
+                        "平台级；闲N 为其中整小时零使用的子集"
+                    ),
+                    source="Cube Admin / analysis/machine-tpm-trend/query + analysis/model-machine-usage/query",
+                )
+            )
         context = ReportContext(
             timezone=self.timezone_name,
             current_window=ReportWindow(
@@ -2531,79 +3136,20 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             # Hourly snapshots have no comparison baseline by design; the
             # disclosure states this explicitly instead of implying one.
             comparison_windows=(),
-            sources=(
-                ReportSource(
-                    system="Cube Admin",
-                    route="analysis/endpoint-max-tpm/daily/query",
-                    fields=("maxTpm", "avgTpm", "model", "endpoint", "tenantId"),
-                ),
-                ReportSource(
-                    system="Cube Admin",
-                    route="analysis/model-machine-usage/query",
-                    fields=("machineCount", "clusterName", "gpuProduct", "model"),
-                ),
-                ReportSource(
-                    system="Cube Admin",
-                    route="analysis/machine-usage-summary/query",
-                    fields=(
-                        "clusterName",
-                        "totalMachineCount",
-                        "occupiedMachineCount",
-                        "devMachineCount",
-                        "backupMachineCount",
-                        "idleMachineCount",
-                    ),
-                ),
-            ),
-            metric_definitions=(
-                MetricDefinition(
-                    metric="ai.tpm.peak",
-                    label="TPM 峰值",
-                    unit="tokens/minute",
-                    aggregation="上一完整小时的 maxTpm（小时峰值）",
-                    source="Cube Admin / analysis/endpoint-max-tpm/daily/query",
-                ),
-                MetricDefinition(
-                    metric="ai.tpm.avg",
-                    label="TPM 均值",
-                    unit="tokens/minute",
-                    aggregation="上一完整小时的 avgTpm（小时均值），不跨 Endpoint 汇总",
-                    source="Cube Admin / analysis/endpoint-max-tpm/daily/query",
-                ),
-                MetricDefinition(
-                    metric="ai.machine.count",
-                    label="机器占用",
-                    unit="machines",
-                    aggregation="发送时的当前配置快照，按模型跨集群求和，平台级",
-                    source="Cube Admin / analysis/model-machine-usage/query",
-                ),
-                MetricDefinition(
-                    metric="ai.machine.used",
-                    label="机器使用",
-                    unit="machines",
-                    aggregation="上一完整小时时点实际使用数，按模型跨集群求和，平台级",
-                    source="Cube Admin / analysis/machine-tpm-trend/query",
-                ),
-                MetricDefinition(
-                    metric="ai.machine.inventory",
-                    label="集群机器库存",
-                    unit="machines",
-                    aggregation=(
-                        "发送时的平台级集群库存快照；生产 = 机器总数 − 测试 − 开发 − 备用 − 空闲，"
-                        "集群级空闲与模型级（闲N）口径互不换算"
-                    ),
-                    source="Cube Admin / analysis/machine-usage-summary/query",
-                ),
-            ),
-            calculation_version="2.1",
+            sources=tuple(report_sources),
+            metric_definitions=tuple(report_metric_definitions),
+            calculation_version="2.2",
             quality=dataset.quality,
             quality_reasons=dataset.warnings,
             template_version=self.manifest.version,
         )
         # Main data section: one flat table with customer and model columns
-        # (user-confirmed 2026-09-16 layout). The two platform-level machine
-        # sources render as dedicated columns; idle stays tagged inside the
-        # usage column and feeds the subtitle total.
+        # (user-confirmed 2026-09-16 layout; the machine column set follows
+        # the capacity flag, user-directed 2026-10-10). The platform-level
+        # machine sources render as dedicated columns; idle stays tagged
+        # inside the second machine column and feeds the subtitle total.
+        machine_column_name = "machine_redundant" if capacity_on else "machine_used"
+        machine_column_label = "机器冗余" if capacity_on else "机器真实使用"
         blocks: list[ReportBlock] = [
             ReportBlock("table", {
                 "title": "模型明细",
@@ -2613,13 +3159,124 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     {"tag": "column", "name": "tpm_peak", "display_name": "峰值", "data_type": "text"},
                     {"tag": "column", "name": "tpm_avg", "display_name": "均值", "data_type": "text"},
                     {"tag": "column", "name": "machine_allocated", "display_name": "机器占用", "data_type": "text"},
-                    {"tag": "column", "name": "machine_used", "display_name": "机器真实使用", "data_type": "text"},
+                    {
+                        "tag": "column",
+                        "name": machine_column_name,
+                        "display_name": machine_column_label,
+                        "data_type": "text",
+                    },
                 ],
-                "headers": ["客户", "模型", "峰值", "均值", "机器占用", "机器真实使用"],
+                "headers": ["客户", "模型", "峰值", "均值", "机器占用", machine_column_label],
                 "rows": table_rows,
                 "page_size": 20,
             }),
         ]
+        if capacity_on and capacity_groups:
+            # Basis table (2026-10-10): the auditable per-group math behind the
+            # 机器冗余 column — best per-machine throughput over the cached
+            # 30-day window, current-hour per-machine throughput, and the
+            # derived required/allocation/redundant machine counts. Missing
+            # pieces render as — so the basis never invents numbers.
+            capacity_table_rows: list[dict[str, Any]] = []
+            for (cap_model, cap_cluster, _cap_gpu), group in sorted(
+                capacity_groups.items()
+            ):
+                required, redundant_value = _group_capacity_math(group)
+                best = group.get("capacity_best_tpm")
+                days = group.get("capacity_baseline_days")
+                per_machine = group.get("capacity_current_per_machine")
+                allocated = group.get("capacity_allocated")
+                gpu_display = str(group.get("capacity_gpu_display") or "")
+                cluster_label = cap_cluster or "未命名集群"
+                group_label = (
+                    f"{cluster_label} · {gpu_display}" if gpu_display else cluster_label
+                )
+                best_text = "—"
+                if isinstance(best, (int, float)):
+                    best_text = _format_hourly_tpm(best)
+                    if isinstance(days, int) and days < _CAPACITY_BASELINE_WINDOW_DAYS:
+                        best_text += f"（{days} 天）"
+                capacity_table_rows.append({
+                    "model": cap_model,
+                    "cluster_gpu": group_label,
+                    "best": best_text,
+                    "current": (
+                        _format_hourly_tpm(per_machine)
+                        if isinstance(per_machine, (int, float))
+                        else "—"
+                    ),
+                    "required": str(required) if required is not None else "—",
+                    "allocated": str(allocated) if isinstance(allocated, int) else "—",
+                    "redundant": str(redundant_value) if redundant_value is not None else "—",
+                })
+            blocks.append(ReportBlock("table", {
+                "title": "冗余口径：单机最佳 TPM 为近 30 天逐小时 tpmPerMachine 峰值",
+                "columns": [
+                    {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
+                    {"tag": "column", "name": "cluster_gpu", "display_name": "集群·卡型", "data_type": "text"},
+                    {"tag": "column", "name": "best", "display_name": "单机最佳TPM(30d)", "data_type": "text"},
+                    {"tag": "column", "name": "current", "display_name": "当前单机TPM", "data_type": "text"},
+                    {"tag": "column", "name": "required", "display_name": "需求机器", "data_type": "text"},
+                    {"tag": "column", "name": "allocated", "display_name": "占用机器", "data_type": "text"},
+                    {"tag": "column", "name": "redundant", "display_name": "冗余机器", "data_type": "text"},
+                ],
+                "headers": [
+                    "模型", "集群·卡型", "单机最佳TPM(30d)", "当前单机TPM",
+                    "需求机器", "占用机器", "冗余机器",
+                ],
+                "rows": capacity_table_rows,
+                "page_size": 20,
+            }))
+        attribution_rows: list[dict[str, Any]] = []
+        missing_token_models: set[str] = set()
+        if capacity_on:
+            # Proportional attribution (user-confirmed 2026-10-10): for models
+            # shared by multiple report tenants with a computable redundancy,
+            # split the model-level redundant machines by each tenant's share
+            # of the target hour's token volume. The share basis is tokens —
+            # never avgTpm, which must not be aggregated across endpoints or
+            # customers. Values are estimates and labeled as such.
+            for model, model_tenants in sorted(tenants_by_model.items()):
+                if len(model_tenants) < 2:
+                    continue
+                model_redundant = _model_redundant(model)
+                if model_redundant is None or model_redundant < 1:
+                    continue
+                token_parts = {
+                    tenant_id: token_by_scope[(tenant_id, model)]
+                    for tenant_id in model_tenants
+                    if (tenant_id, model) in token_by_scope
+                }
+                if not token_parts:
+                    missing_token_models.add(model)
+                    continue
+                token_total = sum(token_parts.values())
+                if token_total <= 0:
+                    missing_token_models.add(model)
+                    continue
+                for tenant_id in model_tenants:
+                    if tenant_id not in token_parts:
+                        continue
+                    share = token_parts[tenant_id] / token_total
+                    attribution_rows.append({
+                        "tenant": str(tenant_name_map.get(tenant_id, tenant_id) or tenant_id),
+                        "model": model,
+                        "share": f"{share * 100:.1f}%",
+                        "attributed": f"{share * model_redundant:.1f}",
+                    })
+        if attribution_rows:
+            blocks.append(ReportBlock("table", {
+                "title": "冗余折算：多客户模型按目标小时 Token 占比分摊（估算）",
+                "columns": [
+                    {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
+                    {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
+                    {"tag": "column", "name": "share", "display_name": "Token 占比", "data_type": "text"},
+                    {"tag": "column", "name": "attributed", "display_name": "折算冗余机器", "data_type": "text"},
+                ],
+                "headers": ["客户", "模型", "Token 占比", "折算冗余机器"],
+                "rows": attribution_rows,
+                "page_size": 20,
+            }))
         if endpoint_detail_rows:
             blocks.append(ReportBlock("table", {
                 "title": "Endpoint 明细：多 Endpoint 模型不汇总均值",
@@ -2702,14 +3359,46 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     "content": (
                         "口径：上一完整小时的模型级 TPM 峰值（maxTpm）与均值（avgTpm），"
                         f"无对比基准，时区 {self.timezone_name}。TPM 按客户与模型查询。"
-                        "机器 = 占用/真实使用（台）：占用为发送时的当前配置快照"
-                        "（model-machine-usage），真实使用为上一完整小时时点值"
-                        "（machine-tpm-trend），均按模型跨集群求和、平台级、与客户无关；"
-                        "占用−使用 ≥ 1 台标注（闲N），同一模型在不同客户行显示同一平台值。"
-                        "客户身份来自 Cube 实时目录。最近完整小时的 0 值或使用数缺失也可能"
+                        + (
+                            # Capacity mode (user-directed 2026-10-10): the second
+                            # machine column is 冗余, usage stays derivable as
+                            # 占用−闲.
+                            "机器 = 占用/冗余（台）：占用为发送时的当前配置快照"
+                            "（model-machine-usage），冗余为估算值 = 占用 − ⌈当前小时负载 "
+                            "÷ 30 天最佳单机吞吐⌉（token 均值口径：tpmPerMachine = "
+                            "totalTokens ÷ 机器数 ÷ 60，按集群×卡型分组计算后求和），"
+                            "平台级、与客户无关；闲N = 占用−使用中，是冗余中整小时零使用"
+                            "的子集（零使用原因——备用/排水/故障——接口无法区分），"
+                            "在用但欠载机器为冗余其余部分；使用中机器数 = 占用−闲。"
+                            "基准为当日首次运行计算的近 30 天窗口（每日缓存，"
+                            "基准不足 7 天不出数），需求>占用的分组冗余记 0。"
+                            "多客户模型折算按目标小时 token 占比（估算值），"
+                            "占比按已出小时 token 数据计算。"
+                            if capacity_on
+                            # Legacy mode: unchanged wording (flag off must
+                            # render identically to the 2.1 report).
+                            else "机器 = 占用/真实使用（台）：占用为发送时的当前配置快照"
+                            "（model-machine-usage），真实使用为上一完整小时时点值"
+                            "（machine-tpm-trend），均按模型跨集群求和、平台级、与客户无关；"
+                            "占用−使用 ≥ 1 台标注（闲N），同一模型在不同客户行显示同一平台值。"
+                        )
+                        + "客户身份来自 Cube 实时目录。最近完整小时的 0 值或使用数缺失也可能"
                         "来自上游聚合延迟。集群机器库存为发送时的平台级快照"
                         "（machine-usage-summary）：生产 = 机器总数 − 测试 − 开发 − 备用 − 空闲，"
                         "集群级空闲与模型级（闲N）/副标题机器空闲口径不同、互不换算。"
+                        + (
+                            f"冗余口径表中 {len(partial_baseline_models)} 个模型存在数据缺失的分组，"
+                            "冗余按可用分组计算。"
+                            if capacity_on and partial_baseline_models
+                            else ""
+                        )
+                        + (
+                            "以下多客户模型目标小时 token 数据未出，未做折算："
+                            + "、".join(sorted(missing_token_models))
+                            + "。"
+                            if capacity_on and missing_token_models
+                            else ""
+                        )
                         + (
                             f"机器总数为 0 的集群已隐藏（{hidden_zero_clusters} 个）。"
                             if hidden_zero_clusters
@@ -2725,13 +3414,16 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         )
         fallback_lines: list[str] = []
         current_tenant: str | None = None
+        fallback_machine_key = "machine_redundant" if capacity_on else "machine_used"
+        fallback_machine_label = "冗余" if capacity_on else "真实使用"
         for row in table_rows:
             if row["tenant"] != current_tenant:
                 current_tenant = row["tenant"]
                 fallback_lines.append(f"客户 {current_tenant}")
             fallback_lines.append(
                 f"{row['model']}：峰值 {row['tpm_peak']} · 均值 {row['tpm_avg']} · "
-                f"机器占用 {row['machine_allocated']} · 真实使用 {row['machine_used']}"
+                f"机器占用 {row['machine_allocated']} · "
+                f"{fallback_machine_label} {row[fallback_machine_key]}"
             )
         # Plain-text channels get a one-line cluster idle summary instead of
         # the full inventory table; missing idle counts stay out of the line.

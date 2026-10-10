@@ -35,8 +35,9 @@ from nanobot.reporting.contracts import (
     validate_report_intent,
     validate_report_query,
 )
-from nanobot.reporting.cube import CubeCustomerModelHourlyTpmTemplate
+from nanobot.reporting.cube import CubeCustomerModelHourlyTpmTemplate, _capacity_gpu_key
 from nanobot.reporting.renderer import document_to_markdown
+from nanobot.reporting.store import get_report_state_store
 from nanobot.testing import credentials
 
 
@@ -1961,6 +1962,10 @@ def test_hourly_tpm_template_renders_customer_model_table() -> None:
         },
     )
 
+    # Capacity mode is the default (user-directed 2026-10-10): the second
+    # machine column becomes 机器冗余 while the idle tag stays as the
+    # zero-usage subset. Without capacity rows the redundancy itself is
+    # unavailable, so the cell keeps the idle annotation only.
     document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
 
     assert document.version == 2
@@ -1971,24 +1976,23 @@ def test_hourly_tpm_template_renders_customer_model_table() -> None:
     assert document.context.comparison_windows == ()
     # Multi-tenant runs keep the template label as the title.
     assert document.title == "多客户多模型小时 TPM 报告"
-    # Compact subtitle: MM-DD window, counts, and the idle machine total.
+    # No model produced a redundancy number, so the subtitle keeps the
+    # legacy idle wording.
     assert document.subtitle == "09-13 10:00–11:00 · 2 客户 / 1 模型 · 2 机器空闲"
 
-    # User-confirmed 2026-09-16 layout: the data section is a flat table with
-    # customer/model columns and the two platform machine sources as separate
-    # columns; the idle flag lives inside the usage column.
     table_block = document.blocks[0]
     assert table_block.kind == "table"
     columns = table_block.data["columns"]
     assert [column["name"] for column in columns] == [
-        "tenant", "model", "tpm_peak", "tpm_avg", "machine_allocated", "machine_used",
+        "tenant", "model", "tpm_peak", "tpm_avg", "machine_allocated",
+        "machine_redundant",
     ]
     assert [column["display_name"] for column in columns] == [
-        "客户", "模型", "峰值", "均值", "机器占用", "机器真实使用",
+        "客户", "模型", "峰值", "均值", "机器占用", "机器冗余",
     ]
     assert all(column.get("tag") == "column" for column in columns)
     assert table_block.data["headers"] == [
-        "客户", "模型", "峰值", "均值", "机器占用", "机器真实使用",
+        "客户", "模型", "峰值", "均值", "机器占用", "机器冗余",
     ]
     # Feishu renders at most 20 rows per page.
     assert table_block.data["page_size"] == 20
@@ -1996,9 +2000,10 @@ def test_hourly_tpm_template_renders_customer_model_table() -> None:
     assert [row["tenant"] for row in rows] == ["佛跳墙", "豆汁"]
     for row in rows:
         assert row["model"] == "Kimi-K3"
-        # Platform allocation/usage are the same value pair for both customers.
+        # Platform machine values are the same for both customers; the
+        # redundancy is unavailable while the idle subset stays visible.
         assert row["machine_allocated"] == "42"
-        assert row["machine_used"] == "40（闲2）"
+        assert row["machine_redundant"] == "—（闲2）"
     # Each customer shows its own tenant-scoped TPM values.
     assert rows[0]["tpm_peak"] != rows[1]["tpm_peak"]
     assert rows[0]["tpm_avg"] != rows[1]["tpm_avg"]
@@ -2006,7 +2011,25 @@ def test_hourly_tpm_template_renders_customer_model_table() -> None:
     assert document.blocks[-1].kind == "note"
     assert document.blocks[-1].data["include_context"] is True
     assert "客户 佛跳墙" in document.fallback_text
-    assert "机器占用 42 · 真实使用 40（闲2）" in document.fallback_text
+    assert "机器占用 42 · 冗余 —（闲2）" in document.fallback_text
+
+    # Legacy mode (capacity flag off) must render the 2026-09-16 layout
+    # unchanged — the flag-off rollback path.
+    legacy = CubeCustomerModelHourlyTpmTemplate(
+        capacity_analysis_default=False
+    ).analyze((dataset,))
+    legacy_columns = legacy.blocks[0].data["columns"]
+    assert [column["name"] for column in legacy_columns] == [
+        "tenant", "model", "tpm_peak", "tpm_avg", "machine_allocated",
+        "machine_used",
+    ]
+    assert legacy.blocks[0].data["headers"] == [
+        "客户", "模型", "峰值", "均值", "机器占用", "机器真实使用",
+    ]
+    for row in legacy.blocks[0].data["rows"]:
+        assert row["machine_used"] == "40（闲2）"
+    assert "机器占用 42 · 真实使用 40（闲2）" in legacy.fallback_text
+    assert legacy.subtitle == document.subtitle
 
 
 def _hourly_dataset(tenant_models: dict[str, list[str]], tenant_names: dict[str, str]) -> ReportDataset:
@@ -2106,17 +2129,23 @@ def test_hourly_tpm_template_marks_missing_tpm_unavailable() -> None:
         # count never turns the report into a successful TPM answer.
         assert row["tpm_peak"] == "暂不可用"
         assert row["tpm_avg"] == "暂不可用"
-        # A missing usage value leaves the allocation visible without an idle
-        # guess; the two machine sources split into dedicated columns.
+        # A missing usage value leaves the allocation visible without an
+        # idle or redundancy guess; the machine columns stay explicit dashes.
         assert row["machine_allocated"] == "42"
-        assert row["machine_used"] == "—"
+        assert row["machine_redundant"] == "—"
     # No idle machines, so no idle suffix on the subtitle.
     assert "机器空闲" not in document.subtitle
     assert document.quality == "partial"
 
 
 def test_hourly_tpm_template_idle_threshold_and_negative_difference() -> None:
-    """Idle is flagged from one machine difference; removals stay unflagged."""
+    """Idle is flagged from one machine difference; removals stay unflagged.
+
+    Capacity mode (default) renders the idle tag inside the 冗余 column —
+    the redundancy itself stays unavailable without capacity rows, but the
+    idle semantics are identical. The legacy construction pins the 2.1
+    usage-column rendering that the flag-off rollback restores.
+    """
 
     def machine_row(metric: str, value: float, model: str) -> dict[str, object]:
         return {
@@ -2142,7 +2171,7 @@ def test_hourly_tpm_template_idle_threshold_and_negative_difference() -> None:
         source="magik_cube",
         metadata={
             # GLM-4 has no machine rows at all: allocation missing must show
-            # 暂不可用 while the usage column stays an explicit dash.
+            # 暂不可用 while the second machine column stays an explicit dash.
             "tenant_models": {"tenant-a": ["Kimi-K3", "GLM-5.2", "GLM-5.1", "GLM-4"]},
             "tenant_names": {"tenant-a": "佛跳墙"},
             "window_start": "2026-09-13T10:00:00+08:00",
@@ -2155,21 +2184,803 @@ def test_hourly_tpm_template_idle_threshold_and_negative_difference() -> None:
     table_block = document.blocks[0]
     assert table_block.kind == "table"
     machines = {
-        row["model"]: (row["machine_allocated"], row["machine_used"])
+        row["model"]: (row["machine_allocated"], row["machine_redundant"])
         for row in table_block.data["rows"]
     }
     # One idle machine already counts as idle (user-confirmed threshold); the
-    # idle flag lives in the usage column.
-    assert machines["Kimi-K3"] == ("39", "38（闲1）")
+    # idle tag lives inside the redundancy column.
+    assert machines["Kimi-K3"] == ("39", "—（闲1）")
     # Equal usage is not idle.
-    assert machines["GLM-5.2"] == ("45", "45")
-    # A negative difference (machines removed after the hour) stays as the
-    # raw values without an idle tag.
-    assert machines["GLM-5.1"] == ("38", "39")
-    # Allocation missing: the usage column never guesses a value.
+    assert machines["GLM-5.2"] == ("45", "—")
+    # A negative difference (machines removed after the hour) carries no tag.
+    assert machines["GLM-5.1"] == ("38", "—")
+    # Allocation missing: the redundancy column never guesses a value.
     assert machines["GLM-4"] == ("暂不可用", "—")
     # The subtitle sums positive idle differences only: 1 idle machine.
     assert document.subtitle.endswith("· 1 机器空闲")
+
+    legacy = CubeCustomerModelHourlyTpmTemplate(
+        capacity_analysis_default=False
+    ).analyze((dataset,))
+    legacy_machines = {
+        row["model"]: (row["machine_allocated"], row["machine_used"])
+        for row in legacy.blocks[0].data["rows"]
+    }
+    assert legacy_machines["Kimi-K3"] == ("39", "38（闲1）")
+    assert legacy_machines["GLM-5.2"] == ("45", "45")
+    assert legacy_machines["GLM-5.1"] == ("38", "39")
+    assert legacy_machines["GLM-4"] == ("暂不可用", "—")
+
+
+def _capacity_row(
+    model: str, cluster: str, gpu_product: str, **fields: object
+) -> dict[str, object]:
+    """One connector-emitted ``ai.machine.capacity`` group row (see _capacity_group_row)."""
+
+    aggregation = str(fields.get("aggregation") or "")
+    source = (
+        "Cube Admin / analysis/machine-tpm-trend/query"
+        if aggregation in {"capacity_baseline_30d", "hourly_group_usage"}
+        else "Cube Admin / analysis/model-machine-usage/query"
+    )
+    row: dict[str, object] = {
+        "metric": "ai.machine.capacity",
+        "model": model,
+        "cluster": cluster,
+        "gpu_product": gpu_product,
+        "capacity_gpu_key": _capacity_gpu_key(gpu_product),
+        "capacity_gpu_display": gpu_product,
+        "endpoint": "",
+        "tenant_id": "",
+        "metric_scope": "platform_model_group",
+        "value": 0.0,
+        "unit": "machines",
+        "source": source,
+    }
+    row.update(fields)
+    return row
+
+
+def test_hourly_tpm_template_capacity_column_and_basis_table() -> None:
+    """Capacity mode (user-approved 2026-10-10): 机器冗余 replaces 真实使用,
+    the idle subset stays tagged, and the conditional basis/attribution tables
+    expose the per-group math and the token-share split.
+
+    Numbers mirror the 2026-10-10 live probe: two card groups on one model,
+    hyphen-vs-space gpuProduct spelling joined through the normalized key."""
+    dataset = ReportDataset(
+        rows=(
+            {
+                "metric": "ai.tpm.peak", "value": 900.0,
+                "model": "Kimi-K3", "endpoint": "ep-k3", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.avg", "value": 600.0,
+                "model": "Kimi-K3", "endpoint": "ep-k3", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.peak", "value": 800.0,
+                "model": "Kimi-K3", "endpoint": "ep-k3", "tenant_id": "tenant-b",
+            },
+            {
+                "metric": "ai.tpm.avg", "value": 500.0,
+                "model": "Kimi-K3", "endpoint": "ep-k3", "tenant_id": "tenant-b",
+            },
+            {
+                "metric": "ai.machine.count", "value": 34.0, "model": "Kimi-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used", "value": 32.0, "model": "Kimi-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            # Allocation rows use the hyphen spelling, trend rows the space
+            # spelling — the join must collapse that difference.
+            _capacity_row(
+                "Kimi-K3", "beast01", "NVIDIA-L20D",
+                capacity_allocated=14,
+                aggregation="current_allocation_group",
+            ),
+            _capacity_row(
+                "Kimi-K3", "beast01", "NVIDIA L20D",
+                capacity_used_machines=12,
+                capacity_current_per_machine=2285885.81,
+                capacity_current_tpm=27430629.72,
+                aggregation="hourly_group_usage",
+            ),
+            _capacity_row(
+                "Kimi-K3", "beast01", "NVIDIA L20D",
+                capacity_best_tpm=3273715.25,
+                capacity_baseline_days=30,
+                capacity_baseline_date="2026-09-13",
+                aggregation="capacity_baseline_30d",
+            ),
+            _capacity_row(
+                "Kimi-K3", "beast02", "NVIDIA B30Z",
+                capacity_best_tpm=3235092.09,
+                capacity_baseline_days=30,
+                capacity_baseline_date="2026-09-13",
+                aggregation="capacity_baseline_30d",
+            ),
+            _capacity_row(
+                "Kimi-K3", "beast02", "NVIDIA B30Z",
+                capacity_used_machines=20,
+                capacity_current_per_machine=668809.62,
+                capacity_current_tpm=13376192.47,
+                aggregation="hourly_group_usage",
+            ),
+            _capacity_row(
+                "Kimi-K3", "beast02", "NVIDIA-B30Z",
+                capacity_allocated=20,
+                aggregation="current_allocation_group",
+            ),
+            # Hourly token rows (string totals parsed by the connector).
+            {
+                "metric": "ai.usage.tokens", "value": 6105388533.0,
+                "model": "Kimi-K3", "endpoint": "", "tenant_id": "tenant-a",
+                "aggregation": "hourly_tokens_total",
+            },
+            {
+                "metric": "ai.usage.tokens", "value": 3052694266.5,
+                "model": "Kimi-K3", "endpoint": "", "tenant_id": "tenant-b",
+                "aggregation": "hourly_tokens_total",
+            },
+        ),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {"tenant-a": ["Kimi-K3"], "tenant-b": ["Kimi-K3"]},
+            "tenant_names": {"tenant-a": "佛跳墙", "tenant-b": "豆汁"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    # beast01: ceil(27,430,629.72 / 3,273,715.25) = 9 → 14−9 = 5 redundant;
+    # beast02: ceil(13,376,192.47 / 3,235,092.09) = 5 → 20−5 = 15 redundant.
+    # Model total 20, idle = 34−32 = 2 → the cell keeps the idle subset tag.
+    rows = document.blocks[0].data["rows"]
+    assert all(row["machine_redundant"] == "20（闲2）" for row in rows)
+    assert document.subtitle == (
+        "09-13 10:00–11:00 · 2 客户 / 1 模型 · 冗余 20 台（闲 2 台）"
+    )
+
+    # Basis table: one row per (model, cluster, card) group with the compact
+    # TPM ladder, sorted by group key; multi-day-short baselines would append
+    # the day count (covered by the edge-case test).
+    basis_block = document.blocks[1]
+    assert basis_block.kind == "table"
+    assert basis_block.data["headers"] == [
+        "模型", "集群·卡型", "单机最佳TPM(30d)", "当前单机TPM",
+        "需求机器", "占用机器", "冗余机器",
+    ]
+    basis_rows = basis_block.data["rows"]
+    assert [
+        (row["cluster_gpu"], row["best"], row["current"], row["required"],
+         row["allocated"], row["redundant"])
+        for row in basis_rows
+    ] == [
+        ("beast01 · NVIDIA L20D", "3.27M", "2.29M", "9", "14", "5"),
+        ("beast02 · NVIDIA B30Z", "3.24M", "668.81K", "5", "20", "15"),
+    ]
+
+    # Attribution table: token shares 2/3 and 1/3 of the 20 redundant machines.
+    attribution_block = document.blocks[2]
+    assert attribution_block.kind == "table"
+    assert attribution_block.data["headers"] == [
+        "客户", "模型", "Token 占比", "折算冗余机器",
+    ]
+    assert attribution_block.data["rows"] == [
+        {"tenant": "佛跳墙", "model": "Kimi-K3", "share": "66.7%", "attributed": "13.3"},
+        {"tenant": "豆汁", "model": "Kimi-K3", "share": "33.3%", "attributed": "6.7"},
+    ]
+
+    # Plain-text fallback and the disclosure keep the capacity wording.
+    assert "机器占用 34 · 冗余 20（闲2）" in document.fallback_text
+    note = document.blocks[-1]
+    assert note.kind == "note"
+    assert "机器 = 占用/冗余" in note.data["content"]
+    assert "token 均值口径" in note.data["content"]
+
+
+def test_hourly_tpm_template_capacity_edge_cases() -> None:
+    """Record-setting hours clamp to 0, zero usage makes everything redundant,
+    short baselines stay unavailable, and partially-covered models keep the
+    available groups while disclosing the missing ones."""
+
+    rows: list[dict[str, object]] = [
+        {
+            "metric": "ai.machine.count", "value": 12.0, "model": "Record-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        {
+            "metric": "ai.machine.used", "value": 12.0, "model": "Record-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        {
+            "metric": "ai.machine.count", "value": 8.0, "model": "Idle-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        {
+            "metric": "ai.machine.used", "value": 0.0, "model": "Idle-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        {
+            "metric": "ai.machine.count", "value": 5.0, "model": "Fresh-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        {
+            "metric": "ai.machine.used", "value": 5.0, "model": "Fresh-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        {
+            "metric": "ai.machine.count", "value": 10.0, "model": "Mixed-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        {
+            "metric": "ai.machine.used", "value": 9.0, "model": "Mixed-K3",
+            "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+        },
+        # Record hour: required = ceil(30M / 1M) = 30 > allocated 12 → 0.
+        _capacity_row(
+            "Record-K3", "beast01", "NVIDIA L20D",
+            capacity_best_tpm=1_000_000.0, capacity_baseline_days=30,
+            capacity_current_tpm=30_000_000.0, capacity_allocated=12,
+            capacity_used_machines=12,
+        ),
+        # Zero current usage: required 0 → every allocated machine redundant.
+        _capacity_row(
+            "Idle-K3", "beast01", "NVIDIA L20D",
+            capacity_best_tpm=1_000_000.0, capacity_baseline_days=30,
+            capacity_current_tpm=0.0, capacity_allocated=8,
+            capacity_used_machines=0,
+        ),
+        # Baseline covers only 6 days (< 7): no redundancy number.
+        _capacity_row(
+            "Fresh-K3", "beast01", "NVIDIA L20D",
+            capacity_best_tpm=1_000_000.0, capacity_baseline_days=6,
+            capacity_current_tpm=2_000_000.0, capacity_allocated=5,
+            capacity_used_machines=5,
+        ),
+        # Mixed: one complete group (4 redundant) plus one short-baseline
+        # group — the model keeps the partial sum and the note discloses it.
+        _capacity_row(
+            "Mixed-K3", "beast01", "NVIDIA L20D",
+            capacity_best_tpm=1_000_000.0, capacity_baseline_days=30,
+            capacity_current_tpm=2_000_000.0, capacity_allocated=6,
+            capacity_used_machines=6,
+        ),
+        _capacity_row(
+            "Mixed-K3", "beast02", "NVIDIA B30Z",
+            capacity_best_tpm=1_000_000.0, capacity_baseline_days=3,
+            capacity_current_tpm=2_000_000.0, capacity_allocated=4,
+            capacity_used_machines=3,
+        ),
+    ]
+    dataset = ReportDataset(
+        rows=tuple(rows),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {
+                "tenant-a": ["Record-K3", "Idle-K3", "Fresh-K3", "Mixed-K3"],
+            },
+            "tenant_names": {"tenant-a": "佛跳墙"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    machines = {
+        row["model"]: row["machine_redundant"]
+        for row in document.blocks[0].data["rows"]
+    }
+    # required 30 > allocated 12: redundancy clamps to 0 with no idle tag
+    # (usage equals allocation).
+    assert machines["Record-K3"] == "0"
+    # Zero usage: all 8 machines redundant and all 8 are the idle subset.
+    assert machines["Idle-K3"] == "8（闲8）"
+    # Short baseline: no redundancy number, idle is 0 so the plain dash.
+    assert machines["Fresh-K3"] == "—"
+    # Partial coverage: 4 redundant from the complete group, idle 1 tagged.
+    assert machines["Mixed-K3"] == "4（闲1）"
+    # Subtitle totals available redundancy (0 + 8 + 4) with the idle subset.
+    assert document.subtitle.endswith("冗余 12 台（闲 9 台）")
+
+    note = document.blocks[-1].data["content"]
+    assert "1 个模型存在数据缺失的分组" in note
+
+    # The basis table renders the short-baseline day counts inline.
+    basis_rows = {
+        (row["model"], row["cluster_gpu"]): row
+        for row in document.blocks[1].data["rows"]
+    }
+    assert basis_rows[("Fresh-K3", "beast01 · NVIDIA L20D")]["best"] == "1M（6 天）"
+    assert basis_rows[("Mixed-K3", "beast02 · NVIDIA B30Z")]["redundant"] == "—"
+
+
+def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
+    """Multi-tenant models without hourly token rows stay unattributed with an
+    explicit note; single-tenant models never enter the attribution table."""
+
+    dataset = ReportDataset(
+        rows=(
+            {
+                "metric": "ai.tpm.peak", "value": 900.0,
+                "model": "Shared-K3", "endpoint": "ep-a", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.avg", "value": 600.0,
+                "model": "Shared-K3", "endpoint": "ep-a", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.peak", "value": 800.0,
+                "model": "Shared-K3", "endpoint": "ep-b", "tenant_id": "tenant-b",
+            },
+            {
+                "metric": "ai.tpm.avg", "value": 500.0,
+                "model": "Shared-K3", "endpoint": "ep-b", "tenant_id": "tenant-b",
+            },
+            {
+                "metric": "ai.tpm.peak", "value": 700.0,
+                "model": "Solo-K3", "endpoint": "ep-c", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.avg", "value": 400.0,
+                "model": "Solo-K3", "endpoint": "ep-c", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.machine.count", "value": 10.0, "model": "Shared-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used", "value": 4.0, "model": "Shared-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.count", "value": 6.0, "model": "Solo-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used", "value": 6.0, "model": "Solo-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            # Both models have computable redundancy, but no token rows.
+            _capacity_row(
+                "Shared-K3", "beast01", "NVIDIA L20D",
+                capacity_best_tpm=1_000_000.0, capacity_baseline_days=30,
+                capacity_current_tpm=2_000_000.0, capacity_allocated=10,
+                capacity_used_machines=4,
+            ),
+            _capacity_row(
+                "Solo-K3", "beast01", "NVIDIA L20D",
+                capacity_best_tpm=1_000_000.0, capacity_baseline_days=30,
+                capacity_current_tpm=2_000_000.0, capacity_allocated=6,
+                capacity_used_machines=6,
+            ),
+        ),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {
+                "tenant-a": ["Shared-K3", "Solo-K3"],
+                "tenant-b": ["Shared-K3"],
+            },
+            "tenant_names": {"tenant-a": "佛跳墙", "tenant-b": "豆汁"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    machines = {
+        row["model"]: row["machine_redundant"]
+        for row in document.blocks[0].data["rows"]
+    }
+    assert machines["Shared-K3"] == "8（闲6）"
+    assert machines["Solo-K3"] == "4"
+    # No attribution table at all — token data is missing for the only
+    # multi-tenant model.
+    assert not any(
+        block.kind == "table" and "折算" in str(block.data.get("title", ""))
+        for block in document.blocks
+    )
+    note = document.blocks[-1].data["content"]
+    assert "目标小时 token 数据未出，未做折算：Shared-K3" in note
+
+
+def test_hourly_capacity_flag_store_override_and_registry_wiring() -> None:
+    """The runtime flag resolution mirrors ReportCenterTool._flag (store
+    override wins per request) and reaches the template through
+    default_registry_kwargs."""
+
+    template = CubeCustomerModelHourlyTpmTemplate(capacity_analysis_default=True)
+    intent = ReportIntent(
+        connector_id="magik_cube",
+        template_id="usage_customer_model_hourly_tpm",
+        period="recent1h",
+        filters={},
+    )
+
+    # Default construction: the capacity marker is planned.
+    assert "ai.machine.capacity" in template.plan(intent)[0].metrics
+
+    # Store override off: plan drops the marker on the very same instance.
+    get_report_state_store().set_feature_flag(
+        "hourly_tpm_capacity_analysis", False, updated_by="unit-test"
+    )
+    try:
+        assert "ai.machine.capacity" not in template.plan(intent)[0].metrics
+    finally:
+        get_report_state_store().clear_feature_flag(
+            "hourly_tpm_capacity_analysis", updated_by="unit-test"
+        )
+    assert "ai.machine.capacity" in template.plan(intent)[0].metrics
+
+    # The registry wiring carries the configured default into the template.
+    from nanobot.reporting.builtins import default_registry_kwargs
+
+    class _ReportingConfig:
+        hourly_tpm_capacity_analysis = False
+
+    kwargs = default_registry_kwargs(_ReportingConfig(), None)  # type: ignore[arg-type]
+    assert kwargs["hourly_capacity_analysis_default"] is False
+    registry = build_default_registry(
+        discover_external=False,
+        magik_enabled=True,
+        cube_config=_config(),
+        hourly_capacity_analysis_default=False,
+    )
+    hourly = registry.template("usage_customer_model_hourly_tpm")
+    assert hourly is not None
+    assert "ai.machine.capacity" not in hourly.plan(intent)[0].metrics
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_capacity_baseline_job_uses_daily_cache() -> None:
+    """The 30-day baseline queries once per target calendar day, excludes the
+    in-progress zero placeholders, and emits per-group rows the template can
+    join across the hyphen/space gpuProduct spelling difference."""
+
+    trend_bodies: list[dict[str, object]] = []
+    token_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "model": "Kimi-K3",
+                                "endpoint": "ep-k3",
+                                "points": [
+                                    {"date": "2026-09-13 10", "maxTpm": "900", "avgTpm": "600"},
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/model-machine-usage/query"):
+            # Hyphen-style gpuProduct (live-verified spelling difference).
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {
+                                "clusterName": "beast01",
+                                "machineCount": 14,
+                                "gpuProduct": "NVIDIA-L20D",
+                                "gpuCount": "96",
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/machine-tpm-trend/query"):
+            trend_bodies.append(body)
+            # The 30-day baseline call ends at the target hour start; the
+            # usage call ends at the target hour end.
+            if str(body["endTime"]).startswith("2026-09-13T02:00:00"):
+                # Baseline window: three real points on distinct dates, one
+                # point before the window, and the in-progress zero
+                # placeholder with an empty cluster (live contract).
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "points": [
+                                {
+                                    "timestamp": "2026-08-01T01:00:00Z",
+                                    "cluster": "beast01",
+                                    "gpuProduct": "NVIDIA L20D",
+                                    "tpmPerMachine": 9999999.0,
+                                    "machineCount": 1,
+                                },
+                                {
+                                    "timestamp": "2026-08-20T01:00:00Z",
+                                    "cluster": "beast01",
+                                    "gpuProduct": "NVIDIA L20D",
+                                    "tpmPerMachine": 2000000.0,
+                                    "machineCount": 10,
+                                },
+                                {
+                                    "timestamp": "2026-09-01T01:00:00Z",
+                                    "cluster": "beast01",
+                                    "gpuProduct": "NVIDIA L20D",
+                                    "tpmPerMachine": 3000000.0,
+                                    "machineCount": 14,
+                                },
+                                {
+                                    "timestamp": "2026-09-12T01:00:00Z",
+                                    "cluster": "beast01",
+                                    "gpuProduct": "NVIDIA L20D",
+                                    "tpmPerMachine": 2500000.0,
+                                    "machineCount": 12,
+                                },
+                                {
+                                    "timestamp": "2026-09-13T03:00:00Z",
+                                    "cluster": "",
+                                    "gpuProduct": "NVIDIA L20D",
+                                    "tpmPerMachine": 0,
+                                    "machineCount": 0,
+                                },
+                            ]
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "points": [
+                            {
+                                "timestamp": "2026-09-13T02:00:00Z",
+                                "cluster": "beast01",
+                                "gpuProduct": "NVIDIA L20D",
+                                "tpmPerMachine": 1000000.0,
+                                "machineCount": 12,
+                                "gpuCount": 96,
+                                "totalTokens": "720000000",
+                            }
+                        ]
+                    },
+                },
+            )
+        assert request.url.path.endswith("/analysis/active-tenant-daily-usage/query")
+        token_bodies.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "tenantId": body["tenantId"],
+                            "points": [
+                                {
+                                    "date": "2026-09-13 10",
+                                    "totalTokens": "6105388533",
+                                    "requestCount": "49799",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=(
+            "ai.tpm.peak",
+            "ai.tpm.avg",
+            "ai.machine.count",
+            "ai.machine.used",
+            "ai.machine.capacity",
+        ),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={
+            "models": ["Kimi-K3"],
+            "tenant_models": {"tenant-a": ["Kimi-K3"], "tenant-b": ["Kimi-K3"]},
+        },
+    )
+
+    connector = CubeConnector(_config(), transport=httpx.MockTransport(handler))
+    result = await connector.query(query)
+
+    # The baseline window is the 30 days before the target hour, in UTC.
+    baseline_bodies = [
+        body
+        for body in trend_bodies
+        if str(body["endTime"]).startswith("2026-09-13T02:00:00")
+    ]
+    assert len(baseline_bodies) == 1
+    assert baseline_bodies[0]["model"] == "Kimi-K3"
+    assert baseline_bodies[0]["startTime"] == "2026-08-14T02:00:00Z"
+    assert baseline_bodies[0]["timeLevel"] == "TIME_LEVEL_HOUR"
+
+    # One capacity group joins all three sub-jobs: hyphen/space gpu keys
+    # normalize to the same group; the out-of-window point and the zero
+    # placeholder are excluded (best = 3M over 3 distinct dates).
+    capacity_rows = [row for row in result.rows if row["metric"] == "ai.machine.capacity"]
+    assert len(capacity_rows) == 3
+    by_aggregation = {row["aggregation"]: row for row in capacity_rows}
+    baseline_row = by_aggregation["capacity_baseline_30d"]
+    assert baseline_row["capacity_best_tpm"] == 3000000.0
+    assert baseline_row["capacity_baseline_days"] == 3
+    assert baseline_row["capacity_gpu_display"] == "NVIDIA L20D"
+    usage_row = by_aggregation["hourly_group_usage"]
+    assert usage_row["capacity_current_tpm"] == 12000000.0
+    assert usage_row["capacity_used_machines"] == 12
+    assert by_aggregation["current_allocation_group"]["capacity_allocated"] == 14
+    for row in capacity_rows:
+        assert row["capacity_gpu_key"] == "NVIDIAL20D"
+
+    # Multi-tenant model: one hourly-token query per (tenant, model) pair with
+    # the HOUR level and the model filter.
+    assert len(token_bodies) == 2
+    assert {body["tenantId"] for body in token_bodies} == {"tenant-a", "tenant-b"}
+    assert all(body["timeLevel"] == "TIME_LEVEL_HOUR" for body in token_bodies)
+    token_rows = [
+        row
+        for row in result.rows
+        if row["metric"] == "ai.usage.tokens"
+        and row["aggregation"] == "hourly_tokens_total"
+    ]
+    assert [row["value"] for row in token_rows] == [6105388533.0, 6105388533.0]
+
+    # The baseline was persisted for the target day; a second query the same
+    # day must not repeat the 30-day call.
+    assert (
+        get_report_state_store().setting("hourly_capacity_baseline:Kimi-K3") != ""
+    )
+    trend_bodies.clear()
+    result_two = await CubeConnector(
+        _config(), transport=httpx.MockTransport(handler)
+    ).query(query)
+    assert result_two.quality == "complete"
+    assert not [
+        body for body in trend_bodies
+        if str(body["endTime"]).startswith("2026-09-13T02:00:00")
+    ]
+    capacity_rows_two = [
+        row
+        for row in result_two.rows
+        if row["metric"] == "ai.machine.capacity"
+        and row["aggregation"] == "capacity_baseline_30d"
+    ]
+    assert [row["capacity_best_tpm"] for row in capacity_rows_two] == [3000000.0]
+
+
+@pytest.mark.asyncio
+async def test_cube_connector_capacity_failures_stay_informational_and_opt_in() -> None:
+    """A model whose trend route 500s on every window (live-verified with
+    DeepSeek-R1, 2026-10-10) and missing hourly token buckets warn without
+    downgrading quality; a query without the marker metric pays no extra
+    calls and carries no capacity rows."""
+
+    trend_calls = 0
+    token_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal trend_calls, token_calls
+        if request.url.path.endswith("/analysis/endpoint-max-tpm/daily/query"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "model": "Kimi-K3",
+                                "endpoint": "ep-k3",
+                                "points": [
+                                    {"date": "2026-09-13 10", "maxTpm": "900", "avgTpm": "600"},
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/analysis/model-machine-usage/query"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"list": [{"clusterName": "b1", "machineCount": 7}]}},
+            )
+        if request.url.path.endswith("/analysis/machine-tpm-trend/query"):
+            trend_calls += 1
+            return httpx.Response(500, json={"code": 1, "message": "unknown request error"})
+        assert request.url.path.endswith("/analysis/active-tenant-daily-usage/query")
+        token_calls += 1
+        return httpx.Response(200, json={"code": 0, "data": {"items": []}})
+
+    tz = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 9, 13, 10, tzinfo=tz)
+    end = datetime(2026, 9, 13, 11, tzinfo=tz)
+    query = ReportQuery(
+        connector_id="magik_cube",
+        metrics=(
+            "ai.tpm.peak",
+            "ai.tpm.avg",
+            "ai.machine.count",
+            "ai.machine.used",
+            "ai.machine.capacity",
+        ),
+        dimensions=("tenant", "model", "endpoint", "date", "hour"),
+        start_date=start.date(),
+        end_date=end.date(),
+        start_time=start,
+        end_time=end,
+        filters={
+            "models": ["Kimi-K3"],
+            "tenant_models": {"tenant-a": ["Kimi-K3"], "tenant-b": ["Kimi-K3"]},
+        },
+    )
+
+    result = await CubeConnector(_config(), transport=httpx.MockTransport(handler)).query(
+        query
+    )
+
+    # Two trend calls (target-hour usage + 30-day baseline) both failed and
+    # both stay informational; the token query returned no bucket. The
+    # allocation snapshot still succeeded, so its per-group capacity row is
+    # legitimate — but no baseline or usage group data may be invented.
+    assert trend_calls == 2
+    assert token_calls == 2
+    assert any("capacity_baseline" in warning for warning in result.warnings)
+    assert any("capacity_tokens" in warning for warning in result.warnings)
+    capacity_aggregations = {
+        row["aggregation"]
+        for row in result.rows
+        if row["metric"] == "ai.machine.capacity"
+    }
+    assert capacity_aggregations == {"current_allocation_group"}
+    # Peak/avg/machine-count are present: quality stays complete.
+    assert result.quality == "complete"
+
+    # Opt-in: without the marker metric, neither the baseline nor the token
+    # route is called, and the dataset carries no capacity rows.
+    trend_calls = 0
+    token_calls = 0
+    legacy = replace(
+        query,
+        metrics=("ai.tpm.peak", "ai.tpm.avg", "ai.machine.count", "ai.machine.used"),
+    )
+    legacy_result = await CubeConnector(
+        _config(), transport=httpx.MockTransport(handler)
+    ).query(legacy)
+    assert trend_calls == 1  # the target-hour usage job only
+    assert token_calls == 0
+    assert not [
+        row for row in legacy_result.rows if row["metric"] == "ai.machine.capacity"
+    ]
+    assert not [
+        row for row in legacy_result.rows if row["metric"] == "ai.usage.tokens"
+    ]
 
 
 def test_hourly_tpm_template_renders_cluster_inventory_table() -> None:
@@ -2432,13 +3243,21 @@ def test_markdown_renderer_shows_hourly_tpm_table_and_no_baseline_context() -> N
     )
 
     assert isinstance(rendered, str)
-    # GFM header row carries the six user-confirmed columns.
-    assert "| 客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器真实使用 |" in rendered
+    # Capacity mode (default): the GFM header carries the 冗余 column
+    # (user-directed 2026-10-10); without capacity rows the cell keeps the
+    # idle annotation.
+    assert "| 客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器冗余 |" in rendered
     assert "| --- | --- | --- | --- | --- | --- |" in rendered
-    # The data row splits allocation and usage; the idle flag stays in the
-    # usage column.
-    assert "| 佛跳墙 | Kimi-K3 | 900 | 600 | 42 | 40（闲2） |" in rendered
+    assert "| 佛跳墙 | Kimi-K3 | 900 | 600 | 42 | —（闲2） |" in rendered
     # The cluster inventory section renders as its own GFM table (idle
     # column right after the total, user-confirmed 2026-09-17).
     assert "| 集群 | 机器总数 | 空闲 | 生产 | 测试 | 开发 | 备用 |" in rendered
     assert "| cluster-a | 128 | 4 | 86 | 20 | 12 | 6 |" in rendered
+
+    legacy_rendered = document_to_markdown(
+        CubeCustomerModelHourlyTpmTemplate(
+            capacity_analysis_default=False
+        ).analyze((dataset,))
+    )
+    assert "| 客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器真实使用 |" in legacy_rendered
+    assert "| 佛跳墙 | Kimi-K3 | 900 | 600 | 42 | 40（闲2） |" in legacy_rendered

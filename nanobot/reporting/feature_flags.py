@@ -37,6 +37,13 @@ RUNTIME_FEATURE_FLAGS: "OrderedDict[str, dict[str, str]]" = OrderedDict(
         # group: 小时 TPM
         # (The hourly report/subscription family flags were retired to the
         # usage_customer_model_hourly_tpm template policy in phase 2d.)
+        # Capacity-redundancy analysis is a behavior switch inside the always-
+        # executed hourly template (user-approved 2026-10-10): off restores the
+        # legacy 机器真实使用 column and skips the daily 30-day baseline query.
+        (
+            "hourly_tpm_capacity_analysis",
+            {"label": "小时 TPM 冗余算力分析", "group": "小时 TPM"},
+        ),
         # group: 订阅
         (
             "cube_subscription",
