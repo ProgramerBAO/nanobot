@@ -45,6 +45,36 @@ def _structured_query(**values: object) -> dict[str, list[str]]:
     return _query(**{reporting_api._STRUCTURED_VALUES_KEY: json.dumps(values)})
 
 
+def test_report_router_modes_are_runtime_settings_with_audit(monkeypatch, tmp_path):
+    """Three-state page control is bounded, instant, and preserves permission gates."""
+    store = ReportStateStore(tmp_path / "router.db")
+    monkeypatch.setattr(reporting_api, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(reporting_api, "get_report_state_store", lambda *args, **kwargs: store)
+    audit = []
+    original_audit = store.record_admin_audit
+
+    def record_audit(**values):
+        # Preserve the real database write while asserting safe control-plane fields.
+        audit.append(values)
+        original_audit(**values)
+
+    monkeypatch.setattr(store, "record_admin_audit", record_audit)
+    for mode in ("off", "fallback", "primary"):
+        payload = reporting_api.reporting_settings_action("report_intent_router", _query(mode=mode))
+        assert payload["report_intent_router"]["mode"] == mode
+        assert store.setting("report_intent_router") == mode
+    with pytest.raises(reporting_api.ReportingSettingsError):
+        reporting_api.reporting_settings_action("report_intent_router", _query(mode="arbitrary"))
+    assert store.setting("report_intent_router") == "primary"
+    assert len(audit) == 3
+    assert audit[-1]["before_summary"] == {"mode": "fallback"}
+    assert audit[-1]["after_summary"] == {"mode": "primary"}
+    store.set_feature_flag("report_management_v1", False, updated_by="test")
+    with pytest.raises(reporting_api.ReportingSettingsError) as exc:
+        reporting_api.reporting_settings_action("report_intent_router", _query(mode="fallback"))
+    assert exc.value.status == 404
+
+
 def test_reporting_settings_fall_back_on_wrong_shape_startup_handle(
     monkeypatch, tmp_path
 ) -> None:

@@ -21,34 +21,34 @@
       "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "interactive": true}
     },
     {
-      "group": "hourly_tpm",
-      "tier": "paraphrase",
+      "group": "realtime",
+      "tier": "negative",
       "phrase": "现在佛跳墙的K3每分钟能跑多少token",
-      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "selected", "models": ["K3"], "interactive": false}
+      "expect": null
     },
     {
       "group": "hourly_tpm",
       "tier": "paraphrase",
       "phrase": "过去一小时佛跳墙全部模型的吞吐量怎么样",
-      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all"}
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all", "tenants": ["佛跳墙"]}
     },
     {
       "group": "hourly_tpm",
       "tier": "paraphrase",
       "phrase": "上一个钟头K3的TPM什么情况",
-      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h"}
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "models": ["K3"], "tenants": [], "interactive": true}
     },
     {
       "group": "hourly_tpm",
       "tier": "paraphrase",
       "phrase": "佛跳墙刚才那个小时Kimi-K3每分钟请求量多少",
-      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "selected", "models": ["Kimi-K3"]}
+      "expect": {"action": "report_parse_failed"}
     },
     {
       "group": "hourly_tpm",
       "tier": "paraphrase",
       "phrase": "帮我看看豆汁上个小时各模型TPM峰值",
-      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all"}
+      "expect": {"action": "customer_model_hourly_tpm", "period": "recent1h", "model_scope": "all", "tenants": ["豆汁"]}
     },
     {
       "group": "realtime",
@@ -115,7 +115,7 @@
       "group": "daily_brief",
       "tier": "paraphrase",
       "phrase": "昨天各个客户都用得怎么样",
-      "expect": {"action": "multi_scope_brief", "period": "day"}
+      "expect": {"action": "multi_scope_brief", "period": "day", "all_tenants": true}
     },
     {
       "group": "daily_brief",
@@ -151,13 +151,13 @@
       "group": "multi_scope_brief",
       "tier": "paraphrase",
       "phrase": "上周每个客户的模型用量对比一下",
-      "expect": {"action": "multi_scope_brief", "period": "week"}
+      "expect": {"action": "multi_scope_brief", "period": "week", "all_tenants": true}
     },
     {
       "group": "multi_scope_brief",
       "tier": "paraphrase",
       "phrase": "把三个大客户这个礼拜的用量按模型拆开看看",
-      "expect": {"action": "multi_scope_brief", "period": "week"}
+      "expect": {"action": "report_parse_failed"}
     },
     {
       "group": "machine_tpm",
@@ -223,7 +223,7 @@
       "group": "cost",
       "tier": "paraphrase",
       "phrase": "这个月账单多少了",
-      "expect": {"action": "cost_report", "period": "month"}
+      "expect": {"action": "report_parse_failed"}
     },
     {
       "group": "provider_quality",

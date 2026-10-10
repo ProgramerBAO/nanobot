@@ -8,8 +8,9 @@ both tools participate in) — so the corpus doubles as:
 - a **zero-regression gate** for canonical phrases and negatives (hard
   assertions, must pass now and forever);
 - a **pre-Phase-2 baseline** for paraphrases (``xfail(strict=False)``):
-  natural rewordings mostly miss every regex today, and each case flips to
-  XPASS→PASS when the unified intent router (Phase 2) lands;
+  natural rewordings mostly miss every regex today. This regex-only baseline
+  remains separate from Phase 2 provider-fixture dispatch tests and real-model
+  evaluation; mocked classification must not be presented as model accuracy;
 - a measurable **error-rate baseline**: ``test_routing_eval_baseline_report``
   prints, per group, how many paraphrases at least get claimed by some
   deterministic tier versus falling through to the unstructured LLM turn

@@ -1041,6 +1041,13 @@
       "permissions": {
         "rbacDescription": "Khi bật, kiểm tra quyền Connector, Template, khách hàng, mô hình và mẫu đăng ký."
       },
+      "router": {
+        "label": "Định tuyến báo cáo ngôn ngữ tự nhiên",
+        "off": "Tắt: giữ định tuyến hiện tại",
+        "fallback": "Bổ sung: phân loại yêu cầu chưa khớp",
+        "primary": "Ưu tiên: phân loại trước bộ so khớp cũ",
+        "description": "Có hiệu lực ngay. Máy chủ xác minh khách hàng, mô hình và quyền; yêu cầu chưa rõ cần làm rõ. TPM thời gian thực dùng Grafana."
+      },
       "flags": {
         "title": "Công tắc tính năng",
         "description": "Công tắc có hiệu lực ngay không cần khởi động lại gateway; giá trị ghi đè lưu trong cơ sở dữ liệu trạng thái báo cáo và được ghi nhận kiểm toán. Ngữ nghĩa tính toán, ngưỡng và kết nối mở rộng (Grafana/WeCom/DingTalk/TokenAPI chi phí) vẫn thuộc cấu hình triển khai, cần đổi tệp cấu hình và khởi động lại.",

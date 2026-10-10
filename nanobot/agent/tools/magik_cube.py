@@ -24,6 +24,7 @@ from pydantic import Field
 from nanobot.agent.reporting.cube_subscription_intent import (
     is_subscription_intent_candidate,
 )
+from nanobot.agent.reporting.intent_router import is_realtime_tpm
 from nanobot.agent.reporting.magik_cube_intent import (
     IntentCandidateStore,
     classify_report_intent,
@@ -3485,6 +3486,8 @@ class MagikCubeDailyReportTool(Tool):
         """把明确的中文用量问题直接路由为结构化参数，绕过一次 LLM tool 选择。"""
 
         raw = text.strip()
+        if is_realtime_tpm(raw):
+            return None
         # ReportCenter owns subscription parsing. Returning a usage report here
         # would silently discard customers from a natural-language schedule.
         if is_subscription_intent_candidate(raw):
@@ -3794,6 +3797,7 @@ class MagikCubeDailyReportTool(Tool):
             # into a narrowed daily-report intent when the new classifier is
             # disabled or unavailable.
             and not is_subscription_intent_candidate(text)
+            and not is_realtime_tpm(text)
             and is_report_intent_candidate(text)
         )
 

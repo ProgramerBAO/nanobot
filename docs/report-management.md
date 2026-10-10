@@ -1,5 +1,36 @@
 # Report platform 管理指南
 
+## 自然语言报表路由（Phase 2，默认关闭）
+
+进入「功能开关」页，使用「自然语言报表路由」下拉框：
+
+- 关闭（`off`）：沿用现有路由，不新增报表分类调用。
+- 补充识别（`fallback`）：固定匹配未命中时，复用会话模型分类一次。
+- 优先识别（`primary`）：明确报表/管理入口仍优先，新分类器只先于旧用量匹配器。
+
+保存进入 `report_settings.report_intent_router`，覆盖启动配置
+`tools.reporting.reportIntentRouter`，每次请求读取，无需重启；策略更新需现有
+WebUI 管理认证和 `report_management_v1` 开启，并记录安全的模式切换审计。
+非法模式拒绝保存，损坏的持久化值回落 `off`。部署新代码本身仍需正常重启。
+
+分类超时预算复用 `cubeSubscriptionNluTimeoutSeconds`（当前默认 3 秒），只调用
+一次，不作分类重试。无法识别或不支持的时间/范围提示用户补充信息，不把失败
+转成任意日报。实时 TPM 不进入此历史报表分类器，保持 Grafana agent 路径。
+
+### 发布门禁与回滚
+
+2026-10-10 初始 3 秒模型评测 0/5 超时。用户随后确认模型思考较久，决定
+本阶段先验收功能、暂不考核性能。评测脚本提供独立有限时间/token 预算（示例
+120 秒、8192 tokens），不改变线上默认路由或运行时配置。宽预算首轮 13/21，
+存在真实槽位错误；不应仅因延长等待就切主。继续按 `docs/development.md` 的
+真实分类 smoke 核对客户、模型与周期；Cube/Feishu 端到端验收仍需另做。
+
+Blast radius：开启后影响候选报表消息的分类，`primary` 另改变旧用量匹配的优先级；
+不改变 Cube 查询、权限或订阅确认边界。回滚：将模式改为 `off`（即时生效），
+保留记录，无数据库迁移。观察：分类超时/拒绝比例、`Report intent routing`
+模式与 outcome、原有 `Direct request route` 和 agent_turn 遥测、报表端到端延迟。
+完成真实分类、Cube 只读查询和测试群投递验收前，不扩大范围。
+
 ## 产品定位
 
 `Report platform` 是 Nanobot WebUI 内的报表控制面，供持有 Gateway/WebUI 管理 token 的管理员管理模板策略、功能开关、订阅计划和订阅授权。它不允许编辑模板代码、指标公式、Cube API 路径或凭据，也不替代 Feishu 用户侧报表查询。

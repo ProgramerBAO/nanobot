@@ -26,6 +26,12 @@ from nanobot.agent.reporting.cube_subscription_intent import (
     is_subscription_intent_candidate,
     parse_deterministic_subscription_intent,
 )
+from nanobot.agent.reporting.intent_router import (
+    classify_report_intent,
+    effective_router_mode,
+    is_realtime_tpm,
+    is_report_candidate,
+)
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import RequestContext, current_request_context
 from nanobot.agent.tools.magik_cube import effective_tenant_mappings
@@ -404,17 +410,55 @@ class ReportCenterTool(  # noqa: UP046
         return 1
 
     def is_direct_intent_candidate(self, text: str) -> bool:
-        """Use one schema-forced LLM call only for subscription-like language."""
+        """Offer one semantic fallback while keeping subscription preemption separate."""
 
-        return bool(
+        subscription = bool(
             (self._flag("cube_subscription_nlu_v2"))
             and self._flag("cube_subscription")
             and is_subscription_intent_candidate(text)
         )
+        return subscription or (
+            not is_subscription_intent_candidate(text)
+            and self.report_router_mode != "off" and is_report_candidate(text)
+        )
+
+    @property
+    def report_router_mode(self) -> str:
+        """Effective mode is read per turn so page updates require no restart."""
+        return effective_router_mode(self._store, self._config.report_intent_router)
+
+    @property
+    def direct_intent_priority(self) -> int:
+        """The unified router owns the fallback ahead of the legacy classifier."""
+        return 10
+
+    def prefer_semantic_direct_request(self, text: str) -> bool:
+        """Primary precedes only legacy matching; canonical center routes remain free."""
+        return (
+            self.report_router_mode == "primary"
+            and not is_subscription_intent_candidate(text)
+            and is_report_candidate(text)
+            and self.match_direct_request(text) is None
+        )
 
     async def classify_direct_request(self, text: str, runtime: Any) -> dict[str, Any] | None:
-        """Parse a direct subscription request without allowing the LLM to execute it."""
+        """Classify reports or subscription slots; execution stays server-owned."""
 
+        if not is_subscription_intent_candidate(text):
+            if self.report_router_mode == "off" or not is_report_candidate(text):
+                return None
+            draft = await classify_report_intent(
+                text, runtime,
+                timeout_seconds=self._config.cube_subscription_nlu_timeout_seconds,
+            )
+            if draft is None:
+                return {"action": "report_parse_failed"}
+            from zoneinfo import ZoneInfo
+
+            params = draft.compile(text, today=datetime.now(ZoneInfo(self._config.timezone)).date())
+            logger.info("Report intent routing: mode={} outcome={}", self.report_router_mode,
+                        params.get("action") if params else "agent_turn")
+            return params
         deterministic_intent = parse_deterministic_subscription_intent(text)
         if deterministic_intent is not None:
             logger.info("Cube subscription intent parsed deterministically: mode=direct")
@@ -519,6 +563,8 @@ class ReportCenterTool(  # noqa: UP046
 
     def match_direct_request(self, text: str) -> dict[str, Any] | None:
         raw = text.strip()
+        if is_realtime_tpm(raw):
+            return None
         subscription_control = _SUBSCRIPTION_CONTROL_RE.fullmatch(raw)
         if subscription_control:
             operation = "enable" if subscription_control.group("operation") == "启用" else "disable"
@@ -942,6 +988,11 @@ class ReportCenterTool(  # noqa: UP046
     ) -> Any:
         channel, chat_id, user_id, session_key, metadata = self._request_identity()
         self._store.prune_runs(self._config.run_retention_days)
+        if action == "report_parse_failed":
+            return ToolResult.error(
+                "未能可靠识别报表范围或统计周期。请明确客户、模型和日期，"
+                "或发送“报表中心”选择报表。当前周/月、实时值和请求 RPM 不会被替换成历史 TPM。"
+            )
         if action == "home":
             return self._result(
                 home_document(

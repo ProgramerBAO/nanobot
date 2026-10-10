@@ -40,6 +40,8 @@ _RETIRED_TEMPLATE_FLAG_FIELDS = frozenset(
 
 class ReportCenterToolConfig(Base):
     enable: bool = True
+    # Runtime page override wins; off preserves the existing route chain.
+    report_intent_router: Literal["off", "fallback", "primary"] = "off"
     # Cube is the only production report path in this phase; the Magik tool
     # remains a separate compatibility entry point when its own flag is on.
     cube_connector: bool = True
@@ -180,6 +182,7 @@ _REPORT_CENTER_PARAMETERS = {
             "type": "string",
             "enum": [
                 "home",
+                "report_parse_failed",
                 "cube_report",
                 "health_report",
                 "cost_report",

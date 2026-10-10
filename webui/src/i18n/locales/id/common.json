@@ -1041,6 +1041,13 @@
       "permissions": {
         "rbacDescription": "Saat diaktifkan, memvalidasi hibah Connector, Template, pelanggan, model, dan templat langganan."
       },
+      "router": {
+        "label": "Perutean laporan bahasa alami",
+        "off": "Nonaktif: pertahankan perutean saat ini",
+        "fallback": "Pelengkap: klasifikasikan permintaan yang tidak cocok",
+        "primary": "Utama: klasifikasikan sebelum pencocokan lama",
+        "description": "Berlaku segera. Server memvalidasi pelanggan, model, dan izin; permintaan yang tidak pasti memerlukan klarifikasi. TPM langsung menggunakan Grafana."
+      },
       "flags": {
         "title": "Saklar fitur",
         "description": "Saklar berlaku seketika tanpa memulai ulang gateway; nilai penimpa disimpan di basis data status laporan dan diaudit. Semantik perhitungan, ambang batas, dan konektor ekstensi (Grafana/WeCom/DingTalk/TokenAPI biaya) tetap merupakan konfigurasi penyebaran yang memerlukan perubahan konfigurasi dan mulai ulang.",

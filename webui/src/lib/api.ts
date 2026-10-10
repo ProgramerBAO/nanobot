@@ -653,6 +653,7 @@ export type ReportingSettingsAction =
   | "export"
   | "feature_flag"
   | "feature_flag_reset"
+  | "report_intent_router"
   | "template_policy"
   | "tenant_mappings_update"
   | "tenant_mappings_reset"

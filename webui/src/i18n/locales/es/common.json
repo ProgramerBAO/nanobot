@@ -1041,6 +1041,13 @@
       "permissions": {
         "rbacDescription": "Al habilitarlo, valida los permisos de Connector, Template, clientes, modelos y plantillas de suscripción."
       },
+      "router": {
+        "label": "Enrutamiento de informes en lenguaje natural",
+        "off": "Desactivado: conservar el enrutamiento actual",
+        "fallback": "Complementario: clasificar solicitudes no reconocidas",
+        "primary": "Prioritario: clasificar antes del uso heredado",
+        "description": "Se aplica inmediatamente. El servidor valida clientes, modelos y permisos; las solicitudes inciertas requieren aclaración. El TPM en vivo usa Grafana."
+      },
       "flags": {
         "title": "Interruptores de funciones",
         "description": "Los interruptores se aplican de inmediato sin reiniciar el gateway; los valores de anulación se guardan en la base de estado de informes y se auditan. La semántica de cálculo, los umbrales y los conectores de extensión (Grafana/WeCom/DingTalk/TokenAPI de costos) siguen siendo configuración de despliegue que requiere cambiar la configuración y reiniciar.",

@@ -267,6 +267,18 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
 
 ## Common File Locations
 
+- Report-chain Phase 2 (2026-10-10): `nanobot/agent/reporting/intent_router.py`
+  is a leaf module that classifies read-only semantic slots with one bounded
+  call to the session provider/model. `report_settings.report_intent_router`
+  overrides startup `reportIntentRouter`; page modes are off/fallback/primary,
+  default off pending real-model acceptance. Primary precedes only the legacy
+  usage matcher; exact report/admin routes and the subscription confirmation
+  chain remain authoritative. Never silently discard unsupported dates,
+  entities or filters; clarify instead. Realtime token-throughput phrasing
+  must bypass both report-center and legacy matchers. Mocked classification
+  tests are dispatch/schema evidence, not live model accuracy. Keep the
+  regex-only xfail baseline separate from `scripts/evaluate_report_intents.py`.
+
 - Config schema: `nanobot/config/schema.py`
 - Provider base / new provider template: `nanobot/providers/base.py`
 - Channel base / new channel template: `nanobot/channels/base.py`

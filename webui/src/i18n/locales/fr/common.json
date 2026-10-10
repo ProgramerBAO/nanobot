@@ -1041,6 +1041,13 @@
       "permissions": {
         "rbacDescription": "Une fois activé, valide les autorisations Connector, Template, clients, modèles et modèles d'abonnement."
       },
+      "router": {
+        "label": "Routage des rapports en langage naturel",
+        "off": "Désactivé : conserver le routage actuel",
+        "fallback": "Complément : classer les demandes non reconnues",
+        "primary": "Prioritaire : classer avant l'ancien routage d'usage",
+        "description": "Effet immédiat. Le serveur valide clients, modèles et permissions ; les demandes incertaines nécessitent une précision. Le TPM en direct utilise Grafana."
+      },
       "flags": {
         "title": "Interrupteurs de fonctionnalités",
         "description": "Les interrupteurs s'appliquent immédiatement sans redémarrage de la passerelle ; les valeurs de remplacement sont stockées dans la base d'état des rapports et auditées. La sémantique de calcul, les seuils et les connecteurs d'extension (Grafana/WeCom/DingTalk/TokenAPI de coûts) restent de la configuration de déploiement nécessitant une modification de configuration et un redémarrage.",

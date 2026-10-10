@@ -69,14 +69,26 @@ class ToolRegistry:
         """Resolve deterministic routes first, then at most one semantic fallback."""
 
         deterministic = self.match_direct_request(text)
-        if deterministic is not None:
+        # Primary may supersede the old usage matcher only. Admin, command
+        # and other tools' exact routes remain authoritative.
+        if deterministic is not None and deterministic[0] != "magik_cube_daily_report":
             return deterministic
-        if history:
+        if history and deterministic is None:
             for name, tool in self._tools.items():
                 params = tool.match_contextual_request(text, history)
                 if params is not None:
                     return name, params
         for name, tool in self._tools.items():
+            if tool.prefer_semantic_direct_request(text):
+                # A declined primary classification must reach the agent,
+                # never a second classifier or a conflicting legacy route.
+                params = await tool.classify_direct_request(text, runtime)
+                return (name, params) if params is not None else None
+        if deterministic is not None:
+            return deterministic
+        for name, tool in sorted(
+            self._tools.items(), key=lambda item: item[1].direct_intent_priority, reverse=True
+        ):
             if not tool.is_direct_intent_candidate(text):
                 continue
             params = await tool.classify_direct_request(text, runtime)

@@ -1580,7 +1580,9 @@ class AgentLoop:
                         direct_raw
                     )
                 )
-                is_subscription_candidate = subscription_signal or classifier_enabled
+                # ReportCenter now also classifies read-only reports. Only
+                # schedule signals may preempt the subscription/reference flow.
+                is_subscription_candidate = subscription_signal
                 if isinstance(parent_id, str) and parent_id and is_subscription_candidate:
                     # A quoted report is resolved from a server-side message
                     # reference. The model receives only a safe template/period
