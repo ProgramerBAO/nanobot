@@ -2727,7 +2727,7 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
     def _machine_columns(
         allocation: float | None,
         used: float | None,
-        redundant: int | None,
+        redundant: float | None,
         *,
         capacity_mode: bool,
     ) -> tuple[str, str, int]:
@@ -2738,11 +2738,13 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
         the usage column when allocation minus usage reaches one machine
         (2026-09-15). Capacity mode (user-directed 2026-10-10) replaces the
         usage column with ``机器冗余`` — allocation minus ⌈current-hour load
-        ÷ 30-day best per-machine throughput⌉ — while the idle tag stays as
-        the zero-usage subset of the redundancy; used machines remain
-        derivable as allocation − idle. Missing usage keeps the allocation
-        visible without guessing either value; negative differences
-        (machines removed after the hour) carry no tag.
+        ÷ 30-day best per-machine throughput⌉ — rendered per customer as the
+        token-share attributed estimate (single-customer models keep the
+        full integer value); the idle tag stays as the model-level
+        zero-usage subset; used machines remain derivable as allocation −
+        idle. Missing usage keeps the allocation visible without guessing
+        either value; negative differences (machines removed after the
+        hour) carry no tag.
         """
 
         if allocation is None:
@@ -2755,7 +2757,10 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             if redundant is None:
                 second_text = f"—{idle_tag}"
             else:
-                second_text = f"{redundant:.0f}{idle_tag}"
+                # Attributed values are fractional (token-share estimates):
+                # whole numbers render bare, fractions keep one decimal.
+                rounded = round(float(redundant), 1)
+                second_text = f"{rounded:g}{idle_tag}"
         else:
             second_text = f"{used:.0f}{idle_tag}"
         return f"{allocation:.0f}", second_text, idle if idle >= 1 else 0
@@ -2904,7 +2909,7 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             redundant_by_model[model] = result
             return result
 
-        # Tenant membership per model (for the proportional attribution table).
+        # Tenant membership per model (for the proportional attribution).
         tenants_by_model: dict[str, list[str]] = defaultdict(list)
         if isinstance(tenant_models, Mapping):
             for tenant_id, values in tenant_models.items():
@@ -2913,6 +2918,51 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     tenant_value = str(tenant_id).strip()
                     if name and tenant_value and tenant_value not in tenants_by_model[name]:
                         tenants_by_model[name].append(tenant_value)
+
+        def _model_token_shares(model: str) -> dict[str, float] | None:
+            """Token share per tenant for one model, or None when unavailable.
+
+            Multi-customer attribution is all-or-nothing (user-directed
+            2026-10-10): every report tenant of the model must have the
+            target-hour bucket, otherwise the split stays unavailable so a
+            lagging bucket can never hand the one tenant that reported its
+            share of the whole model total. Single-tenant models never
+            split and return None by design.
+            """
+            model_tenants = tenants_by_model.get(model) or []
+            if len(model_tenants) < 2:
+                return None
+            if not all((tenant, model) in token_by_scope for tenant in model_tenants):
+                return None
+            total = sum(token_by_scope[(tenant, model)] for tenant in model_tenants)
+            if total <= 0:
+                return None
+            return {
+                tenant: token_by_scope[(tenant, model)] / total
+                for tenant in model_tenants
+            }
+
+        def _customer_redundant(tenant_id: str, model: str) -> float | None:
+            """The 冗余 value rendered on one (customer, model) row.
+
+            User-directed 2026-10-10: the model detail column shows the
+            post-attribution estimate, not the platform model total —
+            single-customer models keep the full value, multi-customer
+            models split it by token share, and a zero-redundant model
+            renders 0 for everyone without needing token data.
+            """
+            model_redundant = _model_redundant(model)
+            if model_redundant is None:
+                return None
+            if model_redundant == 0:
+                return 0.0
+            model_tenants = tenants_by_model.get(model) or []
+            if len(model_tenants) < 2:
+                return float(model_redundant)
+            shares = _model_token_shares(model)
+            if shares is None or tenant_id not in shares:
+                return None
+            return shares[tenant_id] * model_redundant
 
         table_rows: list[dict[str, Any]] = []
         endpoint_detail_rows: list[dict[str, Any]] = []
@@ -2966,7 +3016,9 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                     avg_text = "多 Endpoint，不汇总"
                 else:
                     avg_text = _format_hourly_tpm(avgs[0])
-                redundant_value = _model_redundant(model) if capacity_on else None
+                redundant_value = (
+                    _customer_redundant(tenant_id, model) if capacity_on else None
+                )
                 allocated_text, machine_text, idle = self._machine_columns(
                     machine_by_model.get(model),
                     machine_used_by_model.get(model),
@@ -3235,34 +3287,29 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             # split the model-level redundant machines by each tenant's share
             # of the target hour's token volume. The share basis is tokens —
             # never avgTpm, which must not be aggregated across endpoints or
-            # customers. Values are estimates and labeled as such.
+            # customers. Shares come from the same all-or-nothing helper that
+            # feeds the model detail column, and the attributed values here
+            # always equal that column. Values are estimates and labeled as such.
             for model, model_tenants in sorted(tenants_by_model.items()):
                 if len(model_tenants) < 2:
                     continue
                 model_redundant = _model_redundant(model)
                 if model_redundant is None or model_redundant < 1:
                     continue
-                token_parts = {
-                    tenant_id: token_by_scope[(tenant_id, model)]
-                    for tenant_id in model_tenants
-                    if (tenant_id, model) in token_by_scope
-                }
-                if not token_parts:
-                    missing_token_models.add(model)
-                    continue
-                token_total = sum(token_parts.values())
-                if token_total <= 0:
+                shares = _model_token_shares(model)
+                if shares is None:
                     missing_token_models.add(model)
                     continue
                 for tenant_id in model_tenants:
-                    if tenant_id not in token_parts:
+                    if tenant_id not in shares:
                         continue
-                    share = token_parts[tenant_id] / token_total
+                    share = shares[tenant_id]
+                    attributed = share * model_redundant
                     attribution_rows.append({
                         "tenant": str(tenant_name_map.get(tenant_id, tenant_id) or tenant_id),
                         "model": model,
                         "share": f"{share * 100:.1f}%",
-                        "attributed": f"{share * model_redundant:.1f}",
+                        "attributed": f"{round(attributed, 1):g}",
                     })
         if attribution_rows:
             blocks.append(ReportBlock("table", {
@@ -3361,19 +3408,21 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                         f"无对比基准，时区 {self.timezone_name}。TPM 按客户与模型查询。"
                         + (
                             # Capacity mode (user-directed 2026-10-10): the second
-                            # machine column is 冗余, usage stays derivable as
-                            # 占用−闲.
+                            # machine column is the per-customer attributed
+                            # redundancy; usage stays derivable as 占用−闲.
                             "机器 = 占用/冗余（台）：占用为发送时的当前配置快照"
-                            "（model-machine-usage），冗余为估算值 = 占用 − ⌈当前小时负载 "
-                            "÷ 30 天最佳单机吞吐⌉（token 均值口径：tpmPerMachine = "
-                            "totalTokens ÷ 机器数 ÷ 60，按集群×卡型分组计算后求和），"
-                            "平台级、与客户无关；闲N = 占用−使用中，是冗余中整小时零使用"
-                            "的子集（零使用原因——备用/排水/故障——接口无法区分），"
+                            "（model-machine-usage），平台级、与客户无关、同一模型各行同值；"
+                            "冗余列为按客户折算的估算值 = 占用 − ⌈当前小时负载 ÷ 30 天"
+                            "最佳单机吞吐⌉（token 均值口径：tpmPerMachine = "
+                            "totalTokens ÷ 机器数 ÷ 60，按集群×卡型分组计算后求和）——"
+                            "单客户模型即模型全量，多客户模型按目标小时 token 占比分摊"
+                            "（任一客户 token 未出则整组显示 —，不做部分折算）；"
+                            "闲N = 占用−使用中，是冗余中整小时零使用的模型级子集"
+                            "（零使用原因——备用/排水/故障——接口无法区分），"
                             "在用但欠载机器为冗余其余部分；使用中机器数 = 占用−闲。"
                             "基准为当日首次运行计算的近 30 天窗口（每日缓存，"
-                            "基准不足 7 天不出数），需求>占用的分组冗余记 0。"
-                            "多客户模型折算按目标小时 token 占比（估算值），"
-                            "占比按已出小时 token 数据计算。"
+                            "基准不足 7 天不出数），需求>占用的分组冗余记 0；"
+                            "模型平台总量见副标题与冗余口径表。"
                             if capacity_on
                             # Legacy mode: unchanged wording (flag off must
                             # render identically to the 2.1 report).

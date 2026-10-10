@@ -2341,9 +2341,11 @@ def test_hourly_tpm_template_capacity_column_and_basis_table() -> None:
 
     # beast01: ceil(27,430,629.72 / 3,273,715.25) = 9 → 14−9 = 5 redundant;
     # beast02: ceil(13,376,192.47 / 3,235,092.09) = 5 → 20−5 = 15 redundant.
-    # Model total 20, idle = 34−32 = 2 → the cell keeps the idle subset tag.
+    # Model platform total 20, idle = 34−32 = 2. The model detail column
+    # shows the per-customer attributed values (user-directed 2026-10-10):
+    # 佛跳墙 2/3 → 13.3, 豆汁 1/3 → 6.7, each keeping the model idle tag.
     rows = document.blocks[0].data["rows"]
-    assert all(row["machine_redundant"] == "20（闲2）" for row in rows)
+    assert [row["machine_redundant"] for row in rows] == ["13.3（闲2）", "6.7（闲2）"]
     assert document.subtitle == (
         "09-13 10:00–11:00 · 2 客户 / 1 模型 · 冗余 20 台（闲 2 台）"
     )
@@ -2379,7 +2381,8 @@ def test_hourly_tpm_template_capacity_column_and_basis_table() -> None:
     ]
 
     # Plain-text fallback and the disclosure keep the capacity wording.
-    assert "机器占用 34 · 冗余 20（闲2）" in document.fallback_text
+    assert "机器占用 34 · 冗余 13.3（闲2）" in document.fallback_text
+    assert "机器占用 34 · 冗余 6.7（闲2）" in document.fallback_text
     note = document.blocks[-1]
     assert note.kind == "note"
     assert "机器 = 占用/冗余" in note.data["content"]
@@ -2506,8 +2509,10 @@ def test_hourly_tpm_template_capacity_edge_cases() -> None:
 
 
 def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
-    """Multi-tenant models without hourly token rows stay unattributed with an
-    explicit note; single-tenant models never enter the attribution table."""
+    """Multi-tenant models without complete hourly token rows stay
+    unattributed with an explicit note — all-or-nothing, so one lagging
+    bucket can never hand the reporting tenant the whole model total;
+    single-tenant models never enter the attribution table."""
 
     dataset = ReportDataset(
         rows=(
@@ -2536,6 +2541,22 @@ def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
                 "model": "Solo-K3", "endpoint": "ep-c", "tenant_id": "tenant-a",
             },
             {
+                "metric": "ai.tpm.peak", "value": 600.0,
+                "model": "Partial-K3", "endpoint": "ep-d", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.avg", "value": 300.0,
+                "model": "Partial-K3", "endpoint": "ep-d", "tenant_id": "tenant-a",
+            },
+            {
+                "metric": "ai.tpm.peak", "value": 500.0,
+                "model": "Partial-K3", "endpoint": "ep-e", "tenant_id": "tenant-b",
+            },
+            {
+                "metric": "ai.tpm.avg", "value": 200.0,
+                "model": "Partial-K3", "endpoint": "ep-e", "tenant_id": "tenant-b",
+            },
+            {
                 "metric": "ai.machine.count", "value": 10.0, "model": "Shared-K3",
                 "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
             },
@@ -2551,7 +2572,17 @@ def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
                 "metric": "ai.machine.used", "value": 6.0, "model": "Solo-K3",
                 "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
             },
-            # Both models have computable redundancy, but no token rows.
+            {
+                "metric": "ai.machine.count", "value": 8.0, "model": "Partial-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used", "value": 8.0, "model": "Partial-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            # All three models have computable redundancy. Shared-K3 has no
+            # token rows at all; Partial-K3 has a bucket for tenant-a only —
+            # both must render 暂不可用 for every tenant of the model.
             _capacity_row(
                 "Shared-K3", "beast01", "NVIDIA L20D",
                 capacity_best_tpm=1_000_000.0, capacity_baseline_days=30,
@@ -2564,14 +2595,26 @@ def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
                 capacity_current_tpm=2_000_000.0, capacity_allocated=6,
                 capacity_used_machines=6,
             ),
+            _capacity_row(
+                "Partial-K3", "beast01", "NVIDIA L20D",
+                capacity_best_tpm=1_000_000.0, capacity_baseline_days=30,
+                capacity_current_tpm=2_000_000.0, capacity_allocated=8,
+                capacity_used_machines=8,
+            ),
+            # tenant-a reports tokens for Partial-K3; tenant-b's bucket lagged.
+            {
+                "metric": "ai.usage.tokens", "value": 6000000000.0,
+                "model": "Partial-K3", "endpoint": "", "tenant_id": "tenant-a",
+                "aggregation": "hourly_tokens_total",
+            },
         ),
         quality="complete",
         warnings=(),
         source="magik_cube",
         metadata={
             "tenant_models": {
-                "tenant-a": ["Shared-K3", "Solo-K3"],
-                "tenant-b": ["Shared-K3"],
+                "tenant-a": ["Shared-K3", "Solo-K3", "Partial-K3"],
+                "tenant-b": ["Shared-K3", "Partial-K3"],
             },
             "tenant_names": {"tenant-a": "佛跳墙", "tenant-b": "豆汁"},
             "window_start": "2026-09-13T10:00:00+08:00",
@@ -2582,19 +2625,25 @@ def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
     document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
 
     machines = {
-        row["model"]: row["machine_redundant"]
+        (row["tenant"], row["model"]): row["machine_redundant"]
         for row in document.blocks[0].data["rows"]
     }
-    assert machines["Shared-K3"] == "8（闲6）"
-    assert machines["Solo-K3"] == "4"
-    # No attribution table at all — token data is missing for the only
-    # multi-tenant model.
+    # No token buckets at all: every row of the model renders 暂不可用.
+    assert machines[("佛跳墙", "Shared-K3")] == "—（闲6）"
+    assert machines[("豆汁", "Shared-K3")] == "—（闲6）"
+    # Single-tenant model: the full model value without any token query.
+    assert machines[("佛跳墙", "Solo-K3")] == "4"
+    # Partial token coverage is still all-or-nothing: tenant-a must not be
+    # handed the whole model total because tenant-b's bucket lagged.
+    assert machines[("佛跳墙", "Partial-K3")] == "—"
+    assert machines[("豆汁", "Partial-K3")] == "—"
+    # No attribution table at all — no multi-tenant model has complete tokens.
     assert not any(
         block.kind == "table" and "折算" in str(block.data.get("title", ""))
         for block in document.blocks
     )
     note = document.blocks[-1].data["content"]
-    assert "目标小时 token 数据未出，未做折算：Shared-K3" in note
+    assert "目标小时 token 数据未出，未做折算：Partial-K3、Shared-K3" in note
 
 
 def test_hourly_capacity_flag_store_override_and_registry_wiring() -> None:

@@ -129,9 +129,12 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   机器占用 | 机器冗余（闲N）, user-directed 2026-10-10, superseding the
   2026-09-16 真实使用 column; the flag-off fallback restores it). Idle =
   allocation minus usage, flagged as （闲N） inside the second machine column from one
-  machine difference; used machines stay derivable as 占用−闲. Both values are
-  platform-level and must never be attributed to a customer. A missing target-hour
-  point stays 暂不可用 with `partial` quality and must never be rendered as zero.
+  machine difference; used machines stay derivable as 占用−闲. 占用 stays
+  platform-level per model (never customer-attributed, same value on every row
+  of the model); the 冗余 column renders the per-customer attributed estimate
+  (see the capacity bullet below), so multi-customer models show different
+  values per customer row. A missing target-hour point stays 暂不可用 with
+  `partial` quality and must never be rendered as zero.
 - Hourly capacity analysis (user-approved 2026-10-10, flag
   `hourly_tpm_capacity_analysis` default ON with a WebUI 功能开关 toggle):
   机器冗余 = 占用 − ⌈当前小时负载 ÷ 30 天最佳单机吞吐⌉ on the token-average
@@ -150,16 +153,25 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   calendar day in `report_settings` (`hourly_capacity_baseline:<model>`); a
   failed refresh keeps the report complete. Baselines shorter than 7 days
   produce no redundancy number (—), and required > allocation clamps to 0.
-  Multi-customer models get a conditional attribution table splitting the
-  model-level redundant machines by each tenant's share of the target hour's
-  token volume (`active-tenant-daily-usage/query` with `TIME_LEVEL_HOUR`,
-  buckets labeled "YYYY-MM-DD HH" in the report timezone, totalTokens is a
-  string) — token share only, never avgTpm (cross-endpoint/customer aggregation
-  stays forbidden); single-tenant models never pay the token query. The
-  conditional basis table (模型 | 集群·卡型 | 单机最佳TPM(30d) | 当前单机TPM |
-  需求机器 | 占用机器 | 冗余机器) is the auditable math surface. 冗余/闲 are
-  estimates and must stay labeled as such; zero-usage causes (standby/drain/
-  fault) are indistinguishable upstream.
+  Multi-customer models split the model-level redundant machines by each
+  tenant's share of the target hour's token volume
+  (`active-tenant-daily-usage/query` with `TIME_LEVEL_HOUR`, buckets labeled
+  "YYYY-MM-DD HH" in the report timezone, totalTokens is a string) — token
+  share only, never avgTpm (cross-endpoint/customer aggregation stays
+  forbidden); single-tenant models never pay the token query. The MODEL
+  DETAIL column itself renders these attributed values (user-directed
+  2026-10-10): single-customer rows keep the full integer, multi-customer
+  rows carry their token-share estimate (one decimal, whole numbers bare),
+  and attribution is all-or-nothing per model — one missing tenant bucket
+  renders `—` for EVERY row of that model so a lagging bucket can never
+  hand the reporting tenant the whole model total; a zero-redundant model
+  renders 0 for everyone without token data. The conditional attribution
+  table (客户 | 模型 | Token 占比 | 折算冗余机器) reuses the same share
+  helper and must always equal the detail column. The conditional basis
+  table (模型 | 集群·卡型 | 单机最佳TPM(30d) | 当前单机TPM | 需求机器 |
+  占用机器 | 冗余机器) is the auditable platform-level math surface. 冗余/闲
+  are estimates and must stay labeled as such; zero-usage causes
+  (standby/drain/fault) are indistinguishable upstream.
 - The hourly card appends a seven-column cluster inventory table (集群 | 机器总数 |
   空闲 | 生产 | 测试 | 开发 | 备用, user-confirmed 2026-09-17 order with idle right
   after the total) from `analysis/machine-usage-summary/query` (POST
