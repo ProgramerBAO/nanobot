@@ -1,5 +1,21 @@
 # 技术债登记
 
+## TD-20261010-001 · MCP shutdown reconnect 基线失败
+
+- 位置：tests/agent/test_mcp_reconnect_crash.py::test_mcp_reconnect_during_shutdown_does_not_crash。
+- 类型：测试/依赖契约；原因：本轮扩大回归发现 mcp1.30.0 下 5s reconnect_started.wait 超时，在未修改 fa51367 基线上同命令复现。
+- 利息：影响 MCP 可靠性门禁可信度，不能据此声称全量通过；没有改变 timeout 或断言。
+- 偿还触发：下一次 MCP 可靠性专项或升级依赖之前；成本：半天至一天，核对 transport idle/reconnect 协议及 fixture。
+- owner：bot 管理者；deadline：试点部署前确认处置；证据由 Trail 本轮评审卡记录。
+
+## TD-20261010-002 · Trail 真实飞书与模型验收缺口
+
+- 位置：docs/TRAIL_INTEGRATION.md、独立部署 profile。
+- 类型：测试/运维；原因：部署 SHA、profile、本人 open_id、模型配置及专用Token尚未提供；不访问/改动既有 bot 私密配置。
+- 利息：SDK替身不能证明真实消息、模型建议、扫描周期与回滚行为，代码不能宣称生产可用。
+- 偿还触发：单人试点启用前；成本：半天联调+一个实际扫描周期观察。
+- owner：小沈/bot管理会话；deadline：试点启用前；验收：三类真实消息+追问+撤权+回滚健康检查，证据单独记录。
+
 按金融债管理：允许为交付速度主动借债，但必须登记、计息、按计划偿还；
 禁止无记录的隐性负债。每条含位置、类型、借债原因、风险与持续伤害（利息）、
 偿还触发条件、预计偿还成本。

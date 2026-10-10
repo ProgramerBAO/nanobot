@@ -1,0 +1,37 @@
+{
+  "agents": {"defaults": {"workspace": "${TRAIL_PILOT_WORKSPACE}"}},
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "${TRAIL_FEISHU_APP_ID}",
+      "appSecret": "${TRAIL_FEISHU_APP_SECRET}",
+      "allowFrom": ["${TRAIL_FEISHU_OPEN_ID}"]
+    }
+  },
+  "tools": {
+    "allowedTools": [
+      "mcp_trail_trail_projects",
+      "mcp_trail_trail_search_issues",
+      "mcp_trail_trail_issue",
+      "mcp_trail_trail_weekly_report",
+      "mcp_trail_trail_say_do"
+    ],
+    "mcpServers": {
+      "trail": {
+        "type": "stdio",
+        "command": "${TRAIL_PYTHON}",
+        "args": ["-m", "nanobot.integrations.trail.mcp_server"],
+        "toolTimeout": 15,
+        "enabledTools": ["trail_projects", "trail_search_issues", "trail_issue", "trail_weekly_report", "trail_say_do"],
+        "env": {
+          "TRAIL_BASE_URL": "${TRAIL_BASE_URL}",
+          "TRAIL_API_TOKEN": "${TRAIL_API_TOKEN}",
+          "TRAIL_SERVICE_USER_ID": "${TRAIL_SERVICE_USER_ID}",
+          "TRAIL_PROJECT_IDS": "${TRAIL_PROJECT_IDS}",
+          "TRAIL_CSI_PROJECT_ID": "${TRAIL_CSI_PROJECT_ID}",
+          "TRAIL_ALLOW_LOOPBACK": "${TRAIL_ALLOW_LOOPBACK}"
+        }
+      }
+    }
+  }
+}

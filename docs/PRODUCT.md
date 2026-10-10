@@ -1,5 +1,9 @@
 # Nanobot Cube 报表产品
 
+## 2026-10-10：可选 Trail 单人只读试点
+
+新增独立持久化接收器、三类模板提醒、五个只读 MCP 工具及三个 Trail skills；不依赖模型发送通知，不修改工单。单独 profile 明确绑定本人、普通服务账号和项目，exact allowedTools 阻止其他工具。既有 profile 默认行为保持。详见 [Trail 集成](TRAIL_INTEGRATION.md)。代码实现与真实部署分开：飞书收发、模型追问、扫描周期、回滚演练尚待验收，未改现有 bot 配置。
+
 > 使用者上手教程见 [USER_GUIDE.md](USER_GUIDE.md)（公司内部分发入口）；
 > 本文件是产品能力与数据口径的权威定义。
 
