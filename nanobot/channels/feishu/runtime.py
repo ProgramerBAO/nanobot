@@ -1251,10 +1251,14 @@ class FeishuChannel(BaseChannel):
         return text
 
     def _is_bot_mentioned(self, message: Any) -> bool:
-        """Check if the bot is @mentioned in the message."""
-        raw_content = message.content or ""
-        if "@_all" in raw_content:
-            return True
+        """Check if the bot is @mentioned in the message.
+
+        An @所有人 (at-all) mention is deliberately NOT a wake trigger
+        (user decision 2026-10-10): only an explicit @bot mention counts,
+        so group-wide announcements never summon the bot. Feishu marks
+        at-all with the ``@_all`` content placeholder and a mentions entry
+        whose id is the string "all" — neither equals the bot identity.
+        """
 
         for mention in getattr(message, "mentions", None) or []:
             if self._is_bot_mention_event(mention):

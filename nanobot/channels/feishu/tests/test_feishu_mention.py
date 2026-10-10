@@ -39,10 +39,26 @@ class TestIsBotMentioned:
         msg = _make_message(mentions=[_make_mention("ou_other_bot")])
         assert ch._is_bot_mentioned(msg) is False
 
-    def test_at_all_always_matches(self):
+    def test_at_all_placeholder_does_not_wake_bot(self):
+        # User decision 2026-10-10: @所有人 must not summon the bot. The
+        # legacy rule treated the "@_all" content placeholder as a bot
+        # mention and woke the bot on every group-wide announcement.
         ch = _make_channel(bot_open_id="ou_bot123")
         msg = _make_message(content="@_all hello")
-        assert ch._is_bot_mentioned(msg) is True
+        assert ch._is_bot_mentioned(msg) is False
+
+    def test_at_all_mentions_entry_does_not_wake_bot(self):
+        # Feishu's at-all mentions entry carries id "all", not an open_id
+        # object; it must never match the bot identity.
+        ch = _make_channel(bot_open_id="ou_bot123")
+        msg = _make_message(
+            mentions=[
+                _make_mention("ou_bot123"),
+                SimpleNamespace(id="all"),
+            ],
+            content="@_user_1 @_all hello",
+        )
+        assert ch._is_bot_mentioned(msg) is True  # the explicit @bot still wins
 
     def test_fallback_heuristic_when_no_bot_open_id(self):
         ch = _make_channel(bot_open_id=None)
