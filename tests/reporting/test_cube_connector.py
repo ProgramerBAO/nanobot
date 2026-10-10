@@ -1983,16 +1983,18 @@ def test_hourly_tpm_template_renders_customer_model_table() -> None:
     table_block = document.blocks[0]
     assert table_block.kind == "table"
     columns = table_block.data["columns"]
+    # Column order (user-directed 2026-10-10): the redundancy column leads
+    # right after the customer; allocation moves to the end.
     assert [column["name"] for column in columns] == [
-        "tenant", "model", "tpm_peak", "tpm_avg", "machine_allocated",
-        "machine_redundant",
+        "tenant", "machine_redundant", "model", "tpm_peak", "tpm_avg",
+        "machine_allocated",
     ]
     assert [column["display_name"] for column in columns] == [
-        "客户", "模型", "峰值", "均值", "机器占用", "机器冗余",
+        "客户", "机器冗余", "模型", "峰值", "均值", "机器占用",
     ]
     assert all(column.get("tag") == "column" for column in columns)
     assert table_block.data["headers"] == [
-        "客户", "模型", "峰值", "均值", "机器占用", "机器冗余",
+        "客户", "机器冗余", "模型", "峰值", "均值", "机器占用",
     ]
     # Feishu renders at most 20 rows per page.
     assert table_block.data["page_size"] == 20
@@ -2343,48 +2345,39 @@ def test_hourly_tpm_template_capacity_column_and_basis_table() -> None:
     # beast02: ceil(13,376,192.47 / 3,235,092.09) = 5 → 20−5 = 15 redundant.
     # Model platform total 20, idle = 34−32 = 2. The model detail column
     # shows the per-customer attributed values (user-directed 2026-10-10):
-    # 佛跳墙 2/3 → 13.3, 豆汁 1/3 → 6.7, each keeping the model idle tag.
+    # 佛跳墙 2/3 → 13.3, 豆汁 1/3 → 6.7, each with the ▲ emphasis marker
+    # (≥1 台) and the model-level idle tag.
     rows = document.blocks[0].data["rows"]
-    assert [row["machine_redundant"] for row in rows] == ["13.3（闲2）", "6.7（闲2）"]
+    assert [row["machine_redundant"] for row in rows] == ["▲13.3（闲2）", "▲6.7（闲2）"]
     assert document.subtitle == (
         "09-13 10:00–11:00 · 2 客户 / 1 模型 · 冗余 20 台（闲 2 台）"
     )
 
-    # Basis table: one row per (model, cluster, card) group with the compact
-    # TPM ladder, sorted by group key; multi-day-short baselines would append
-    # the day count (covered by the edge-case test).
-    basis_block = document.blocks[1]
-    assert basis_block.kind == "table"
-    assert basis_block.data["headers"] == [
-        "模型", "集群·卡型", "单机最佳TPM(30d)", "当前单机TPM",
-        "需求机器", "占用机器", "冗余机器",
-    ]
-    basis_rows = basis_block.data["rows"]
-    assert [
-        (row["cluster_gpu"], row["best"], row["current"], row["required"],
-         row["allocated"], row["redundant"])
-        for row in basis_rows
-    ] == [
-        ("beast01 · NVIDIA L20D", "3.27M", "2.29M", "9", "14", "5"),
-        ("beast02 · NVIDIA B30Z", "3.24M", "668.81K", "5", "20", "15"),
-    ]
+    # The basis and attribution data fold into the collapsed disclosure
+    # (user-directed 2026-10-10): one compact line per (model, cluster,
+    # card) group plus one line per attributed model, with the compact TPM
+    # ladder and explicit — for missing pieces.
+    folded_block = document.blocks[1]
+    assert folded_block.kind == "note"
+    assert folded_block.data["collapsed"] is True
+    folded_lines = folded_block.data["content"].splitlines()
+    assert folded_lines[0] == "【冗余口径与折算】"
+    assert "Kimi-K3 · beast01/NVIDIA L20D：最佳 3.27M · 当前 2.29M · 需求 9 / 占用 14 → 冗余 5" in folded_lines
+    assert "Kimi-K3 · beast02/NVIDIA B30Z：最佳 3.24M · 当前 668.81K · 需求 5 / 占用 20 → 冗余 15" in folded_lines
+    # Attribution line: token shares 2/3 and 1/3 of the 20 redundant machines,
+    # matching the detail column values.
+    assert (
+        "Kimi-K3 折算：佛跳墙 66.7% → 13.3 台 · 豆汁 33.3% → 6.7 台"
+        in folded_lines
+    )
 
-    # Attribution table: token shares 2/3 and 1/3 of the 20 redundant machines.
-    attribution_block = document.blocks[2]
-    assert attribution_block.kind == "table"
-    assert attribution_block.data["headers"] == [
-        "客户", "模型", "Token 占比", "折算冗余机器",
-    ]
-    assert attribution_block.data["rows"] == [
-        {"tenant": "佛跳墙", "model": "Kimi-K3", "share": "66.7%", "attributed": "13.3"},
-        {"tenant": "豆汁", "model": "Kimi-K3", "share": "33.3%", "attributed": "6.7"},
-    ]
-
-    # Plain-text fallback and the disclosure keep the capacity wording.
-    assert "机器占用 34 · 冗余 13.3（闲2）" in document.fallback_text
-    assert "机器占用 34 · 冗余 6.7（闲2）" in document.fallback_text
+    # The disclosure note stays the last block and carries context flags.
+    assert document.blocks[-1].kind == "note"
+    assert document.blocks[-1].data["include_context"] is True
+    assert "客户 佛跳墙" in document.fallback_text
+    assert "机器占用 34 · 冗余 ▲13.3（闲2）" in document.fallback_text
+    assert "机器占用 34 · 冗余 ▲6.7（闲2）" in document.fallback_text
     note = document.blocks[-1]
-    assert note.kind == "note"
     assert "机器 = 占用/冗余" in note.data["content"]
     assert "token 均值口径" in note.data["content"]
 
@@ -2485,27 +2478,34 @@ def test_hourly_tpm_template_capacity_edge_cases() -> None:
         for row in document.blocks[0].data["rows"]
     }
     # required 30 > allocated 12: redundancy clamps to 0 with no idle tag
-    # (usage equals allocation).
+    # (usage equals allocation) and no emphasis marker (below one machine).
     assert machines["Record-K3"] == "0"
-    # Zero usage: all 8 machines redundant and all 8 are the idle subset.
-    assert machines["Idle-K3"] == "8（闲8）"
+    # Zero usage: all 8 machines redundant and all 8 are the idle subset —
+    # the ▲ marker applies from one machine.
+    assert machines["Idle-K3"] == "▲8（闲8）"
     # Short baseline: no redundancy number, idle is 0 so the plain dash.
     assert machines["Fresh-K3"] == "—"
     # Partial coverage: 4 redundant from the complete group, idle 1 tagged.
-    assert machines["Mixed-K3"] == "4（闲1）"
+    assert machines["Mixed-K3"] == "▲4（闲1）"
     # Subtitle totals available redundancy (0 + 8 + 4) with the idle subset.
     assert document.subtitle.endswith("冗余 12 台（闲 9 台）")
 
     note = document.blocks[-1].data["content"]
     assert "1 个模型存在数据缺失的分组" in note
 
-    # The basis table renders the short-baseline day counts inline.
-    basis_rows = {
-        (row["model"], row["cluster_gpu"]): row
-        for row in document.blocks[1].data["rows"]
-    }
-    assert basis_rows[("Fresh-K3", "beast01 · NVIDIA L20D")]["best"] == "1M（6 天）"
-    assert basis_rows[("Mixed-K3", "beast02 · NVIDIA B30Z")]["redundant"] == "—"
+    # The folded basis lines carry the short-baseline day counts and keep
+    # unavailable group math as —.
+    folded_lines = document.blocks[1].data["content"].splitlines()
+    assert any(
+        line.startswith("Fresh-K3 · beast01/NVIDIA L20D：最佳 1M（6 天）")
+        and line.endswith("需求 — / 占用 5 → 冗余 —")
+        for line in folded_lines
+    )
+    assert any(
+        line.startswith("Mixed-K3 · beast02/NVIDIA B30Z：")
+        and line.endswith("需求 — / 占用 4 → 冗余 —")
+        for line in folded_lines
+    )
 
 
 def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
@@ -2628,22 +2628,91 @@ def test_hourly_tpm_template_attribution_skips_missing_token_data() -> None:
         (row["tenant"], row["model"]): row["machine_redundant"]
         for row in document.blocks[0].data["rows"]
     }
-    # No token buckets at all: every row of the model renders 暂不可用.
+    # No token buckets at all: every row of the model renders 暂不可用
+    # (no emphasis marker).
     assert machines[("佛跳墙", "Shared-K3")] == "—（闲6）"
     assert machines[("豆汁", "Shared-K3")] == "—（闲6）"
     # Single-tenant model: the full model value without any token query.
-    assert machines[("佛跳墙", "Solo-K3")] == "4"
+    assert machines[("佛跳墙", "Solo-K3")] == "▲4"
     # Partial token coverage is still all-or-nothing: tenant-a must not be
     # handed the whole model total because tenant-b's bucket lagged.
     assert machines[("佛跳墙", "Partial-K3")] == "—"
     assert machines[("豆汁", "Partial-K3")] == "—"
-    # No attribution table at all — no multi-tenant model has complete tokens.
+    # No attribution line at all — no multi-tenant model has complete tokens;
+    # the folded disclosure still carries the per-group basis lines.
+    folded = document.blocks[1]
+    assert folded.kind == "note"
+    assert folded.data["collapsed"] is True
     assert not any(
-        block.kind == "table" and "折算" in str(block.data.get("title", ""))
-        for block in document.blocks
+        "折算：" in line for line in folded.data["content"].splitlines()
     )
     note = document.blocks[-1].data["content"]
     assert "目标小时 token 数据未出，未做折算：Partial-K3、Shared-K3" in note
+
+
+def test_hourly_tpm_template_folds_endpoint_detail_in_capacity_mode() -> None:
+    """Endpoint detail folds into the disclosure in capacity mode; the
+    flag-off rollback keeps the visible table (user-directed 2026-10-10)."""
+
+    def tpm_row(metric: str, value: float, endpoint: str) -> dict[str, object]:
+        return {
+            "metric": metric,
+            "value": value,
+            "model": "Kimi-K3",
+            "endpoint": endpoint,
+            "tenant_id": "tenant-a",
+        }
+
+    dataset = ReportDataset(
+        rows=(
+            tpm_row("ai.tpm.peak", 900.0, "ep-a"),
+            tpm_row("ai.tpm.avg", 600.0, "ep-a"),
+            tpm_row("ai.tpm.peak", 800.0, "ep-b"),
+            tpm_row("ai.tpm.avg", 500.0, "ep-b"),
+            {
+                "metric": "ai.machine.count", "value": 5.0, "model": "Kimi-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+            {
+                "metric": "ai.machine.used", "value": 5.0, "model": "Kimi-K3",
+                "endpoint": "", "tenant_id": "", "metric_scope": "platform_model",
+            },
+        ),
+        quality="complete",
+        warnings=(),
+        source="magik_cube",
+        metadata={
+            "tenant_models": {"tenant-a": ["Kimi-K3"]},
+            "tenant_names": {"tenant-a": "佛跳墙"},
+            "window_start": "2026-09-13T10:00:00+08:00",
+            "window_end": "2026-09-13T11:00:00+08:00",
+        },
+    )
+
+    document = CubeCustomerModelHourlyTpmTemplate().analyze((dataset,))
+
+    # Capacity mode: the model detail table is the only visible table; the
+    # endpoint rows live in the folded disclosure.
+    tables = [block for block in document.blocks if block.kind == "table"]
+    assert len(tables) == 1
+    endpoint_note = next(
+        block
+        for block in document.blocks
+        if block.kind == "note" and "【Endpoint 明细】" in str(block.data.get("content"))
+    )
+    assert endpoint_note.data["collapsed"] is True
+    assert (
+        "佛跳墙 Kimi-K3：ep-a 峰值 900 / 均值 600；ep-b 峰值 800 / 均值 500"
+        in endpoint_note.data["content"].splitlines()
+    )
+
+    # Legacy rollback: the endpoint detail stays a visible table.
+    legacy = CubeCustomerModelHourlyTpmTemplate(
+        capacity_analysis_default=False
+    ).analyze((dataset,))
+    legacy_tables = [block for block in legacy.blocks if block.kind == "table"]
+    assert len(legacy_tables) == 2
+    assert legacy_tables[1].data["title"].startswith("Endpoint 明细")
 
 
 def test_hourly_capacity_flag_store_override_and_registry_wiring() -> None:
@@ -3292,12 +3361,12 @@ def test_markdown_renderer_shows_hourly_tpm_table_and_no_baseline_context() -> N
     )
 
     assert isinstance(rendered, str)
-    # Capacity mode (default): the GFM header carries the 冗余 column
-    # (user-directed 2026-10-10); without capacity rows the cell keeps the
-    # idle annotation.
-    assert "| 客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器冗余 |" in rendered
+    # Capacity mode (default): the GFM header carries the 冗余 column right
+    # after the customer (user-directed 2026-10-10); without capacity rows
+    # the cell keeps the idle annotation and no emphasis marker.
+    assert "| 客户 | 机器冗余 | 模型 | 峰值 | 均值 | 机器占用 |" in rendered
     assert "| --- | --- | --- | --- | --- | --- |" in rendered
-    assert "| 佛跳墙 | Kimi-K3 | 900 | 600 | 42 | —（闲2） |" in rendered
+    assert "| 佛跳墙 | —（闲2） | Kimi-K3 | 900 | 600 | 42 |" in rendered
     # The cluster inventory section renders as its own GFM table (idle
     # column right after the total, user-confirmed 2026-09-17).
     assert "| 集群 | 机器总数 | 空闲 | 生产 | 测试 | 开发 | 备用 |" in rendered

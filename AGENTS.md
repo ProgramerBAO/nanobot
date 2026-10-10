@@ -125,16 +125,24 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   `analysis/model-machine-usage/query` (current snapshot, quality-relevant) and
   actual usage from `analysis/machine-tpm-trend/query` (target-hour point-in-time,
   informational — a missing usage value must not downgrade quality). The data
-  section renders as a single six-column table (客户 | 模型 | 峰值 | 均值 |
-  机器占用 | 机器冗余（闲N）, user-directed 2026-10-10, superseding the
-  2026-09-16 真实使用 column; the flag-off fallback restores it). Idle =
-  allocation minus usage, flagged as （闲N） inside the second machine column from one
-  machine difference; used machines stay derivable as 占用−闲. 占用 stays
-  platform-level per model (never customer-attributed, same value on every row
-  of the model); the 冗余 column renders the per-customer attributed estimate
-  (see the capacity bullet below), so multi-customer models show different
-  values per customer row. A missing target-hour point stays 暂不可用 with
-  `partial` quality and must never be rendered as zero.
+  section renders as a single six-column table. Capacity mode (user-directed
+  2026-10-10): 客户 | 机器冗余 | 模型 | 峰值 | 均值 | 机器占用 — the attributed
+  redundancy leads right after the customer, allocation moves to the end, and
+  rows whose attributed redundancy reaches one machine carry the ▲ emphasis
+  marker (`_CAPACITY_REDUNDANT_MARKER`, a single constant). Legacy mode keeps
+  the 2026-09-16 order (客户 | 模型 | 峰值 | 均值 | 机器占用 | 机器真实使用)
+  as the flag-off rollback layout. Idle = allocation minus usage, flagged as
+  （闲N） inside the second machine column from one machine difference; used
+  machines stay derivable as 占用−闲. 占用 stays platform-level per model
+  (never customer-attributed, same value on every row of the model); the 冗余
+  column renders the per-customer attributed estimate (see the capacity bullet
+  below), so multi-customer models show different values per customer row. A
+  missing target-hour point stays 暂不可用 with `partial` quality and must
+  never be rendered as zero. Visible area discipline (user-directed
+  2026-10-10): only the model detail and cluster inventory tables render as
+  table cards; the capacity basis, attribution shares, and endpoint detail
+  fold into collapsed note lines (both renderers merge collapsed notes into
+  one disclosure, so each folded section carries a 【heading】 line).
 - Hourly capacity analysis (user-approved 2026-10-10, flag
   `hourly_tpm_capacity_analysis` default ON with a WebUI 功能开关 toggle):
   机器冗余 = 占用 − ⌈当前小时负载 ÷ 30 天最佳单机吞吐⌉ on the token-average
@@ -165,13 +173,13 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
   and attribution is all-or-nothing per model — one missing tenant bucket
   renders `—` for EVERY row of that model so a lagging bucket can never
   hand the reporting tenant the whole model total; a zero-redundant model
-  renders 0 for everyone without token data. The conditional attribution
-  table (客户 | 模型 | Token 占比 | 折算冗余机器) reuses the same share
-  helper and must always equal the detail column. The conditional basis
-  table (模型 | 集群·卡型 | 单机最佳TPM(30d) | 当前单机TPM | 需求机器 |
-  占用机器 | 冗余机器) is the auditable platform-level math surface. 冗余/闲
-  are estimates and must stay labeled as such; zero-usage causes
-  (standby/drain/fault) are indistinguishable upstream.
+  renders 0 for everyone without token data. The basis math and attribution
+  shares fold into the collapsed disclosure as compact text lines
+  (`模型 · 集群/卡型：最佳 X · 当前 Y · 需求 N / 占用 M → 冗余 K` and
+  `模型 折算：客户A 66.7% → 13.3 台 · …`), NOT table cards — missing pieces
+  stay — so the numbers remain auditable without occupying the visible
+  area. 冗余/闲 are estimates and must stay labeled as such; zero-usage
+  causes (standby/drain/fault) are indistinguishable upstream.
 - The hourly card appends a seven-column cluster inventory table (集群 | 机器总数 |
   空闲 | 生产 | 测试 | 开发 | 备用, user-confirmed 2026-09-17 order with idle right
   after the total) from `analysis/machine-usage-summary/query` (POST

@@ -131,6 +131,10 @@ _ALLOWED_FILTERS = frozenset(
 _CAPACITY_BASELINE_WINDOW_DAYS = 30
 _CAPACITY_MIN_BASELINE_DAYS = 7
 _CAPACITY_BASELINE_KEY_PREFIX = "hourly_capacity_baseline:"
+# Redundancy emphasis marker (user-directed 2026-10-10): model detail rows
+# whose attributed redundancy reaches one machine carry this prefix. A single
+# constant so the glyph can be swapped in one place.
+_CAPACITY_REDUNDANT_MARKER = "▲"
 # model-machine-usage reports gpuProduct with hyphens ("NVIDIA-B30Z") while
 # machine-tpm-trend uses spaces ("NVIDIA B30Z") — live-verified 2026-10-10.
 # Group joins collapse separator/case differences; the raw trend value stays
@@ -2758,9 +2762,12 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 second_text = f"—{idle_tag}"
             else:
                 # Attributed values are fractional (token-share estimates):
-                # whole numbers render bare, fractions keep one decimal.
+                # whole numbers render bare, fractions keep one decimal, and
+                # rows whose redundancy reaches one machine lead with the
+                # emphasis marker (user-directed 2026-10-10).
                 rounded = round(float(redundant), 1)
-                second_text = f"{rounded:g}{idle_tag}"
+                marker = _CAPACITY_REDUNDANT_MARKER if redundant >= 1 else ""
+                second_text = f"{marker}{rounded:g}{idle_tag}"
         else:
             second_text = f"{used:.0f}{idle_tag}"
         return f"{allocation:.0f}", second_text, idle if idle >= 1 else 0
@@ -3195,41 +3202,65 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
             quality_reasons=dataset.warnings,
             template_version=self.manifest.version,
         )
-        # Main data section: one flat table with customer and model columns
-        # (user-confirmed 2026-09-16 layout; the machine column set follows
-        # the capacity flag, user-directed 2026-10-10). The platform-level
-        # machine sources render as dedicated columns; idle stays tagged
-        # inside the second machine column and feeds the subtitle total.
+        # Main data section: one flat table with customer and model columns.
+        # Capacity mode (user-directed 2026-10-10): the attributed redundancy
+        # leads right after the customer — it is the headline number — and
+        # allocation moves to the end. Legacy mode keeps the 2026-09-16 order.
         machine_column_name = "machine_redundant" if capacity_on else "machine_used"
         machine_column_label = "机器冗余" if capacity_on else "机器真实使用"
+        if capacity_on:
+            detail_columns = [
+                {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
+                {
+                    "tag": "column",
+                    "name": machine_column_name,
+                    "display_name": machine_column_label,
+                    "data_type": "text",
+                },
+                {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
+                {"tag": "column", "name": "tpm_peak", "display_name": "峰值", "data_type": "text"},
+                {"tag": "column", "name": "tpm_avg", "display_name": "均值", "data_type": "text"},
+                {"tag": "column", "name": "machine_allocated", "display_name": "机器占用", "data_type": "text"},
+            ]
+            detail_headers = ["客户", machine_column_label, "模型", "峰值", "均值", "机器占用"]
+        else:
+            detail_columns = [
+                {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
+                {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
+                {"tag": "column", "name": "tpm_peak", "display_name": "峰值", "data_type": "text"},
+                {"tag": "column", "name": "tpm_avg", "display_name": "均值", "data_type": "text"},
+                {"tag": "column", "name": "machine_allocated", "display_name": "机器占用", "data_type": "text"},
+                {
+                    "tag": "column",
+                    "name": machine_column_name,
+                    "display_name": machine_column_label,
+                    "data_type": "text",
+                },
+            ]
+            detail_headers = ["客户", "模型", "峰值", "均值", "机器占用", machine_column_label]
         blocks: list[ReportBlock] = [
             ReportBlock("table", {
                 "title": "模型明细",
-                "columns": [
-                    {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
-                    {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
-                    {"tag": "column", "name": "tpm_peak", "display_name": "峰值", "data_type": "text"},
-                    {"tag": "column", "name": "tpm_avg", "display_name": "均值", "data_type": "text"},
-                    {"tag": "column", "name": "machine_allocated", "display_name": "机器占用", "data_type": "text"},
-                    {
-                        "tag": "column",
-                        "name": machine_column_name,
-                        "display_name": machine_column_label,
-                        "data_type": "text",
-                    },
-                ],
-                "headers": ["客户", "模型", "峰值", "均值", "机器占用", machine_column_label],
+                "columns": detail_columns,
+                "headers": detail_headers,
                 "rows": table_rows,
                 "page_size": 20,
             }),
         ]
+        # Folded capacity sections (user-directed 2026-10-10): the basis and
+        # attribution data become collapsed note lines instead of table cards
+        # so the visible area keeps only the model detail and cluster
+        # inventory tables. Both renderers merge collapsed notes into one
+        # disclosure, so each section carries a 【heading】 line inside.
+        capacity_note_lines: list[str] = []
+        attribution_note_lines: list[str] = []
+        missing_token_models: set[str] = set()
         if capacity_on and capacity_groups:
-            # Basis table (2026-10-10): the auditable per-group math behind the
-            # 机器冗余 column — best per-machine throughput over the cached
-            # 30-day window, current-hour per-machine throughput, and the
-            # derived required/allocation/redundant machine counts. Missing
-            # pieces render as — so the basis never invents numbers.
-            capacity_table_rows: list[dict[str, Any]] = []
+            # The auditable per-group math behind the 机器冗余 column — best
+            # per-machine throughput over the cached 30-day window, the
+            # current-hour per-machine throughput, and the derived
+            # required/allocation/redundant counts. Missing pieces render as
+            # — so the basis never invents numbers.
             for (cap_model, cap_cluster, _cap_gpu), group in sorted(
                 capacity_groups.items()
             ):
@@ -3241,46 +3272,24 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 gpu_display = str(group.get("capacity_gpu_display") or "")
                 cluster_label = cap_cluster or "未命名集群"
                 group_label = (
-                    f"{cluster_label} · {gpu_display}" if gpu_display else cluster_label
+                    f"{cluster_label}/{gpu_display}" if gpu_display else cluster_label
                 )
                 best_text = "—"
                 if isinstance(best, (int, float)):
                     best_text = _format_hourly_tpm(best)
                     if isinstance(days, int) and days < _CAPACITY_BASELINE_WINDOW_DAYS:
                         best_text += f"（{days} 天）"
-                capacity_table_rows.append({
-                    "model": cap_model,
-                    "cluster_gpu": group_label,
-                    "best": best_text,
-                    "current": (
+                capacity_note_lines.append(
+                    f"{cap_model} · {group_label}：最佳 {best_text} · 当前 "
+                    + (
                         _format_hourly_tpm(per_machine)
                         if isinstance(per_machine, (int, float))
                         else "—"
-                    ),
-                    "required": str(required) if required is not None else "—",
-                    "allocated": str(allocated) if isinstance(allocated, int) else "—",
-                    "redundant": str(redundant_value) if redundant_value is not None else "—",
-                })
-            blocks.append(ReportBlock("table", {
-                "title": "冗余口径：单机最佳 TPM 为近 30 天逐小时 tpmPerMachine 峰值",
-                "columns": [
-                    {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
-                    {"tag": "column", "name": "cluster_gpu", "display_name": "集群·卡型", "data_type": "text"},
-                    {"tag": "column", "name": "best", "display_name": "单机最佳TPM(30d)", "data_type": "text"},
-                    {"tag": "column", "name": "current", "display_name": "当前单机TPM", "data_type": "text"},
-                    {"tag": "column", "name": "required", "display_name": "需求机器", "data_type": "text"},
-                    {"tag": "column", "name": "allocated", "display_name": "占用机器", "data_type": "text"},
-                    {"tag": "column", "name": "redundant", "display_name": "冗余机器", "data_type": "text"},
-                ],
-                "headers": [
-                    "模型", "集群·卡型", "单机最佳TPM(30d)", "当前单机TPM",
-                    "需求机器", "占用机器", "冗余机器",
-                ],
-                "rows": capacity_table_rows,
-                "page_size": 20,
-            }))
-        attribution_rows: list[dict[str, Any]] = []
-        missing_token_models: set[str] = set()
+                    )
+                    + f" · 需求 {required if required is not None else '—'}"
+                    f" / 占用 {allocated if isinstance(allocated, int) else '—'}"
+                    f" → 冗余 {redundant_value if redundant_value is not None else '—'}"
+                )
         if capacity_on:
             # Proportional attribution (user-confirmed 2026-10-10): for models
             # shared by multiple report tenants with a computable redundancy,
@@ -3300,31 +3309,24 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 if shares is None:
                     missing_token_models.add(model)
                     continue
+                parts: list[str] = []
                 for tenant_id in model_tenants:
                     if tenant_id not in shares:
                         continue
                     share = shares[tenant_id]
                     attributed = share * model_redundant
-                    attribution_rows.append({
-                        "tenant": str(tenant_name_map.get(tenant_id, tenant_id) or tenant_id),
-                        "model": model,
-                        "share": f"{share * 100:.1f}%",
-                        "attributed": f"{round(attributed, 1):g}",
-                    })
-        if attribution_rows:
-            blocks.append(ReportBlock("table", {
-                "title": "冗余折算：多客户模型按目标小时 Token 占比分摊（估算）",
-                "columns": [
-                    {"tag": "column", "name": "tenant", "display_name": "客户", "data_type": "text"},
-                    {"tag": "column", "name": "model", "display_name": "模型", "data_type": "text"},
-                    {"tag": "column", "name": "share", "display_name": "Token 占比", "data_type": "text"},
-                    {"tag": "column", "name": "attributed", "display_name": "折算冗余机器", "data_type": "text"},
-                ],
-                "headers": ["客户", "模型", "Token 占比", "折算冗余机器"],
-                "rows": attribution_rows,
-                "page_size": 20,
-            }))
-        if endpoint_detail_rows:
+                    tenant_label = str(
+                        tenant_name_map.get(tenant_id, tenant_id) or tenant_id
+                    )
+                    parts.append(
+                        f"{tenant_label} {share * 100:.1f}% → {round(attributed, 1):g} 台"
+                    )
+                if parts:
+                    attribution_note_lines.append(f"{model} 折算：" + " · ".join(parts))
+        # Capacity mode folds the endpoint detail into the disclosure too;
+        # legacy keeps the visible table (the flag-off rollback layout).
+        endpoint_note_lines: list[str] = []
+        if endpoint_detail_rows and not capacity_on:
             blocks.append(ReportBlock("table", {
                 "title": "Endpoint 明细：多 Endpoint 模型不汇总均值",
                 "columns": [
@@ -3338,6 +3340,18 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 "rows": endpoint_detail_rows,
                 "page_size": 20,
             }))
+        elif endpoint_detail_rows:
+            grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+            for row in endpoint_detail_rows:
+                grouped[(str(row["tenant"]), str(row["model"]))].append(row)
+            for (tenant_label, model), rows_group in sorted(grouped.items()):
+                parts = [
+                    f"{row['endpoint']} 峰值 {row['tpm_peak']} / 均值 {row['tpm_avg']}"
+                    for row in rows_group
+                ]
+                endpoint_note_lines.append(
+                    f"{tenant_label} {model}：" + "；".join(parts)
+                )
         # Cluster inventory section (user-confirmed 2026-09-16): a compact
         # platform-level snapshot table appended after the model sections.
         # Production machines are derived here as total minus the other
@@ -3399,6 +3413,37 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                 "rows": inventory_table_rows,
                 "page_size": 20,
             }))
+        if capacity_note_lines or attribution_note_lines:
+            blocks.append(
+                ReportBlock(
+                    "note",
+                    {
+                        "content": (
+                            "【冗余口径与折算】\n"
+                            + "\n".join(capacity_note_lines + attribution_note_lines)
+                        ),
+                        "collapsed": True,
+                        "collapsed_label": "冗余口径与折算（估算，默认收起）",
+                        "include_context": False,
+                        "include_warnings": False,
+                    },
+                )
+            )
+        if endpoint_note_lines:
+            blocks.append(
+                ReportBlock(
+                    "note",
+                    {
+                        "content": (
+                            "【Endpoint 明细】\n" + "\n".join(endpoint_note_lines)
+                        ),
+                        "collapsed": True,
+                        "collapsed_label": "Endpoint 明细（默认收起）",
+                        "include_context": False,
+                        "include_warnings": False,
+                    },
+                )
+            )
         blocks.append(
             ReportBlock(
                 "note",
@@ -3436,7 +3481,7 @@ class CubeCustomerModelHourlyTpmTemplate(TemplatePlugin):
                         "（machine-usage-summary）：生产 = 机器总数 − 测试 − 开发 − 备用 − 空闲，"
                         "集群级空闲与模型级（闲N）/副标题机器空闲口径不同、互不换算。"
                         + (
-                            f"冗余口径表中 {len(partial_baseline_models)} 个模型存在数据缺失的分组，"
+                            f"冗余口径折叠区中 {len(partial_baseline_models)} 个模型存在数据缺失的分组，"
                             "冗余按可用分组计算。"
                             if capacity_on and partial_baseline_models
                             else ""
